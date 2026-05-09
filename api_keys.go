@@ -47,12 +47,12 @@ func (s *APIKeyService) Create(ctx context.Context, store APIKeyStore, name, ser
 		return "", APIKeyRecord{}, err
 	}
 	rawBody = apiKeyBodySanitizer.ReplaceAllString(rawBody, "")
-	if len(rawBody) < 48 {
-		fallback, ferr := randomToken(40)
+	for len(rawBody) < 48 {
+		fallback, ferr := randomToken(48)
 		if ferr != nil {
 			return "", APIKeyRecord{}, ferr
 		}
-		rawBody = apiKeyBodySanitizer.ReplaceAllString(fallback, "")
+		rawBody += apiKeyBodySanitizer.ReplaceAllString(fallback, "")
 	}
 	if len(rawBody) < 48 {
 		return "", APIKeyRecord{}, errors.New("auth: api key entropy generation failed")
