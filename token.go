@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -36,7 +37,26 @@ func (s *Service) issueToken(user User, sessionID, tokenType string, ttl time.Du
 		Exp: expiresAt.Unix(),
 	}
 
-	raw, err := json.Marshal(claims)
+	payloadClaims := map[string]any{
+		"sub": claims.Sub,
+		"sid": claims.Sid,
+		"tid": claims.Tid,
+		"jti": claims.Jti,
+		"typ": claims.Typ,
+		"iss": claims.Iss,
+		"iat": claims.Iat,
+		"exp": claims.Exp,
+	}
+	if s.cfg.BuildTokenClaims != nil {
+		customClaims, err := s.cfg.BuildTokenClaims(context.Background(), user)
+		if err != nil {
+			return "", time.Time{}, fmt.Errorf("auth: build token claims: %w", err)
+		}
+		for key, value := range customClaims {
+			payloadClaims[key] = value
+		}
+	}
+	raw, err := json.Marshal(payloadClaims)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("auth: marshal claims: %w", err)
 	}

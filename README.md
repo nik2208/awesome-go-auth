@@ -53,6 +53,10 @@ func main() {
 - TOTP 2FA (`SetupTOTP`, `VerifyTOTPSetup`, `VerifyTOTP`, `DisableTOTP`).
 - Email verification (`SendVerificationEmailToken`, `VerifyEmail`) e cambio email (`RequestEmailChange`, `ConfirmEmailChange`).
 - Session admin helpers (`ListSessions`, `RevokeSessionByID`, `CleanupExpiredSessions`).
+- User metadata store + helper di service.
+- RBAC multi-tenant in-memory (`MemoryRolesPermissionsStore`) con ruoli e permessi.
+- Tenant store in-memory (`MemoryTenantStore`) con membership utente↔tenant.
+- Custom token claims via `Config.BuildTokenClaims`, replicate anche nel profilo arricchito.
 - API key service + middleware HTTP (`APIKeyService`, `APIKeyMiddleware`).
 - Event bus in-process (`EventBus`) per integrazioni event-driven.
 - Interfacce storage estese + implementazioni in-memory thread-safe per i flussi sopra.

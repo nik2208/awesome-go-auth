@@ -27,8 +27,22 @@ type User struct {
 	PendingEmail                 string
 	EmailChangeTokenHash         string
 	EmailChangeTokenExpiry       *time.Time
+	Metadata                     map[string]any
+	Roles                        []string
+	Permissions                  []string
+	Tenants                      []Tenant
+	CustomClaims                 map[string]any
 	CreatedAt                    time.Time
 	UpdatedAt                    time.Time
+}
+
+// Tenant represents an isolated workspace or organization.
+type Tenant struct {
+	ID        string
+	Name      string
+	IsActive  bool
+	Config    map[string]any
+	CreatedAt time.Time
 }
 
 // Session stores refresh-token bound session metadata.

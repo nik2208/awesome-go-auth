@@ -68,3 +68,37 @@ type SessionAdminStore interface {
 	RevokeSessionByID(ctx context.Context, sessionID string) error
 	DeleteExpiredSessions(ctx context.Context, now time.Time) (int, error)
 }
+
+// UserMetadataStore manages arbitrary key/value user metadata.
+type UserMetadataStore interface {
+	GetMetadata(ctx context.Context, userID string) (map[string]any, error)
+	UpdateMetadata(ctx context.Context, userID string, metadata map[string]any) error
+	ClearMetadata(ctx context.Context, userID string) error
+}
+
+// RolesPermissionsStore manages RBAC assignments and permissions.
+type RolesPermissionsStore interface {
+	AddRoleToUser(ctx context.Context, userID, role string, tenantID string) error
+	RemoveRoleFromUser(ctx context.Context, userID, role string, tenantID string) error
+	GetRolesForUser(ctx context.Context, userID, tenantID string) ([]string, error)
+	CreateRole(ctx context.Context, role string, permissions []string) error
+	DeleteRole(ctx context.Context, role string) error
+	AddPermissionToRole(ctx context.Context, role, permission string) error
+	RemovePermissionFromRole(ctx context.Context, role, permission string) error
+	GetPermissionsForRole(ctx context.Context, role string) ([]string, error)
+	GetPermissionsForUser(ctx context.Context, userID, tenantID string) ([]string, error)
+	UserHasPermission(ctx context.Context, userID, permission, tenantID string) (bool, error)
+}
+
+// TenantStore manages tenants and user memberships.
+type TenantStore interface {
+	CreateTenant(ctx context.Context, tenant Tenant) (Tenant, error)
+	GetTenantByID(ctx context.Context, id string) (Tenant, error)
+	GetAllTenants(ctx context.Context) ([]Tenant, error)
+	UpdateTenant(ctx context.Context, id string, update Tenant) error
+	DeleteTenant(ctx context.Context, id string) error
+	AssociateUserWithTenant(ctx context.Context, userID, tenantID string) error
+	DisassociateUserFromTenant(ctx context.Context, userID, tenantID string) error
+	GetTenantsForUser(ctx context.Context, userID string) ([]Tenant, error)
+	GetUsersForTenant(ctx context.Context, tenantID string) ([]string, error)
+}

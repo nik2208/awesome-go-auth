@@ -13,23 +13,46 @@ type Service struct {
 	cfg      Config
 	users    UserStore
 	sessions SessionStore
+	metadata UserMetadataStore
+	rbac     RolesPermissionsStore
+	tenants  TenantStore
 	now      func() time.Time
 }
 
+type ServiceOption func(*Service)
+
+func WithMetadataStore(store UserMetadataStore) ServiceOption {
+	return func(s *Service) { s.metadata = store }
+}
+
+func WithRolesPermissionsStore(store RolesPermissionsStore) ServiceOption {
+	return func(s *Service) { s.rbac = store }
+}
+
+func WithTenantStore(store TenantStore) ServiceOption {
+	return func(s *Service) { s.tenants = store }
+}
+
 // NewService builds an auth service with validated configuration.
-func NewService(cfg Config, users UserStore, sessions SessionStore) (*Service, error) {
+func NewService(cfg Config, users UserStore, sessions SessionStore, opts ...ServiceOption) (*Service, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	if users == nil || sessions == nil {
 		return nil, errors.New("auth: stores are required")
 	}
-	return &Service{
+	svc := &Service{
 		cfg:      cfg,
 		users:    users,
 		sessions: sessions,
 		now:      time.Now,
-	}, nil
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(svc)
+		}
+	}
+	return svc, nil
 }
 
 func normalizeEmail(email string) string {
@@ -166,7 +189,7 @@ func (s *Service) Me(ctx context.Context, accessToken string) (User, error) {
 	if err != nil {
 		return User{}, ErrInvalidToken
 	}
-	return user, nil
+	return s.enrichUser(ctx, user)
 }
 
 func (s *Service) newSessionTokens(ctx context.Context, user User) (AuthTokens, error) {
@@ -457,6 +480,65 @@ func (s *Service) VerifyTOTP(ctx context.Context, userID, tenantID, code string)
 	return user, tokens, nil
 }
 
+func (s *Service) GetMetadata(ctx context.Context, userID string) (map[string]any, error) {
+	if s.metadata == nil {
+		return nil, ErrFeatureNotSupported
+	}
+	return s.metadata.GetMetadata(ctx, userID)
+}
+
+func (s *Service) UpdateMetadata(ctx context.Context, userID string, metadata map[string]any) error {
+	if s.metadata == nil {
+		return ErrFeatureNotSupported
+	}
+	return s.metadata.UpdateMetadata(ctx, userID, metadata)
+}
+
+func (s *Service) CreateRole(ctx context.Context, role string, permissions []string) error {
+	if s.rbac == nil {
+		return ErrFeatureNotSupported
+	}
+	return s.rbac.CreateRole(ctx, role, permissions)
+}
+
+func (s *Service) AssignRole(ctx context.Context, userID, role, tenantID string) error {
+	if s.rbac == nil {
+		return ErrFeatureNotSupported
+	}
+	return s.rbac.AddRoleToUser(ctx, userID, role, tenantID)
+}
+
+func (s *Service) UserHasPermission(ctx context.Context, userID, permission, tenantID string) (bool, error) {
+	if s.rbac == nil {
+		return false, ErrFeatureNotSupported
+	}
+	return s.rbac.UserHasPermission(ctx, userID, permission, tenantID)
+}
+
+func (s *Service) CreateTenant(ctx context.Context, name string, config map[string]any) (Tenant, error) {
+	if s.tenants == nil {
+		return Tenant{}, ErrFeatureNotSupported
+	}
+	id, err := newID("tnt")
+	if err != nil {
+		return Tenant{}, err
+	}
+	return s.tenants.CreateTenant(ctx, Tenant{
+		ID:        id,
+		Name:      name,
+		IsActive:  true,
+		Config:    config,
+		CreatedAt: s.now(),
+	})
+}
+
+func (s *Service) AddUserToTenant(ctx context.Context, userID, tenantID string) error {
+	if s.tenants == nil {
+		return ErrFeatureNotSupported
+	}
+	return s.tenants.AssociateUserWithTenant(ctx, userID, tenantID)
+}
+
 func (s *Service) DisableTOTP(ctx context.Context, userID, tenantID string) error {
 	ts, ok := s.users.(TOTPStore)
 	if !ok {
@@ -504,4 +586,41 @@ func (s *Service) resolveUser(ctx context.Context, userID, email, tenantID strin
 func (s *Service) requiresTwoFactor(user User) bool {
 	hasTOTP := user.IsTOTPEnabled && strings.TrimSpace(user.TOTPSecret) != ""
 	return s.cfg.Require2FA || user.Require2FA || hasTOTP
+}
+
+func (s *Service) enrichUser(ctx context.Context, user User) (User, error) {
+	if s.metadata != nil {
+		metadata, err := s.metadata.GetMetadata(ctx, user.ID)
+		if err != nil {
+			return User{}, err
+		}
+		user.Metadata = metadata
+	}
+	if s.rbac != nil {
+		roles, err := s.rbac.GetRolesForUser(ctx, user.ID, user.TenantID)
+		if err != nil {
+			return User{}, err
+		}
+		permissions, err := s.rbac.GetPermissionsForUser(ctx, user.ID, user.TenantID)
+		if err != nil {
+			return User{}, err
+		}
+		user.Roles = roles
+		user.Permissions = permissions
+	}
+	if s.tenants != nil {
+		tenants, err := s.tenants.GetTenantsForUser(ctx, user.ID)
+		if err != nil {
+			return User{}, err
+		}
+		user.Tenants = tenants
+	}
+	if s.cfg.BuildTokenClaims != nil {
+		claims, err := s.cfg.BuildTokenClaims(ctx, user)
+		if err != nil {
+			return User{}, err
+		}
+		user.CustomClaims = claims
+	}
+	return user, nil
 }

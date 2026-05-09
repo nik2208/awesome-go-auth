@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"time"
 )
@@ -20,6 +21,7 @@ type Config struct {
 	EmailChangeTTL       time.Duration
 	TempTokenTTL         time.Duration
 	Require2FA           bool
+	BuildTokenClaims     func(ctx context.Context, user User) (map[string]any, error)
 }
 
 // DefaultConfig returns secure defaults for development and production bootstrap.
