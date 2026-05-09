@@ -123,7 +123,9 @@ func (idp *IDP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown client", http.StatusBadRequest)
 		return
 	}
-	if !idpRedirectAllowed(client.RedirectURIs, redirectURI) {
+	// Look up the canonical (server-controlled) redirect URI from the registered allowlist.
+	canonicalRedirect := idpMatchedRedirect(client.RedirectURIs, redirectURI)
+	if canonicalRedirect == "" {
 		http.Error(w, "redirect_uri not allowed", http.StatusBadRequest)
 		return
 	}
@@ -151,7 +153,8 @@ func (idp *IDP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			ClientID: clientID, Nonce: nonce,
 			ExpiresAt: time.Now().Add(5 * time.Minute),
 		})
-		redir, err := url.Parse(redirectURI)
+		// Use the canonical (server-controlled) URI, not the raw user input.
+		redir, err := url.Parse(canonicalRedirect)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -297,11 +300,14 @@ func buildRS256JWT(key *rsa.PrivateKey, kid string, claims map[string]any) (stri
 	return sigInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
-func idpRedirectAllowed(allowed []string, redirect string) bool {
+// idpMatchedRedirect returns the canonical redirect URI from the allowlist that
+// exactly matches the requested URI. This ensures the redirect target is always
+// a server-controlled value, not a raw user-supplied string.
+func idpMatchedRedirect(allowed []string, requested string) string {
 	for _, u := range allowed {
-		if u == redirect {
-			return true
+		if u == requested {
+			return u
 		}
 	}
-	return false
+	return ""
 }

@@ -308,70 +308,79 @@ func (s *OAuthService) HandleCallback(
 // MemoryLinkedAccounts is an in-memory implementation of LinkedAccountStore,
 // suitable for development, testing, and embedded deployments.
 type MemoryLinkedAccounts struct {
-mu    sync.RWMutex
-byID  map[string]OAuthLinkedAccount         // id -> link
-byPrv map[string]map[string]OAuthLinkedAccount // provider -> providerID -> link
-byUsr map[string][]OAuthLinkedAccount         // userID -> links
+	mu    sync.RWMutex
+	byID  map[string]OAuthLinkedAccount            // id -> link
+	byPrv map[string]map[string]OAuthLinkedAccount // provider -> providerID -> link
+	byUsr map[string][]OAuthLinkedAccount          // userID -> links
 }
 
 // NewMemoryLinkedAccounts creates an in-memory LinkedAccountStore.
 func NewMemoryLinkedAccounts() *MemoryLinkedAccounts {
-return &MemoryLinkedAccounts{
-byID:  make(map[string]OAuthLinkedAccount),
-byPrv: make(map[string]map[string]OAuthLinkedAccount),
-byUsr: make(map[string][]OAuthLinkedAccount),
-}
+	return &MemoryLinkedAccounts{
+		byID:  make(map[string]OAuthLinkedAccount),
+		byPrv: make(map[string]map[string]OAuthLinkedAccount),
+		byUsr: make(map[string][]OAuthLinkedAccount),
+	}
 }
 
 func (m *MemoryLinkedAccounts) Save(_ context.Context, link OAuthLinkedAccount) error {
-m.mu.Lock()
-defer m.mu.Unlock()
-m.byID[link.ID] = link
-if m.byPrv[link.Provider] == nil {
-m.byPrv[link.Provider] = make(map[string]OAuthLinkedAccount)
-}
-m.byPrv[link.Provider][link.ProviderID] = link
-m.byUsr[link.UserID] = append(m.byUsr[link.UserID], link)
-return nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.byID[link.ID] = link
+	if m.byPrv[link.Provider] == nil {
+		m.byPrv[link.Provider] = make(map[string]OAuthLinkedAccount)
+	}
+	m.byPrv[link.Provider][link.ProviderID] = link
+	// Replace existing entry for the same ID to prevent duplicates.
+	links := m.byUsr[link.UserID]
+	for i, l := range links {
+		if l.ID == link.ID {
+			links[i] = link
+			m.byUsr[link.UserID] = links
+			return nil
+		}
+	}
+	m.byUsr[link.UserID] = append(links, link)
+	return nil
 }
 
 func (m *MemoryLinkedAccounts) FindByProvider(_ context.Context, provider, providerID string) (OAuthLinkedAccount, error) {
-m.mu.RLock()
-defer m.mu.RUnlock()
-if prv, ok := m.byPrv[provider]; ok {
-if link, ok := prv[providerID]; ok {
-return link, nil
-}
-}
-return OAuthLinkedAccount{}, fmt.Errorf("auth: linked account not found")
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if prv, ok := m.byPrv[provider]; ok {
+		if link, ok := prv[providerID]; ok {
+			return link, nil
+		}
+	}
+	return OAuthLinkedAccount{}, fmt.Errorf("auth: linked account not found")
 }
 
 func (m *MemoryLinkedAccounts) ListForUser(_ context.Context, userID string) ([]OAuthLinkedAccount, error) {
-m.mu.RLock()
-defer m.mu.RUnlock()
-out := make([]OAuthLinkedAccount, len(m.byUsr[userID]))
-copy(out, m.byUsr[userID])
-return out, nil
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]OAuthLinkedAccount, len(m.byUsr[userID]))
+	copy(out, m.byUsr[userID])
+	return out, nil
 }
 
 func (m *MemoryLinkedAccounts) Delete(_ context.Context, id string) error {
-m.mu.Lock()
-defer m.mu.Unlock()
-link, ok := m.byID[id]
-if !ok {
-return nil
-}
-delete(m.byID, id)
-if prv, ok := m.byPrv[link.Provider]; ok {
-delete(prv, link.ProviderID)
-}
-links := m.byUsr[link.UserID]
-out := links[:0]
-for _, l := range links {
-if l.ID != id {
-out = append(out, l)
-}
-}
-m.byUsr[link.UserID] = out
-return nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	link, ok := m.byID[id]
+	if !ok {
+		return nil
+	}
+	delete(m.byID, id)
+	if prv, ok := m.byPrv[link.Provider]; ok {
+		delete(prv, link.ProviderID)
+	}
+	links := m.byUsr[link.UserID]
+	out := links[:0]
+	for _, l := range links {
+		if l.ID != id {
+			out = append(out, l)
+		}
+	}
+	m.byUsr[link.UserID] = out
+	return nil
 }

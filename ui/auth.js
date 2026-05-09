@@ -50,7 +50,7 @@
     const tok = getAccessToken();
     if (!tok) return false;
     try {
-      const payload = JSON.parse(atob(tok.split('.')[0]));
+      const payload = JSON.parse(atob(tok.split('.')[1]));
       return payload.exp ? payload.exp * 1000 > Date.now() : true;
     } catch { return !!tok; }
   }

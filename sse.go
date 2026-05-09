@@ -88,6 +88,10 @@ func ServeSSE(hub *SseHub, channel string) http.HandlerFunc {
 		defer hub.Unsubscribe(channel, ch)
 
 		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
 		for {
 			select {
 			case <-r.Context().Done():
@@ -104,14 +108,10 @@ func ServeSSE(hub *SseHub, channel string) http.HandlerFunc {
 					fmt.Fprintf(w, "event: %s\n", msg.Event)
 				}
 				fmt.Fprintf(w, "data: %s\n\n", data)
-				if ok {
-					flusher.Flush()
-				}
+				flusher.Flush()
 			case <-time.After(30 * time.Second):
 				fmt.Fprintf(w, ": ping\n\n")
-				if ok {
-					flusher.Flush()
-				}
+				flusher.Flush()
 			}
 		}
 	}
