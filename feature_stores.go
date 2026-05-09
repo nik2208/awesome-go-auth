@@ -295,7 +295,7 @@ func (s *MemoryTenantStore) DisassociateUserFromTenant(_ context.Context, userID
 func (s *MemoryTenantStore) GetTenantsForUser(_ context.Context, userID string) ([]Tenant, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]Tenant, 0)
+	out := make([]Tenant, 0, len(s.userTenants[userID]))
 	for tenantID := range s.userTenants[userID] {
 		if tenant, ok := s.byID[tenantID]; ok {
 			out = append(out, tenant)
