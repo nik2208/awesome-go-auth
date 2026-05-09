@@ -56,6 +56,7 @@ import (
 )
 
 func main() {
+	// Use a cryptographically secure random secret in production.
 	cfg := auth.DefaultConfig("replace-with-a-long-random-secret")
 	service, err := auth.NewService(cfg, myUserStore, mySessionStore)
 	if err != nil {
@@ -64,7 +65,7 @@ func main() {
 
 	_, _, err = service.Login(context.Background(), auth.LoginInput{
 		Email:    "alice@example.com",
-		Password: "s3cur3P@ssw0rd",
+		Password: "your-secure-password",
 		TenantID: "tenant-abc",
 	})
 	if err != nil {

@@ -3,7 +3,7 @@
 [![Go](https://img.shields.io/badge/go-1.23+-blue.svg)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Libreria di autenticazione server-side in Go che porta in modo fedele `awesome-node-auth` nel mondo Go.
+Authentication library server-side in Go che porta in modo fedele `awesome-node-auth` nel mondo Go.
 
 > Full reference: [README.detailed.md](./README.detailed.md)
 
@@ -49,6 +49,7 @@ import (
 )
 
 func main() {
+	// Use a cryptographically secure random secret in production.
 	cfg := auth.DefaultConfig("replace-with-a-long-random-secret")
 	svc, err := auth.NewService(cfg, myUserStore, mySessionStore)
 	if err != nil {
