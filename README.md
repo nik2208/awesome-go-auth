@@ -1,6 +1,6 @@
 # awesome-go-auth
 
-`awesome-go-auth` è una libreria Go per autenticazione con sessioni stateful e token access/refresh.
+`awesome-go-auth` e una libreria Go per autenticazione con sessioni stateful e token access/refresh.
 
 ## Installazione
 
