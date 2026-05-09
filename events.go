@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"log"
 	"sync"
 	"time"
 )
@@ -47,6 +48,10 @@ func (b *EventBus) Publish(ev Event) {
 }
 
 func safeCall(handler func(Event), ev Event) {
-	defer func() { _ = recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("auth: recovered panic in event handler for %q: %v", ev.Name, r)
+		}
+	}()
 	handler(ev)
 }

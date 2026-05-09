@@ -47,20 +47,21 @@ func (s *APIKeyService) Create(ctx context.Context, store APIKeyStore, name, ser
 		return "", APIKeyRecord{}, err
 	}
 	rawBody = apiKeyBodySanitizer.ReplaceAllString(rawBody, "")
-	for i := 0; len(rawBody) < 48 && i < 4; i++ {
+	var b strings.Builder
+	b.Grow(64)
+	b.WriteString(rawBody)
+	for i := 0; b.Len() < 48 && i < 4; i++ {
 		fallback, ferr := randomToken(48)
 		if ferr != nil {
 			return "", APIKeyRecord{}, ferr
 		}
-		rawBody += apiKeyBodySanitizer.ReplaceAllString(fallback, "")
+		b.WriteString(apiKeyBodySanitizer.ReplaceAllString(fallback, ""))
 	}
+	rawBody = b.String()
 	if len(rawBody) < 48 {
 		return "", APIKeyRecord{}, errors.New("auth: api key entropy generation failed")
 	}
 	rawKey = "ak_" + rawBody[:48]
-	if len(rawKey) < 11 {
-		return "", APIKeyRecord{}, errors.New("auth: generated api key too short")
-	}
 	keyID, err := newID("key")
 	if err != nil {
 		return "", APIKeyRecord{}, err

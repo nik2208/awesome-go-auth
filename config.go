@@ -54,7 +54,7 @@ func (c Config) validate() error {
 		return errors.New("auth: min password len must be >= 8")
 	}
 	if c.ResetTokenTTL <= 0 || c.MagicLinkTTL <= 0 || c.SMSCodeTTL <= 0 {
-		return errors.New("auth: reset/magic/sms ttl must be > 0")
+		return errors.New("auth: reset token, magic link, and sms code ttl must be > 0")
 	}
 	if c.EmailVerificationTTL <= 0 || c.EmailChangeTTL <= 0 || c.TempTokenTTL <= 0 {
 		return errors.New("auth: email and temp token ttl must be > 0")
