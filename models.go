@@ -134,3 +134,15 @@ type ChangeEmailRequestInput struct {
 type ConfirmEmailChangeInput struct {
 	Token string
 }
+
+type UpdateProfileInput struct {
+	UserID    string
+	TenantID  string
+	FirstName string
+	LastName  string
+}
+
+type DeleteAccountInput struct {
+	UserID   string
+	TenantID string
+}
