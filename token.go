@@ -67,7 +67,7 @@ func (s *Service) parseToken(token, expectedType string) (tokenClaims, error) {
 	if claims.Iss != s.cfg.Issuer || claims.Typ != expectedType {
 		return claims, ErrInvalidToken
 	}
-	if now.Add(-s.cfg.ClockSkew).Unix() > claims.Exp {
+	if now.After(time.Unix(claims.Exp, 0).Add(s.cfg.ClockSkew)) {
 		return claims, ErrInvalidToken
 	}
 	return claims, nil
