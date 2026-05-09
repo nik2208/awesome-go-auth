@@ -490,15 +490,18 @@ func (s *Service) CleanupExpiredSessions(ctx context.Context) (int, error) {
 }
 
 func (s *Service) resolveUser(ctx context.Context, userID, email, tenantID string) (User, error) {
-	if strings.TrimSpace(userID) != "" {
-		return s.users.GetUserByID(ctx, userID, tenantID)
+	trimmedUserID := strings.TrimSpace(userID)
+	trimmedEmail := strings.TrimSpace(email)
+	if trimmedUserID != "" {
+		return s.users.GetUserByID(ctx, trimmedUserID, tenantID)
 	}
-	if strings.TrimSpace(email) != "" {
-		return s.users.GetUserByEmail(ctx, normalizeEmail(email), tenantID)
+	if trimmedEmail != "" {
+		return s.users.GetUserByEmail(ctx, normalizeEmail(trimmedEmail), tenantID)
 	}
 	return User{}, ErrInvalidCredentials
 }
 
 func (s *Service) requiresTwoFactor(user User) bool {
-	return s.cfg.Require2FA || user.Require2FA || user.IsTOTPEnabled
+	hasTOTP := user.IsTOTPEnabled && strings.TrimSpace(user.TOTPSecret) != ""
+	return s.cfg.Require2FA || user.Require2FA || hasTOTP
 }

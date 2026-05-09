@@ -47,7 +47,7 @@ func (s *APIKeyService) Create(ctx context.Context, store APIKeyStore, name, ser
 		return "", APIKeyRecord{}, err
 	}
 	rawBody = apiKeyBodySanitizer.ReplaceAllString(rawBody, "")
-	for len(rawBody) < 48 {
+	for i := 0; len(rawBody) < 48 && i < 4; i++ {
 		fallback, ferr := randomToken(48)
 		if ferr != nil {
 			return "", APIKeyRecord{}, ferr

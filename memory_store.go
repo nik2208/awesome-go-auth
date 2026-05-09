@@ -300,7 +300,7 @@ func (s *MemoryUserStore) UpdateEmailChangeToken(_ context.Context, userID, tena
 	if u.EmailChangeTokenHash != "" {
 		delete(s.byEmailChangeToken, u.EmailChangeTokenHash)
 	}
-	u.PendingEmail = pendingEmail
+	u.PendingEmail = normalizeEmail(pendingEmail)
 	u.EmailChangeTokenHash = tokenHash
 	u.EmailChangeTokenExpiry = &expiry
 	s.byEmailChangeToken[tokenHash] = userID
@@ -335,7 +335,7 @@ func (s *MemoryUserStore) ApplyEmailChange(_ context.Context, userID, tenantID s
 		return ErrUserExists
 	}
 	delete(s.byEmail, oldKey)
-	u.Email = normalizeEmail(u.PendingEmail)
+	u.Email = u.PendingEmail
 	u.PendingEmail = ""
 	s.byEmail[newKey] = u.ID
 	s.byID[userID] = u
