@@ -581,7 +581,7 @@ func (s *Service) UpdateProfile(ctx context.Context, in UpdateProfileInput) (Use
 	}
 	updated, err := accountStore.UpdateProfile(ctx, in.UserID, in.TenantID, strings.TrimSpace(in.FirstName), strings.TrimSpace(in.LastName))
 	if err != nil {
-		return User{}, ErrInvalidCredentials
+		return User{}, fmt.Errorf("auth: update profile: %w", err)
 	}
 	return s.enrichUser(ctx, updated)
 }
@@ -590,6 +590,9 @@ func (s *Service) DeleteAccount(ctx context.Context, in DeleteAccountInput) erro
 	accountStore, ok := s.users.(UserAccountStore)
 	if !ok {
 		return ErrFeatureNotSupported
+	}
+	if err := accountStore.DeleteUser(ctx, in.UserID, in.TenantID); err != nil {
+		return fmt.Errorf("auth: delete account: %w", err)
 	}
 	if adminStore, ok := s.sessions.(SessionAdminStore); ok {
 		sessions, err := adminStore.ListSessionsForUser(ctx, in.UserID, in.TenantID)
@@ -601,9 +604,6 @@ func (s *Service) DeleteAccount(ctx context.Context, in DeleteAccountInput) erro
 	}
 	if s.metadata != nil {
 		_ = s.metadata.ClearMetadata(ctx, in.UserID)
-	}
-	if err := accountStore.DeleteUser(ctx, in.UserID, in.TenantID); err != nil {
-		return ErrInvalidCredentials
 	}
 	return nil
 }
