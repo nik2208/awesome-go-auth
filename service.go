@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 )
@@ -593,7 +592,7 @@ func (s *Service) enrichUser(ctx context.Context, user User) (User, error) {
 	if s.metadata != nil {
 		metadata, err := s.metadata.GetMetadata(ctx, user.ID)
 		if err != nil {
-			log.Printf("auth: metadata enrichment skipped for user %q: %v", user.ID, err)
+			s.logf("auth: metadata enrichment skipped for user %q: %v", user.ID, err)
 		} else {
 			user.Metadata = metadata
 		}
@@ -601,12 +600,12 @@ func (s *Service) enrichUser(ctx context.Context, user User) (User, error) {
 	if s.rbac != nil {
 		roles, err := s.rbac.GetRolesForUser(ctx, user.ID, user.TenantID)
 		if err != nil {
-			log.Printf("auth: role enrichment skipped for user %q: %v", user.ID, err)
+			s.logf("auth: role enrichment skipped for user %q: %v", user.ID, err)
 		} else {
 			user.Roles = roles
 			permissions, err := s.rbac.GetPermissionsForUser(ctx, user.ID, user.TenantID)
 			if err != nil {
-				log.Printf("auth: permission enrichment skipped for user %q: %v", user.ID, err)
+				s.logf("auth: permission enrichment skipped for user %q: %v", user.ID, err)
 			} else {
 				user.Permissions = permissions
 			}
@@ -615,7 +614,7 @@ func (s *Service) enrichUser(ctx context.Context, user User) (User, error) {
 	if s.tenants != nil {
 		tenants, err := s.tenants.GetTenantsForUser(ctx, user.ID)
 		if err != nil {
-			log.Printf("auth: tenant enrichment skipped for user %q: %v", user.ID, err)
+			s.logf("auth: tenant enrichment skipped for user %q: %v", user.ID, err)
 		} else {
 			user.Tenants = tenants
 		}
@@ -623,10 +622,16 @@ func (s *Service) enrichUser(ctx context.Context, user User) (User, error) {
 	if s.cfg.BuildTokenClaims != nil {
 		claims, err := s.cfg.BuildTokenClaims(ctx, user)
 		if err != nil {
-			log.Printf("auth: custom claim enrichment skipped for user %q: %v", user.ID, err)
+			s.logf("auth: custom claim enrichment skipped for user %q: %v", user.ID, err)
 		} else {
 			user.CustomClaims = claims
 		}
 	}
 	return user, nil
+}
+
+func (s *Service) logf(format string, args ...any) {
+	if s.cfg.Logger != nil {
+		s.cfg.Logger(format, args...)
+	}
 }

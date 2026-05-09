@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"sync"
 )
@@ -67,7 +66,7 @@ func (s *MemoryRolesPermissionsStore) AddRoleToUser(_ context.Context, userID, r
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.rolePermissions[role]; !ok {
-		return errors.New("role not found")
+		return ErrRoleNotFound
 	}
 	if s.userRoles[userID] == nil {
 		s.userRoles[userID] = make(map[string]map[string]struct{})
@@ -223,7 +222,7 @@ func (s *MemoryTenantStore) GetTenantByID(_ context.Context, id string) (Tenant,
 	defer s.mu.RUnlock()
 	tenant, ok := s.byID[id]
 	if !ok {
-		return Tenant{}, errors.New("tenant not found")
+		return Tenant{}, ErrTenantNotFound
 	}
 	return tenant, nil
 }
@@ -244,7 +243,7 @@ func (s *MemoryTenantStore) UpdateTenant(_ context.Context, id string, update Te
 	defer s.mu.Unlock()
 	current, ok := s.byID[id]
 	if !ok {
-		return errors.New("tenant not found")
+		return ErrTenantNotFound
 	}
 	current.Name = update.Name
 	current.IsActive = update.IsActive
@@ -268,7 +267,7 @@ func (s *MemoryTenantStore) AssociateUserWithTenant(_ context.Context, userID, t
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.byID[tenantID]; !ok {
-		return errors.New("tenant not found")
+		return ErrTenantNotFound
 	}
 	if s.userTenants[userID] == nil {
 		s.userTenants[userID] = make(map[string]struct{})

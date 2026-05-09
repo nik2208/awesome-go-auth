@@ -22,6 +22,7 @@ type Config struct {
 	TempTokenTTL         time.Duration
 	Require2FA           bool
 	BuildTokenClaims     func(ctx context.Context, user User) (map[string]any, error)
+	Logger               func(format string, args ...any)
 }
 
 // DefaultConfig returns secure defaults for development and production bootstrap.

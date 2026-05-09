@@ -14,4 +14,6 @@ var (
 	ErrInvalidCode         = errors.New("auth: invalid code")
 	ErrTwoFactorRequired   = errors.New("auth: two-factor authentication required")
 	ErrAlreadyExists       = errors.New("auth: resource already exists")
+	ErrTenantNotFound      = errors.New("auth: tenant not found")
+	ErrRoleNotFound        = errors.New("auth: role not found")
 )
