@@ -157,3 +157,26 @@ func TestTOTPFlow(t *testing.T) {
 		t.Fatal("access token expected")
 	}
 }
+
+func TestResolveUserHelper(t *testing.T) {
+	svc := testService(t)
+	ctx := context.Background()
+	user, _, err := svc.Register(ctx, RegisterInput{Email: "resolve@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	byID, err := svc.resolveUser(ctx, user.ID, "", user.TenantID)
+	if err != nil || byID.ID != user.ID {
+		t.Fatalf("resolve by id failed: %v", err)
+	}
+
+	byEmail, err := svc.resolveUser(ctx, "", user.Email, user.TenantID)
+	if err != nil || byEmail.ID != user.ID {
+		t.Fatalf("resolve by email failed: %v", err)
+	}
+
+	if _, err := svc.resolveUser(ctx, "", "", user.TenantID); err != ErrInvalidCredentials {
+		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+}

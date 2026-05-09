@@ -81,8 +81,6 @@ func (s *MemoryUserStore) UpdatePassword(_ context.Context, userID, tenantID, pa
 		return errors.New("user not found")
 	}
 	u.PasswordHash = passwordHash
-	now := time.Now()
-	u.UpdatedAt = now
 	s.byID[userID] = u
 	return nil
 }

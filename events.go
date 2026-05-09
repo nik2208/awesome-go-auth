@@ -39,9 +39,14 @@ func (b *EventBus) Publish(ev Event) {
 	wildcard := append([]func(Event){}, b.subscribers["*"]...)
 	b.mu.RUnlock()
 	for _, h := range handlers {
-		h(ev)
+		safeCall(h, ev)
 	}
 	for _, h := range wildcard {
-		h(ev)
+		safeCall(h, ev)
 	}
+}
+
+func safeCall(handler func(Event), ev Event) {
+	defer func() { _ = recover() }()
+	handler(ev)
 }
