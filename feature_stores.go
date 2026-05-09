@@ -91,7 +91,11 @@ func (s *MemoryRolesPermissionsStore) RemoveRoleFromUser(_ context.Context, user
 func (s *MemoryRolesPermissionsStore) GetRolesForUser(_ context.Context, userID, tenantID string) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rolesMap := s.userRoles[userID][tenantID]
+	userScoped := s.userRoles[userID]
+	if userScoped == nil {
+		return nil, nil
+	}
+	rolesMap := userScoped[tenantID]
 	roles := make([]string, 0, len(rolesMap))
 	for role := range rolesMap {
 		roles = append(roles, role)
@@ -208,7 +212,7 @@ func (s *MemoryTenantStore) CreateTenant(_ context.Context, tenant Tenant) (Tena
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.byID[tenant.ID]; exists {
-		return Tenant{}, ErrUserExists
+		return Tenant{}, ErrAlreadyExists
 	}
 	s.byID[tenant.ID] = tenant
 	return tenant, nil

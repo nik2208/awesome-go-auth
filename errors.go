@@ -13,4 +13,5 @@ var (
 	ErrEmailNotVerified    = errors.New("auth: email not verified")
 	ErrInvalidCode         = errors.New("auth: invalid code")
 	ErrTwoFactorRequired   = errors.New("auth: two-factor authentication required")
+	ErrAlreadyExists       = errors.New("auth: resource already exists")
 )
