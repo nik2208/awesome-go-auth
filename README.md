@@ -40,11 +40,19 @@ func main() {
 }
 ```
 
-## Funzionalità disponibili in questa versione
+## Funzionalità disponibili in questa versione Go
 
 - Configurazione sicura con validazione.
 - Register/login con hashing password (bcrypt).
 - Access token + refresh token firmati (HMAC-SHA256) con expiry.
 - Sessioni stateful con rotazione refresh token e revoca (logout).
 - Recupero utente autenticato (`Me`).
-- Interfacce storage (`UserStore`, `SessionStore`) + implementazioni in-memory thread-safe.
+- Password reset (`ForgotPassword`, `ResetPassword`, `ChangePassword`).
+- Magic link passwordless (`SendMagicLink`, `VerifyMagicLink`).
+- SMS OTP login (`SendSMSCode`, `VerifySMSCode`).
+- TOTP 2FA (`SetupTOTP`, `VerifyTOTPSetup`, `VerifyTOTP`, `DisableTOTP`).
+- Email verification (`SendVerificationEmailToken`, `VerifyEmail`) e cambio email (`RequestEmailChange`, `ConfirmEmailChange`).
+- Session admin helpers (`ListSessions`, `RevokeSessionByID`, `CleanupExpiredSessions`).
+- API key service + middleware HTTP (`APIKeyService`, `APIKeyMiddleware`).
+- Event bus in-process (`EventBus`) per integrazioni event-driven.
+- Interfacce storage estese + implementazioni in-memory thread-safe per i flussi sopra.

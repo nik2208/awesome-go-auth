@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -47,6 +48,22 @@ func randomToken(byteLen int) (string, error) {
 		return "", fmt.Errorf("auth: random token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func randomNumericCode(length int) (string, error) {
+	const digits = "0123456789"
+	if length <= 0 {
+		return "", errors.New("invalid code length")
+	}
+	out := make([]byte, length)
+	for i := range out {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(digits))))
+		if err != nil {
+			return "", fmt.Errorf("auth: random code: %w", err)
+		}
+		out[i] = digits[n.Int64()]
+	}
+	return string(out), nil
 }
 
 func sign(input, secret string) string {
