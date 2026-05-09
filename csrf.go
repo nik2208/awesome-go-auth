@@ -60,6 +60,7 @@ func CSRFMiddleware(cfg CSRFConfig) func(http.Handler) http.Handler {
 				Value:    token,
 				Path:     "/",
 				// Not HttpOnly by design: browser JS must read it and mirror in X-CSRF-Token.
+				// In production keep CookieSecure=true to avoid leakage over plain HTTP.
 				HttpOnly: false,
 				Secure:   cfg.CookieSecure,
 				SameSite: cfg.CookieSameSite,

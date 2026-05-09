@@ -657,7 +657,7 @@ func (s *Service) validateSessionForAccess(ctx context.Context, claims tokenClai
 		return ErrSessionNotFound
 	}
 
-	s.logf("auth: session allcalls check requested but session store does not support lookup")
+	s.logf("auth: session all-calls check requested but session store does not support lookup")
 	return nil
 }
 
