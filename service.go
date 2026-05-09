@@ -662,7 +662,13 @@ func (s *Service) validateSessionForAccess(ctx context.Context, claims tokenClai
 }
 
 func (s *Service) validateSessionState(session Session, claims tokenClaims) error {
-	if session.ID != claims.Sid || session.UserID != claims.Sub || session.TenantID != claims.Tid {
+	if session.ID != claims.Sid {
+		return ErrInvalidToken
+	}
+	if session.UserID != claims.Sub {
+		return ErrInvalidToken
+	}
+	if session.TenantID != claims.Tid {
 		return ErrInvalidToken
 	}
 	if session.RevokedAt != nil {

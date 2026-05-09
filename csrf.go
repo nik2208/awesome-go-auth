@@ -74,7 +74,7 @@ func CSRFMiddleware(cfg CSRFConfig) func(http.Handler) http.Handler {
 				return
 			}
 			headerToken := strings.TrimSpace(r.Header.Get(headerName))
-			if headerToken == "" || !secureEqual(headerToken, token) {
+			if headerToken == "" || !csrfTokenEqual(headerToken, token) {
 				http.Error(w, "invalid csrf token", http.StatusForbidden)
 				return
 			}
@@ -93,6 +93,10 @@ func csrfBearerToken(authHeader string) string {
 		return ""
 	}
 	return strings.TrimSpace(parts[1])
+}
+
+func csrfTokenEqual(a, b string) bool {
+	return secureEqual(a, b)
 }
 
 func isMutatingMethod(method string) bool {
