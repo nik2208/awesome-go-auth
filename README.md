@@ -14,29 +14,29 @@ go get github.com/nik2208/awesome-go-auth
 package main
 
 import (
-"context"
-"log"
+	"context"
+	"log"
 
-auth "github.com/nik2208/awesome-go-auth"
+	auth "github.com/nik2208/awesome-go-auth"
 )
 
 func main() {
-cfg := auth.DefaultConfig("replace-with-at-least-32-random-chars")
-service, err := auth.NewService(cfg, auth.NewMemoryUserStore(), auth.NewMemorySessionStore())
-if err != nil {
-log.Fatal(err)
-}
+	cfg := auth.DefaultConfig("replace-with-at-least-32-random-chars")
+	service, err := auth.NewService(cfg, auth.NewMemoryUserStore(), auth.NewMemorySessionStore())
+	if err != nil {
+		log.Fatal(err)
+	}
 
-_, tokens, err := service.Register(context.Background(), auth.RegisterInput{
-Email:    "alice@example.com",
-Password: "supersecurepassword",
-TenantID: "tenant-1",
-})
-if err != nil {
-log.Fatal(err)
-}
+	_, tokens, err := service.Register(context.Background(), auth.RegisterInput{
+		Email:    "alice@example.com",
+		Password: "supersecurepassword",
+		TenantID: "tenant-1",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
 
-log.Println("access token issued", tokens.AccessToken != "")
+	log.Println("access token issued", tokens.AccessToken != "")
 }
 ```
 
