@@ -86,7 +86,7 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (User, AuthTokens, e
 	if !user.IsEmailVerified {
 		return User{}, zeroTokens, ErrEmailNotVerified
 	}
-	if s.cfg.Require2FA || user.Require2FA || user.IsTOTPEnabled {
+	if s.requiresTwoFactor(user) {
 		return User{}, zeroTokens, ErrTwoFactorRequired
 	}
 	tokens, err := s.newSessionTokens(ctx, user)
@@ -497,4 +497,8 @@ func (s *Service) resolveUser(ctx context.Context, userID, email, tenantID strin
 		return s.users.GetUserByEmail(ctx, normalizeEmail(email), tenantID)
 	}
 	return User{}, ErrInvalidCredentials
+}
+
+func (s *Service) requiresTwoFactor(user User) bool {
+	return s.cfg.Require2FA || user.Require2FA || user.IsTOTPEnabled
 }

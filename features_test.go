@@ -179,4 +179,7 @@ func TestResolveUserHelper(t *testing.T) {
 	if _, err := svc.resolveUser(ctx, "", "", user.TenantID); err != ErrInvalidCredentials {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
+	if _, err := svc.resolveUser(ctx, "   ", "   ", user.TenantID); err != ErrInvalidCredentials {
+		t.Fatalf("expected ErrInvalidCredentials for whitespace identifiers, got %v", err)
+	}
 }

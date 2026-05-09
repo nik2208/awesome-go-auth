@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -35,6 +36,8 @@ type APIKeyService struct{}
 
 func NewAPIKeyService() *APIKeyService { return &APIKeyService{} }
 
+var apiKeyBodySanitizer = regexp.MustCompile(`[^a-zA-Z0-9]`)
+
 func (s *APIKeyService) Create(ctx context.Context, store APIKeyStore, name, serviceID string, scopes, allowedIPs []string, expiresAt *time.Time) (rawKey string, record APIKeyRecord, err error) {
 	if store == nil {
 		return "", APIKeyRecord{}, errors.New("auth: api key store is required")
@@ -43,7 +46,18 @@ func (s *APIKeyService) Create(ctx context.Context, store APIKeyStore, name, ser
 	if err != nil {
 		return "", APIKeyRecord{}, err
 	}
-	rawKey = "ak_" + strings.ReplaceAll(rawBody, "-", "")
+	rawBody = apiKeyBodySanitizer.ReplaceAllString(rawBody, "")
+	if len(rawBody) < 48 {
+		fallback, ferr := randomToken(40)
+		if ferr != nil {
+			return "", APIKeyRecord{}, ferr
+		}
+		rawBody = apiKeyBodySanitizer.ReplaceAllString(fallback, "")
+	}
+	if len(rawBody) < 48 {
+		return "", APIKeyRecord{}, errors.New("auth: api key entropy generation failed")
+	}
+	rawKey = "ak_" + rawBody[:48]
 	if len(rawKey) < 11 {
 		return "", APIKeyRecord{}, errors.New("auth: generated api key too short")
 	}
