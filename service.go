@@ -145,11 +145,11 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthTokens,
 		return AuthTokens{}, ErrInvalidToken
 	}
 
-	newRefresh, refreshExp, err := s.issueToken(user, session.ID, "refresh", s.cfg.RefreshTokenTTL)
+	newRefresh, refreshExp, err := s.issueToken(ctx, user, session.ID, "refresh", s.cfg.RefreshTokenTTL)
 	if err != nil {
 		return AuthTokens{}, err
 	}
-	newAccess, _, err := s.issueToken(user, session.ID, "access", s.cfg.AccessTokenTTL)
+	newAccess, _, err := s.issueToken(ctx, user, session.ID, "access", s.cfg.AccessTokenTTL)
 	if err != nil {
 		return AuthTokens{}, err
 	}
@@ -197,11 +197,11 @@ func (s *Service) newSessionTokens(ctx context.Context, user User) (AuthTokens, 
 	if err != nil {
 		return AuthTokens{}, err
 	}
-	refreshToken, refreshExp, err := s.issueToken(user, sessionID, "refresh", s.cfg.RefreshTokenTTL)
+	refreshToken, refreshExp, err := s.issueToken(ctx, user, sessionID, "refresh", s.cfg.RefreshTokenTTL)
 	if err != nil {
 		return AuthTokens{}, err
 	}
-	accessToken, _, err := s.issueToken(user, sessionID, "access", s.cfg.AccessTokenTTL)
+	accessToken, _, err := s.issueToken(ctx, user, sessionID, "access", s.cfg.AccessTokenTTL)
 	if err != nil {
 		return AuthTokens{}, err
 	}

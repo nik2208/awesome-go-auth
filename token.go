@@ -19,7 +19,7 @@ type tokenClaims struct {
 	Exp int64  `json:"exp"`
 }
 
-func (s *Service) issueToken(user User, sessionID, tokenType string, ttl time.Duration) (string, time.Time, error) {
+func (s *Service) issueToken(ctx context.Context, user User, sessionID, tokenType string, ttl time.Duration) (string, time.Time, error) {
 	now := s.now()
 	expiresAt := now.Add(ttl)
 	jti, err := newID("jti")
@@ -48,7 +48,7 @@ func (s *Service) issueToken(user User, sessionID, tokenType string, ttl time.Du
 		"exp": claims.Exp,
 	}
 	if s.cfg.BuildTokenClaims != nil {
-		customClaims, err := s.cfg.BuildTokenClaims(context.Background(), user)
+		customClaims, err := s.cfg.BuildTokenClaims(ctx, user)
 		if err != nil {
 			return "", time.Time{}, fmt.Errorf("auth: build token claims: %w", err)
 		}

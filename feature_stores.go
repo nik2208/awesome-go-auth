@@ -160,7 +160,7 @@ func (s *MemoryRolesPermissionsStore) GetPermissionsForUser(ctx context.Context,
 		return nil, err
 	}
 	seen := make(map[string]struct{})
-	permissions := make([]string, 0)
+	permissions := make([]string, 0, len(roles)*2)
 	for _, role := range roles {
 		perms, err := s.GetPermissionsForRole(ctx, role)
 		if err != nil {
