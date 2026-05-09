@@ -1,8 +1,8 @@
 # awesome-go-auth
 
-`awesome-go-auth` e una libreria Go per autenticazione con sessioni stateful e token access/refresh.
+`awesome-go-auth` is a Go authentication library with stateful sessions and access/refresh tokens.
 
-## Installazione
+## Installation
 
 ```bash
 go get github.com/nik2208/awesome-go-auth
@@ -40,31 +40,31 @@ func main() {
 }
 ```
 
-## Funzionalità disponibili in questa versione Go
+## Features
 
-- Configurazione sicura con validazione.
-- Register/login con hashing password (bcrypt).
-- Access token + refresh token firmati (HMAC-SHA256) con expiry.
-- Sessioni stateful con rotazione refresh token e revoca (logout).
-- Recupero utente autenticato (`Me`).
+- Secure configuration with validation.
+- Register/login with password hashing (bcrypt).
+- Signed access token + refresh token (HMAC-SHA256) with expiry.
+- Stateful sessions with refresh token rotation and revocation (logout).
+- Authenticated user retrieval (`Me`).
 - Password reset (`ForgotPassword`, `ResetPassword`, `ChangePassword`).
-- Magic link passwordless (`SendMagicLink`, `VerifyMagicLink`).
+- Passwordless magic link (`SendMagicLink`, `VerifyMagicLink`).
 - SMS OTP login (`SendSMSCode`, `VerifySMSCode`).
 - TOTP 2FA (`SetupTOTP`, `VerifyTOTPSetup`, `VerifyTOTP`, `DisableTOTP`).
-- Email verification (`SendVerificationEmailToken`, `VerifyEmail`) e cambio email (`RequestEmailChange`, `ConfirmEmailChange`).
+- Email verification (`SendVerificationEmailToken`, `VerifyEmail`) and email change (`RequestEmailChange`, `ConfirmEmailChange`).
 - Session admin helpers (`ListSessions`, `RevokeSessionByID`, `CleanupExpiredSessions`).
-- User metadata store + helper di service.
-- RBAC multi-tenant in-memory (`MemoryRolesPermissionsStore`) con ruoli e permessi.
-- Tenant store in-memory (`MemoryTenantStore`) con membership utente↔tenant.
-- Custom token claims via `Config.BuildTokenClaims`, replicate anche nel profilo arricchito.
-- API key service + middleware HTTP (`APIKeyService`, `APIKeyMiddleware`).
-- Event bus in-process (`EventBus`) per integrazioni event-driven.
-- Interfacce storage estese + implementazioni in-memory thread-safe per i flussi sopra.
+- User metadata store and service helpers.
+- Multi-tenant in-memory RBAC (`MemoryRolesPermissionsStore`) with roles and permissions.
+- In-memory tenant store (`MemoryTenantStore`) with user↔tenant membership.
+- Custom token claims via `Config.BuildTokenClaims`, also reflected in the enriched profile.
+- API key service and HTTP middleware (`APIKeyService`, `APIKeyMiddleware`).
+- In-process event bus (`EventBus`) for event-driven integrations.
+- Extended storage interfaces and thread-safe in-memory implementations for all the above flows.
 
-## Entrypoint idiomatico + adapter HTTP
+## Idiomatic entrypoint and HTTP adapters
 
-- Entrypoint `auth.New(...)` con functional options (`WithSecret`, `WithTokenTTLs`, `WithUserStore`, `WithSessionStore`, ecc.).
-- Adapter framework-agnostic disponibili:
+- `auth.New(...)` entrypoint with functional options (`WithSecret`, `WithTokenTTLs`, `WithUserStore`, `WithSessionStore`, etc.).
+- Framework-agnostic adapters available:
   - `adapter/nethttp` (`Middleware`, `Mount`)
   - `adapter/chi` (`Middleware`, `Mount`)
   - `adapter/gin` (`Middleware`, `Mount`)
