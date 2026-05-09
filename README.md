@@ -69,3 +69,44 @@ func main() {
   - `adapter/chi` (`Middleware`, `Mount`)
   - `adapter/gin` (`Middleware`, `Mount`)
   - `adapter/echo` (`Middleware`, `Mount`)
+
+## Parity Snapshot
+
+| Feature | awesome-node-auth | awesome-go-auth | Notes |
+|---------|-------------------|-----------------|-------|
+| JWT access + refresh tokens | ✅ | ✅ | HMAC-SHA256, stateful sessions |
+| Token rotation + revocation | ✅ | ✅ | |
+| Email/Password auth (bcrypt) | ✅ | ✅ | |
+| Magic Link | ✅ | ✅ | |
+| SMS OTP | ✅ | ✅ | |
+| TOTP 2FA | ✅ | ✅ | |
+| OAuth 2.0 (Google, GitHub, generic) | ✅ | ✅ | |
+| Account linking | ✅ | ✅ | |
+| Multi-tenancy | ✅ | ✅ | |
+| RBAC | ✅ | ✅ | |
+| Session management | ✅ | ✅ | |
+| API Keys (M2M) | ✅ | ✅ | scopes, IP allowlist |
+| Event Bus | ✅ | ✅ | in-process pub/sub |
+| SSE real-time notifications | ✅ | ✅ | SseDistributor for Redis scaling |
+| Outbound webhooks (HMAC) | ✅ | ✅ | |
+| Inbound webhooks sandbox | ✅ | ⚠️ | Wazero WASM sandbox planned |
+| Telemetry | ✅ | ✅ | TelemetryStore interface |
+| Mail templating i18n | ✅ | ✅ | en + it built-in |
+| HTTP mailer transport | ✅ | ✅ | no SMTP needed |
+| IDP / OIDC mode | ✅ | ✅ | Discovery, JWKS, Auth, Token, UserInfo |
+| Admin UI (embedded) | ✅ | ✅ | embed.FS |
+| Auth UI (embedded) | ✅ | ✅ | embed.FS |
+| auth.js browser SDK | ✅ | ✅ | embed.FS |
+| MCP server | ✅ | ✅ | JSON-RPC tools for AI editors |
+| OpenAPI spec generation | ✅ | ✅ | |
+| net/http adapter | — | ✅ | |
+| Chi adapter | — | ✅ | |
+| Gin adapter | — | ✅ | |
+| Echo adapter | — | ✅ | |
+| User metadata store | ✅ | ✅ | |
+| Password reset flow | ✅ | ✅ | |
+| Email verification | ✅ | ✅ | |
+| Email change flow | ✅ | ✅ | |
+| Custom token claims | ✅ | ✅ | BuildTokenClaims hook |
+| Zero DB dependencies | — | ✅ | interface-based stores |
+| Zero CGo | — | ✅ | CGO_ENABLED=0 compatible |
