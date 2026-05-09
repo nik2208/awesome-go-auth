@@ -139,7 +139,10 @@ func TestTOTPFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup totp: %v", err)
 	}
-	code := generateTOTPCode(secret, now.Unix()/30)
+	code, ok := generateTOTPCode(secret, now.Unix()/30)
+	if !ok {
+		t.Fatal("failed to generate totp code")
+	}
 	if err := svc.VerifyTOTPSetup(ctx, user.ID, user.TenantID, secret, code); err != nil {
 		t.Fatalf("verify setup: %v", err)
 	}

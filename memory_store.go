@@ -227,8 +227,8 @@ func (s *MemoryUserStore) UpdateTOTPSecret(_ context.Context, userID, tenantID, 
 	if !ok || u.TenantID != tenantID {
 		return errors.New("user not found")
 	}
-	u.TotpSecret = secret
-	u.IsTotpEnabled = enabled
+	u.TOTPSecret = secret
+	u.IsTOTPEnabled = enabled
 	s.byID[userID] = u
 	return nil
 }

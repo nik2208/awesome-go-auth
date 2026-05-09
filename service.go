@@ -86,7 +86,7 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (User, AuthTokens, e
 	if !user.IsEmailVerified {
 		return User{}, zeroTokens, ErrEmailNotVerified
 	}
-	if s.cfg.Require2FA || user.Require2FA || user.IsTotpEnabled {
+	if s.cfg.Require2FA || user.Require2FA || user.IsTOTPEnabled {
 		return User{}, zeroTokens, ErrTwoFactorRequired
 	}
 	tokens, err := s.newSessionTokens(ctx, user)
@@ -444,10 +444,10 @@ func (s *Service) VerifyTOTPSetup(ctx context.Context, userID, tenantID, secret,
 
 func (s *Service) VerifyTOTP(ctx context.Context, userID, tenantID, code string) (User, AuthTokens, error) {
 	user, err := s.users.GetUserByID(ctx, userID, tenantID)
-	if err != nil || !user.IsTotpEnabled || user.TotpSecret == "" {
+	if err != nil || !user.IsTOTPEnabled || user.TOTPSecret == "" {
 		return User{}, AuthTokens{}, ErrInvalidCredentials
 	}
-	if !validateTOTPCode(user.TotpSecret, code, s.now()) {
+	if !validateTOTPCode(user.TOTPSecret, code, s.now()) {
 		return User{}, AuthTokens{}, ErrInvalidCode
 	}
 	tokens, err := s.newSessionTokens(ctx, user)

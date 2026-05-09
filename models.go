@@ -14,8 +14,8 @@ type User struct {
 	Role                         string
 	IsEmailVerified              bool
 	Require2FA                   bool
-	IsTotpEnabled                bool
-	TotpSecret                   string
+	IsTOTPEnabled                bool
+	TOTPSecret                   string
 	ResetTokenHash               string
 	ResetTokenExpiresAt          *time.Time
 	MagicLinkTokenHash           string
