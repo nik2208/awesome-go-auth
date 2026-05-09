@@ -183,3 +183,53 @@ func TestResolveUserHelper(t *testing.T) {
 		t.Fatalf("expected ErrInvalidCredentials for whitespace identifiers, got %v", err)
 	}
 }
+
+func TestUpdateProfileAndDeleteAccountFlow(t *testing.T) {
+	svc := testService(t)
+	ctx := context.Background()
+
+	user, _, err := svc.Register(ctx, RegisterInput{Email: "profile@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	updated, err := svc.UpdateProfile(ctx, UpdateProfileInput{
+		UserID:    user.ID,
+		TenantID:  user.TenantID,
+		FirstName: "Mario",
+		LastName:  "Rossi",
+	})
+	if err != nil {
+		t.Fatalf("update profile: %v", err)
+	}
+	if updated.FirstName != "Mario" || updated.LastName != "Rossi" {
+		t.Fatalf("unexpected updated profile: %+v", updated)
+	}
+
+	if err := svc.DeleteAccount(ctx, DeleteAccountInput{UserID: user.ID, TenantID: user.TenantID}); err != nil {
+		t.Fatalf("delete account: %v", err)
+	}
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err == nil {
+		t.Fatal("expected login to fail after account deletion")
+	}
+}
+
+func TestSessionCheckAllCallsRejectsRevokedSessionOnMe(t *testing.T) {
+	ctx := context.Background()
+	cfg := DefaultConfig("01234567890123456789012345678901")
+	cfg.SessionCheckOn = SessionCheckOnAllCalls
+	svc, err := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore())
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	_, tokens, err := svc.Register(ctx, RegisterInput{Email: "sessioncheck@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := svc.Logout(ctx, tokens.RefreshToken); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if _, err := svc.Me(ctx, tokens.AccessToken); err != ErrSessionRevoked {
+		t.Fatalf("expected ErrSessionRevoked, got %v", err)
+	}
+}

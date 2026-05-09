@@ -18,7 +18,7 @@ Complete reference for every public type, interface, function, and option in the
 10. [Telemetry](#telemetry)
 11. [Mailer](#mailer)
 12. [OIDC IDP](#oidc-idp)
-13. [MCP Server](#mcp-server)
+13. [MCP Server (out of parity scope)](#mcp-server-out-of-parity-scope)
 14. [OpenAPI](#openapi)
 15. [Embedded UI](#embedded-ui)
 16. [API Keys](#api-keys)
@@ -60,6 +60,8 @@ Low-level constructor. Use `New()` for most cases.
 | `Refresh(ctx, refreshToken) (AuthTokens, error)` | Rotate refresh token |
 | `Logout(ctx, refreshToken) error` | Revoke session |
 | `Me(ctx, accessToken) (User, error)` | Resolve token to user profile |
+| `UpdateProfile(ctx, UpdateProfileInput) (User, error)` | Update first/last name |
+| `DeleteAccount(ctx, DeleteAccountInput) error` | Delete current account |
 | `ForgotPassword(ctx, ForgotPasswordInput) (string, error)` | Generate reset token |
 | `ResetPassword(ctx, ResetPasswordInput) error` | Consume reset token |
 | `ChangePassword(ctx, ChangePasswordInput) error` | Change password for authenticated user |
@@ -98,6 +100,7 @@ type Config struct {
     Issuer               string
     AccessTokenTTL       time.Duration                 // default: 15m
     RefreshTokenTTL      time.Duration                 // default: 7d
+    SessionCheckOn       string                        // allcalls|refresh|none (default: refresh)
     ResetTokenTTL        time.Duration                 // default: 1h
     MagicLinkTTL         time.Duration                 // default: 15m
     SMSCodeTTL           time.Duration                 // default: 10m
@@ -216,6 +219,8 @@ type SessionStore interface {
 | `UserMetadataStore` | `GetMetadata`, `UpdateMetadata`, `ClearMetadata` | GetMetadata, UpdateMetadata |
 | `RolesPermissionsStore` | `AddRoleToUser`, `RemoveRoleFromUser`, `GetRolesForUser`, `CreateRole`, `DeleteRole`, `AddPermissionToRole`, `RemovePermissionFromRole`, `GetPermissionsForRole`, `GetPermissionsForUser`, `UserHasPermission` | CreateRole, AssignRole, UserHasPermission |
 | `TenantStore` | `CreateTenant`, `GetTenantByID`, `GetAllTenants`, `UpdateTenant`, `DeleteTenant`, `AssociateUserWithTenant`, `DisassociateUserFromTenant`, `GetTenantsForUser`, `GetUsersForTenant` | CreateTenant, AddUserToTenant |
+| `UserAccountStore` | `UpdateProfile`, `DeleteUser` | UpdateProfile, DeleteAccount |
+| `SessionLookupStore` | `GetSessionByID` | SessionCheckOn=allcalls (`Me`) |
 
 ---
 
@@ -493,7 +498,7 @@ ID tokens are RS256-signed JWTs built entirely from the standard library.
 
 ---
 
-## MCP Server
+## MCP Server (out of parity scope)
 
 ### `NewMCPServer(authSvc *Service) *MCPServer`
 

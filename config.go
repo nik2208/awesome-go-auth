@@ -3,7 +3,14 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
+)
+
+const (
+	SessionCheckOnAllCalls = "allcalls"
+	SessionCheckOnRefresh  = "refresh"
+	SessionCheckOnNone     = "none"
 )
 
 // Config contains security and token settings for the auth service.
@@ -12,6 +19,7 @@ type Config struct {
 	Issuer               string
 	AccessTokenTTL       time.Duration
 	RefreshTokenTTL      time.Duration
+	SessionCheckOn       string
 	ClockSkew            time.Duration
 	MinPasswordLen       int
 	ResetTokenTTL        time.Duration
@@ -32,6 +40,7 @@ func DefaultConfig(secret string) Config {
 		Issuer:               "awesome-go-auth",
 		AccessTokenTTL:       15 * time.Minute,
 		RefreshTokenTTL:      30 * 24 * time.Hour,
+		SessionCheckOn:       SessionCheckOnRefresh,
 		ClockSkew:            30 * time.Second,
 		MinPasswordLen:       8,
 		ResetTokenTTL:        1 * time.Hour,
@@ -52,6 +61,11 @@ func (c Config) validate() error {
 	}
 	if c.RefreshTokenTTL <= 0 {
 		return errors.New("auth: refresh token ttl must be > 0")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.SessionCheckOn)) {
+	case "", SessionCheckOnAllCalls, SessionCheckOnRefresh, SessionCheckOnNone:
+	default:
+		return errors.New("auth: session check mode must be one of allcalls|refresh|none")
 	}
 	if c.MinPasswordLen < 8 {
 		return errors.New("auth: min password len must be >= 8")

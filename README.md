@@ -46,7 +46,10 @@ func main() {
 - Register/login con hashing password (bcrypt).
 - Access token + refresh token firmati (HMAC-SHA256) con expiry.
 - Sessioni stateful con rotazione refresh token e revoca (logout).
+- Policy session check configurabile (`allcalls` / `refresh` / `none`).
 - Recupero utente autenticato (`Me`).
+- Gestione account (`UpdateProfile`, `DeleteAccount`) oltre a password/email lifecycle.
+- Middleware CSRF double-submit (cookie + header) per flussi browser.
 - Password reset (`ForgotPassword`, `ResetPassword`, `ChangePassword`).
 - Magic link passwordless (`SendMagicLink`, `VerifyMagicLink`).
 - SMS OTP login (`SendSMSCode`, `VerifySMSCode`).
@@ -70,43 +73,24 @@ func main() {
   - `adapter/gin` (`Middleware`, `Mount`)
   - `adapter/echo` (`Middleware`, `Mount`)
 
-## Parity Snapshot
+## Parity Snapshot vs `awesome-node-auth`
 
-| Feature | awesome-node-auth | awesome-go-auth | Notes |
-|---------|-------------------|-----------------|-------|
-| JWT access + refresh tokens | ✅ | ✅ | HMAC-SHA256, stateful sessions |
-| Token rotation + revocation | ✅ | ✅ | |
-| Email/Password auth (bcrypt) | ✅ | ✅ | |
-| Magic Link | ✅ | ✅ | |
-| SMS OTP | ✅ | ✅ | |
-| TOTP 2FA | ✅ | ✅ | |
-| OAuth 2.0 (Google, GitHub, generic) | ✅ | ✅ | |
-| Account linking | ✅ | ✅ | |
-| Multi-tenancy | ✅ | ✅ | |
-| RBAC | ✅ | ✅ | |
-| Session management | ✅ | ✅ | |
-| API Keys (M2M) | ✅ | ✅ | scopes, IP allowlist |
-| Event Bus | ✅ | ✅ | in-process pub/sub |
-| SSE real-time notifications | ✅ | ✅ | SseDistributor for Redis scaling |
-| Outbound webhooks (HMAC) | ✅ | ✅ | |
-| Inbound webhooks sandbox | ✅ | ⚠️ | Wazero WASM sandbox planned |
-| Telemetry | ✅ | ✅ | TelemetryStore interface |
-| Mail templating i18n | ✅ | ✅ | en + it built-in |
-| HTTP mailer transport | ✅ | ✅ | no SMTP needed |
-| IDP / OIDC mode | ✅ | ✅ | Discovery, JWKS, Auth, Token, UserInfo |
-| Admin UI (embedded) | ✅ | ✅ | embed.FS |
-| Auth UI (embedded) | ✅ | ✅ | embed.FS |
-| auth.js browser SDK | ✅ | ✅ | embed.FS |
-| MCP server | ✅ | ✅ | JSON-RPC tools for AI editors |
-| OpenAPI spec generation | ✅ | ✅ | |
-| net/http adapter | — | ✅ | |
-| Chi adapter | — | ✅ | |
-| Gin adapter | — | ✅ | |
-| Echo adapter | — | ✅ | |
-| User metadata store | ✅ | ✅ | |
-| Password reset flow | ✅ | ✅ | |
-| Email verification | ✅ | ✅ | |
-| Email change flow | ✅ | ✅ | |
-| Custom token claims | ✅ | ✅ | BuildTokenClaims hook |
-| Zero DB dependencies | — | ✅ | interface-based stores |
-| Zero CGo | — | ✅ | CGO_ENABLED=0 compatible |
+| Capability | Status in `awesome-go-auth` | Notes |
+|------------|-----------------------------|-------|
+| Auth strategies (email/password, magic link, SMS OTP, TOTP 2FA, OAuth linking) | ✅ Implemented | OAuth + account linking in `oauth.go`. |
+| Token management (cookie/bearer, access/refresh rotation, secure cookies) | ✅ Implemented | Adapter HTTP supportano cookie e bearer; rotation attiva. |
+| Identity Provider (IdP) mode (RS256 + JWKS + resource server validation) | ✅ Implemented | OIDC IdP con discovery, authorize, token, userinfo e JWKS. |
+| Stateful sessions | ✅ Implemented | Revoca/rotation + `Config.SessionCheckOn` (`allcalls`/`refresh`/`none`). |
+| Dynamic email templates + UI i18n fallback | ✅ Implemented | Template mail + fallback i18n built-in. |
+| CSRF protection | ✅ Implemented | `CSRFMiddleware` cookie+header double-submit. |
+| Account management | ✅ Implemented | Register, `UpdateProfile`, `DeleteAccount`, password/email lifecycle. |
+| Account linking | ✅ Implemented | Pending link + linked account store. |
+| RBAC | ✅ Implemented | `RolesPermissionsStore` tenant-aware. |
+| Multi-tenancy | ✅ Implemented | `TenantStore` e membership utente↔tenant. |
+| Admin panel | ✅ Implemented | `ServeAdminUI()` embedded. |
+| Built-in UI + auth runtime (`auth.js`) | ✅ Implemented | `ServeAuthUI()` + `ServeAuthJS()`. |
+| Client libraries compatibility (Angular + Flutter) | ✅ Implemented | Cookie+CSRF browser e bearer per native client. |
+| Event-driven tooling (event bus, SSE, inbound/outbound webhooks, telemetry, notify channels) | ✅ Implemented | Event bus, SSE, webhooks, telemetry, notify. |
+| API keys (M2M) | ✅ Implemented | `APIKeyService` + middleware API key. |
+| OpenAPI / Swagger docs | ✅ Implemented | `GenerateOpenAPISpec`. |
+| MCP server (`awesome-node-auth-mcp-server`) | ➖ Out of scope | Fuori scope di parity per questa libreria. |

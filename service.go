@@ -185,6 +185,9 @@ func (s *Service) Me(ctx context.Context, accessToken string) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
+	if err := s.validateSessionForAccess(ctx, claims); err != nil {
+		return User{}, err
+	}
 	user, err := s.users.GetUserByID(ctx, claims.Sub, claims.Tid)
 	if err != nil {
 		return User{}, ErrInvalidToken
@@ -571,6 +574,40 @@ func (s *Service) CleanupExpiredSessions(ctx context.Context) (int, error) {
 	return store.DeleteExpiredSessions(ctx, s.now())
 }
 
+func (s *Service) UpdateProfile(ctx context.Context, in UpdateProfileInput) (User, error) {
+	accountStore, ok := s.users.(UserAccountStore)
+	if !ok {
+		return User{}, ErrFeatureNotSupported
+	}
+	updated, err := accountStore.UpdateProfile(ctx, in.UserID, in.TenantID, strings.TrimSpace(in.FirstName), strings.TrimSpace(in.LastName))
+	if err != nil {
+		return User{}, fmt.Errorf("auth: update profile: %w", err)
+	}
+	return s.enrichUser(ctx, updated)
+}
+
+func (s *Service) DeleteAccount(ctx context.Context, in DeleteAccountInput) error {
+	accountStore, ok := s.users.(UserAccountStore)
+	if !ok {
+		return ErrFeatureNotSupported
+	}
+	if err := accountStore.DeleteUser(ctx, in.UserID, in.TenantID); err != nil {
+		return fmt.Errorf("auth: delete account: %w", err)
+	}
+	if adminStore, ok := s.sessions.(SessionAdminStore); ok {
+		sessions, err := adminStore.ListSessionsForUser(ctx, in.UserID, in.TenantID)
+		if err == nil {
+			for _, session := range sessions {
+				_ = adminStore.RevokeSessionByID(ctx, session.ID)
+			}
+		}
+	}
+	if s.metadata != nil {
+		_ = s.metadata.ClearMetadata(ctx, in.UserID)
+	}
+	return nil
+}
+
 func (s *Service) resolveUser(ctx context.Context, userID, email, tenantID string) (User, error) {
 	trimmedUserID := strings.TrimSpace(userID)
 	trimmedEmail := strings.TrimSpace(email)
@@ -586,6 +623,61 @@ func (s *Service) resolveUser(ctx context.Context, userID, email, tenantID strin
 func (s *Service) requiresTwoFactor(user User) bool {
 	hasTOTP := user.IsTOTPEnabled && strings.TrimSpace(user.TOTPSecret) != ""
 	return s.cfg.Require2FA || user.Require2FA || hasTOTP
+}
+
+func (s *Service) validateSessionForAccess(ctx context.Context, claims tokenClaims) error {
+	mode := strings.ToLower(strings.TrimSpace(s.cfg.SessionCheckOn))
+	if mode == "" {
+		mode = SessionCheckOnRefresh
+	}
+	if mode != SessionCheckOnAllCalls {
+		return nil
+	}
+	if strings.TrimSpace(claims.Sid) == "" {
+		return ErrInvalidToken
+	}
+
+	if lookup, ok := s.sessions.(SessionLookupStore); ok {
+		session, err := lookup.GetSessionByID(ctx, claims.Sid)
+		if err != nil {
+			return ErrSessionNotFound
+		}
+		return s.validateSessionState(session, claims)
+	}
+	if admin, ok := s.sessions.(SessionAdminStore); ok {
+		sessions, err := admin.ListSessionsForUser(ctx, claims.Sub, claims.Tid)
+		if err != nil {
+			return ErrSessionNotFound
+		}
+		for _, session := range sessions {
+			if session.ID == claims.Sid {
+				return s.validateSessionState(session, claims)
+			}
+		}
+		return ErrSessionNotFound
+	}
+
+	s.logf("auth: session all-calls check requested but session store does not support lookup")
+	return nil
+}
+
+func (s *Service) validateSessionState(session Session, claims tokenClaims) error {
+	if session.ID != claims.Sid {
+		return ErrInvalidToken
+	}
+	if session.UserID != claims.Sub {
+		return ErrInvalidToken
+	}
+	if session.TenantID != claims.Tid {
+		return ErrInvalidToken
+	}
+	if session.RevokedAt != nil {
+		return ErrSessionRevoked
+	}
+	if s.now().After(session.ExpiresAt.Add(s.cfg.ClockSkew)) {
+		return ErrInvalidToken
+	}
+	return nil
 }
 
 func (s *Service) enrichUser(ctx context.Context, user User) (User, error) {
