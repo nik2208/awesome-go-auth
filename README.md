@@ -60,3 +60,12 @@ func main() {
 - API key service + middleware HTTP (`APIKeyService`, `APIKeyMiddleware`).
 - Event bus in-process (`EventBus`) per integrazioni event-driven.
 - Interfacce storage estese + implementazioni in-memory thread-safe per i flussi sopra.
+
+## Entrypoint idiomatico + adapter HTTP
+
+- Entrypoint `auth.New(...)` con functional options (`WithSecret`, `WithTokenTTLs`, `WithUserStore`, `WithSessionStore`, ecc.).
+- Adapter framework-agnostic disponibili:
+  - `adapter/nethttp` (`Middleware`, `Mount`)
+  - `adapter/chi` (`Middleware`, `Mount`)
+  - `adapter/gin` (`Middleware`, `Mount`)
+  - `adapter/echo` (`Middleware`, `Mount`)
