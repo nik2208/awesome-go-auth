@@ -170,3 +170,13 @@ func (a *Auth) Logout(ctx context.Context, refreshToken string) error {
 func (a *Auth) Me(ctx context.Context, accessToken string) (User, error) {
 	return a.service.Me(ctx, accessToken)
 }
+
+// UpdateProfile delegates to Service.UpdateProfile.
+func (a *Auth) UpdateProfile(ctx context.Context, in UpdateProfileInput) (User, error) {
+	return a.service.UpdateProfile(ctx, in)
+}
+
+// DeleteAccount delegates to Service.DeleteAccount.
+func (a *Auth) DeleteAccount(ctx context.Context, in DeleteAccountInput) error {
+	return a.service.DeleteAccount(ctx, in)
+}

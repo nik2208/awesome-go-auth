@@ -12,11 +12,22 @@ type UserStore interface {
 	GetUserByID(ctx context.Context, id, tenantID string) (User, error)
 }
 
+// UserAccountStore adds account lifecycle operations.
+type UserAccountStore interface {
+	UpdateProfile(ctx context.Context, userID, tenantID, firstName, lastName string) (User, error)
+	DeleteUser(ctx context.Context, userID, tenantID string) error
+}
+
 // SessionStore persists refresh-token sessions.
 type SessionStore interface {
 	CreateSession(ctx context.Context, session Session) (Session, error)
 	GetSessionByRefreshTokenHash(ctx context.Context, tokenHash string) (Session, error)
 	UpdateSession(ctx context.Context, session Session) error
+}
+
+// SessionLookupStore resolves sessions by session ID.
+type SessionLookupStore interface {
+	GetSessionByID(ctx context.Context, sessionID string) (Session, error)
 }
 
 // UserPasswordStore adds password lifecycle methods.

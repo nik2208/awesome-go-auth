@@ -73,6 +73,44 @@ func (s *MemoryUserStore) GetUserByID(_ context.Context, id, tenantID string) (U
 	return u, nil
 }
 
+func (s *MemoryUserStore) UpdateProfile(_ context.Context, userID, tenantID, firstName, lastName string) (User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.byID[userID]
+	if !ok || u.TenantID != tenantID {
+		return User{}, errors.New("user not found")
+	}
+	u.FirstName = firstName
+	u.LastName = lastName
+	u.UpdatedAt = time.Now()
+	s.byID[userID] = u
+	return u, nil
+}
+
+func (s *MemoryUserStore) DeleteUser(_ context.Context, userID, tenantID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.byID[userID]
+	if !ok || u.TenantID != tenantID {
+		return errors.New("user not found")
+	}
+	delete(s.byID, userID)
+	delete(s.byEmail, userEmailKey(u.Email, u.TenantID))
+	if u.ResetTokenHash != "" {
+		delete(s.byResetToken, u.ResetTokenHash)
+	}
+	if u.MagicLinkTokenHash != "" {
+		delete(s.byMagicToken, u.MagicLinkTokenHash)
+	}
+	if u.EmailVerificationTokenHash != "" {
+		delete(s.byVerifyToken, u.EmailVerificationTokenHash)
+	}
+	if u.EmailChangeTokenHash != "" {
+		delete(s.byEmailChangeToken, u.EmailChangeTokenHash)
+	}
+	return nil
+}
+
 func (s *MemoryUserStore) UpdatePassword(_ context.Context, userID, tenantID, passwordHash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -389,6 +427,16 @@ func (s *MemorySessionStore) GetSessionByRefreshTokenHash(_ context.Context, tok
 		return Session{}, ErrSessionNotFound
 	}
 	session, ok := s.byID[sid]
+	if !ok {
+		return Session{}, ErrSessionNotFound
+	}
+	return session, nil
+}
+
+func (s *MemorySessionStore) GetSessionByID(_ context.Context, sessionID string) (Session, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	session, ok := s.byID[sessionID]
 	if !ok {
 		return Session{}, ErrSessionNotFound
 	}
