@@ -105,6 +105,7 @@ type Config struct {
     MagicLinkTTL         time.Duration                 // default: 15m
     SMSCodeTTL           time.Duration                 // default: 10m
     EmailVerificationTTL time.Duration                 // default: 24h
+    EmailVerificationMode string                       // none|lazy|strict (default: none)
     EmailChangeTTL       time.Duration                 // default: 24h
     ClockSkew            time.Duration                 // default: 5s
     MinPasswordLen       int                           // default: 8
