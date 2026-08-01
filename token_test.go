@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -47,6 +48,57 @@ func resignWithHeader(t *testing.T, token, secret string, header map[string]any)
 	}
 	sigInput := base64.RawURLEncoding.EncodeToString(raw) + "." + payload
 	return sigInput + "." + sign(sigInput, secret)
+}
+
+// resignWithRawHeader is resignWithHeader for headers that must be byte-exact:
+// it takes the header as verbatim JSON so member order and duplicate members
+// survive, which marshalling a Go map would not preserve.
+func resignWithRawHeader(t *testing.T, token, secret, headerJSON string) string {
+	t.Helper()
+	_, payload, _, err := splitToken(token)
+	if err != nil {
+		t.Fatalf("split token: %v", err)
+	}
+	sigInput := base64.RawURLEncoding.EncodeToString([]byte(headerJSON)) + "." + payload
+	return sigInput + "." + sign(sigInput, secret)
+}
+
+// decodeRawSegment decodes one base64url JWT segment to its raw bytes.
+func decodeRawSegment(t *testing.T, segment string) []byte {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(segment)
+	if err != nil {
+		t.Fatalf("decode segment: %v", err)
+	}
+	return raw
+}
+
+// mutateOneByte replaces old with new in raw and asserts that the result is
+// still well-formed JSON differing from the input in exactly one byte, so a
+// test built on it really pins single-byte sensitivity rather than accidentally
+// tripping a base64 or JSON decode error.
+func mutateOneByte(t *testing.T, raw []byte, old, new string) []byte {
+	t.Helper()
+	mutated := bytes.Replace(raw, []byte(old), []byte(new), 1)
+	if bytes.Equal(mutated, raw) {
+		t.Fatalf("substring %q not found in %s", old, raw)
+	}
+	if len(mutated) != len(raw) {
+		t.Fatalf("mutation changed the segment length: %d -> %d", len(raw), len(mutated))
+	}
+	diff := 0
+	for i := range raw {
+		if raw[i] != mutated[i] {
+			diff++
+		}
+	}
+	if diff != 1 {
+		t.Fatalf("expected exactly one byte to change, %d changed", diff)
+	}
+	if !json.Valid(mutated) {
+		t.Fatalf("mutated segment is not valid JSON: %s", mutated)
+	}
+	return mutated
 }
 
 func TestIssueToken_AccessAndParse(t *testing.T) {
@@ -262,12 +314,140 @@ func TestParseToken_RejectsAlgConfusion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("issueToken: %v", err)
 	}
-	for _, alg := range []string{"RS256", "HS512", "hs256", ""} {
+	for _, alg := range []string{"RS256", "RS512", "HS384", "HS512", "ES256", "hs256", ""} {
 		resigned := resignWithHeader(t, token, svc.cfg.Secret, map[string]any{"alg": alg, "typ": "JWT"})
 		if _, err := svc.parseToken(resigned, "access"); err != ErrInvalidToken {
 			t.Fatalf("expected ErrInvalidToken for alg %q, got %v", alg, err)
 		}
 	}
+}
+
+// TestParseToken_RejectsHeaderWithoutExactAlgMember pins the *member name* of
+// the allow-list check, not only its value. Decoding the header into a struct
+// makes encoding/json match fields case-insensitively, which accepts headers
+// carrying no lowercase "alg" at all — and, worse, a header whose lowercase
+// "alg" says "none" but which is followed by an "ALG" member that overwrites
+// the field. Every spec-compliant verifier reads such a token as alg "none"
+// and refuses it; so must this one.
+func TestParseToken_RejectsHeaderWithoutExactAlgMember(t *testing.T) {
+	svc := testServiceForToken(t)
+	ctx := context.Background()
+	user := User{ID: "usr_021", TenantID: "t1"}
+	token, _, err := svc.issueToken(ctx, user, "ses_021", "access", 15*time.Minute)
+	if err != nil {
+		t.Fatalf("issueToken: %v", err)
+	}
+	// Control: the byte-exact header of a real token must still parse when it
+	// is re-signed through the same path the negative cases use.
+	control := resignWithRawHeader(t, token, svc.cfg.Secret, `{"alg":"HS256","typ":"JWT"}`)
+	if _, err := svc.parseToken(control, "access"); err != nil {
+		t.Fatalf("a byte-exact HS256 header must parse: %v", err)
+	}
+	for _, header := range []string{
+		`{"ALG":"HS256","typ":"JWT"}`,
+		`{"Alg":"HS256","typ":"JWT"}`,
+		`{"alg":"none","ALG":"HS256","typ":"JWT"}`,
+		`{"typ":"JWT"}`,
+		`{"alg":256,"typ":"JWT"}`,
+		`{"alg":["HS256"],"typ":"JWT"}`,
+	} {
+		resigned := resignWithRawHeader(t, token, svc.cfg.Secret, header)
+		if _, err := svc.parseToken(resigned, "access"); err != ErrInvalidToken {
+			t.Fatalf("expected ErrInvalidToken for header %s, got %v", header, err)
+		}
+	}
+}
+
+// TestParseToken_SingleByteMutation alters exactly one byte of the header JSON,
+// then exactly one byte of the claims JSON, leaving both segments well-formed
+// base64url and well-formed JSON and reusing the original signature. The
+// signing input is the two segments verbatim, so both tokens must fail on the
+// MAC — the header case in particular cannot be rejected by the allow-list,
+// since alg stays "HS256".
+func TestParseToken_SingleByteMutation(t *testing.T) {
+	svc := testServiceForToken(t)
+	ctx := context.Background()
+	user := User{ID: "usr_022", TenantID: "t1"}
+	token, _, err := svc.issueToken(ctx, user, "ses_022", "access", 15*time.Minute)
+	if err != nil {
+		t.Fatalf("issueToken: %v", err)
+	}
+	header, payload, sig, err := splitToken(token)
+	if err != nil {
+		t.Fatalf("split token: %v", err)
+	}
+
+	// {"alg":"HS256","typ":"JWT"} -> {"alg":"HS256","typ":"JWt"}
+	mutatedHeader := mutateOneByte(t, decodeRawSegment(t, header), `"typ":"JWT"`, `"typ":"JWt"`)
+	forged := base64.RawURLEncoding.EncodeToString(mutatedHeader) + "." + payload + "." + sig
+	if _, err := svc.parseToken(forged, "access"); err != ErrInvalidToken {
+		t.Fatalf("expected ErrInvalidToken for a single-byte header change, got %v", err)
+	}
+
+	// "sub":"usr_022" -> "sub":"usr_023"
+	mutatedPayload := mutateOneByte(t, decodeRawSegment(t, payload), `"sub":"usr_022"`, `"sub":"usr_023"`)
+	forged = header + "." + base64.RawURLEncoding.EncodeToString(mutatedPayload) + "." + sig
+	if _, err := svc.parseToken(forged, "access"); err != ErrInvalidToken {
+		t.Fatalf("expected ErrInvalidToken for a single-byte claims change, got %v", err)
+	}
+}
+
+// TestParseToken_TypeIsNotInterchangeable pins the typ claim in both
+// directions: an access token must not satisfy a refresh-token check and a
+// refresh token must not satisfy an access-token check. TestParseToken_WrongType
+// only covers the first direction.
+func TestParseToken_TypeIsNotInterchangeable(t *testing.T) {
+	svc := testServiceForToken(t)
+	ctx := context.Background()
+	user := User{ID: "usr_023", TenantID: "t1"}
+	access, _, err := svc.issueToken(ctx, user, "ses_023", "access", 15*time.Minute)
+	if err != nil {
+		t.Fatalf("issueToken access: %v", err)
+	}
+	refresh, _, err := svc.issueToken(ctx, user, "ses_023", "refresh", 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("issueToken refresh: %v", err)
+	}
+	if _, err := svc.parseToken(access, "refresh"); err != ErrInvalidToken {
+		t.Fatalf("an access token must not be accepted where a refresh token is required, got %v", err)
+	}
+	if _, err := svc.parseToken(refresh, "access"); err != ErrInvalidToken {
+		t.Fatalf("a refresh token must not be accepted where an access token is required, got %v", err)
+	}
+	if _, err := svc.parseToken(access, "access"); err != nil {
+		t.Fatalf("access token must parse as access: %v", err)
+	}
+	if _, err := svc.parseToken(refresh, "refresh"); err != nil {
+		t.Fatalf("refresh token must parse as refresh: %v", err)
+	}
+	// The distinction is carried by the typ claim itself, not by anything
+	// outside the token: rewriting typ (and re-signing with the real secret)
+	// is what a holder of the secret would do, and the claim is what decides.
+	claims := decodeSegment(t, mustSegment(t, refresh, 1))
+	claims["typ"] = "access"
+	raw, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
+	headerSeg := mustSegment(t, refresh, 0)
+	sigInput := headerSeg + "." + base64.RawURLEncoding.EncodeToString(raw)
+	promoted := sigInput + "." + sign(sigInput, svc.cfg.Secret)
+	if _, err := svc.parseToken(promoted, "access"); err != nil {
+		t.Fatalf("typ is the discriminator, so a re-signed typ=access token must parse: %v", err)
+	}
+	if _, err := svc.parseToken(promoted, "refresh"); err != ErrInvalidToken {
+		t.Fatalf("expected ErrInvalidToken once typ no longer says refresh, got %v", err)
+	}
+}
+
+// mustSegment returns segment i of a compact JWS serialization.
+func mustSegment(t *testing.T, token string, i int) string {
+	t.Helper()
+	header, payload, sig, err := splitToken(token)
+	if err != nil {
+		t.Fatalf("split token: %v", err)
+	}
+	return []string{header, payload, sig}[i]
 }
 
 func TestParseToken_CrossSecret(t *testing.T) {
