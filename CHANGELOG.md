@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ui/auth.js` — vanilla JS browser SDK (~3KB, no dependencies)
 - **Examples**: `examples/chi-postgres/`, `examples/gin-mongodb/`, `examples/echo-sqlite/`
 - **Community files**: CONTRIBUTING.md, CODE_OF_CONDUCT.md, SECURITY.md, issue templates, PR template
+- **Email verification mode** (`config.go`, `service.go`): `Config.EmailVerificationMode`, one of `none`|`lazy`|`strict`, default `none`. Previously `Register` hardcoded `IsEmailVerified: true`, which made the verification flow a no-op for self-registered users. `none` keeps the old behaviour exactly: `Register` marks the address verified, and `Login` still refuses any address that is unverified for another reason. `lazy` registers unverified and allows login; `strict` registers unverified and refuses login until the address is confirmed. `lazy` is the only mode that relaxes the pre-existing `Login` gate, so an embedder that does not set the field sees no behaviour change.
+
+### Known limitations
+- `EmailVerificationMode: strict` gates `Login`, not access as a whole: `Register` still returns a usable token pair, so a caller can hold a session without ever verifying (#21).
+- `EmailVerificationMode: strict` is not reachable over HTTP: no adapter route exposes `SendVerificationEmailToken` or `VerifyEmail` (#9).
+- `EmailVerificationMode: lazy` has no grace deadline; the Node reference expires it via `emailVerificationDeadline`, and the Go `User` has no such field.
 
 ## [0.1.0] - Initial Release
 
