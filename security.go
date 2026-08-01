@@ -79,10 +79,12 @@ func secureEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-func splitToken(token string) (payload, sig string, err error) {
+// splitToken splits a compact JWS serialization into its header, payload and
+// signature segments.
+func splitToken(token string) (header, payload, sig string, err error) {
 	parts := strings.Split(token, ".")
-	if len(parts) != 2 {
-		return "", "", errors.New("invalid token format")
+	if len(parts) != 3 {
+		return "", "", "", errors.New("invalid token format")
 	}
-	return parts[0], parts[1], nil
+	return parts[0], parts[1], parts[2], nil
 }
