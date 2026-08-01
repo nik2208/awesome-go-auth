@@ -62,7 +62,7 @@ func Mount(group gin.IRoutes, a *auth.Auth) {
 			return
 		}
 		setAuthCookies(c, tokens)
-		c.JSON(http.StatusCreated, gin.H{"user": user, "tokens": tokens})
+		c.JSON(http.StatusCreated, gin.H{"user": auth.NewPublicUser(user), "tokens": tokens})
 	})
 
 	group.POST("/auth/login", func(c *gin.Context) {
@@ -81,7 +81,7 @@ func Mount(group gin.IRoutes, a *auth.Auth) {
 			return
 		}
 		setAuthCookies(c, tokens)
-		c.JSON(http.StatusOK, gin.H{"user": user, "tokens": tokens})
+		c.JSON(http.StatusOK, gin.H{"user": auth.NewPublicUser(user), "tokens": tokens})
 	})
 
 	group.POST("/auth/refresh", func(c *gin.Context) {
@@ -142,7 +142,7 @@ func Mount(group gin.IRoutes, a *auth.Auth) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"user": user})
+		c.JSON(http.StatusOK, gin.H{"user": auth.NewPublicUser(user)})
 	})
 }
 

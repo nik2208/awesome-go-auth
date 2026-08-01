@@ -98,7 +98,7 @@ func (a *Adapter) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setAuthCookies(w, tokens)
-	writeJSON(w, http.StatusCreated, map[string]any{"user": user, "tokens": tokens})
+	writeJSON(w, http.StatusCreated, map[string]any{"user": auth.NewPublicUser(user), "tokens": tokens})
 }
 
 // Login handles POST /auth/login.
@@ -113,7 +113,7 @@ func (a *Adapter) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setAuthCookies(w, tokens)
-	writeJSON(w, http.StatusOK, map[string]any{"user": user, "tokens": tokens})
+	writeJSON(w, http.StatusOK, map[string]any{"user": auth.NewPublicUser(user), "tokens": tokens})
 }
 
 // Refresh handles POST /auth/refresh.
@@ -167,7 +167,7 @@ func (a *Adapter) Me(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+	writeJSON(w, http.StatusOK, map[string]any{"user": auth.NewPublicUser(user)})
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {

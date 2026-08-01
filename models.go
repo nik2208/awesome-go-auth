@@ -45,6 +45,66 @@ type Tenant struct {
 	CreatedAt time.Time
 }
 
+// PublicUser is the response-safe projection of User. It is the only user shape
+// adapters may serialise: credential material (password hash, TOTP secret,
+// one-time token hashes and the pending email change) is deliberately absent.
+type PublicUser struct {
+	ID              string         `json:"id"`
+	Email           string         `json:"email"`
+	TenantID        string         `json:"tenantId,omitempty"`
+	FirstName       string         `json:"firstName,omitempty"`
+	LastName        string         `json:"lastName,omitempty"`
+	PhoneNumber     string         `json:"phoneNumber,omitempty"`
+	IsEmailVerified bool           `json:"isEmailVerified"`
+	IsTOTPEnabled   bool           `json:"isTotpEnabled"`
+	Roles           []string       `json:"roles,omitempty"`
+	Permissions     []string       `json:"permissions,omitempty"`
+	Tenants         []PublicTenant `json:"tenants,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	CustomClaims    map[string]any `json:"customClaims,omitempty"`
+	CreatedAt       time.Time      `json:"createdAt"`
+}
+
+// PublicTenant is the response-safe projection of Tenant. The tenant Config
+// blob is server-side configuration and is never serialised.
+type PublicTenant struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	IsActive  bool      `json:"isActive"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// NewPublicUser projects a User onto its response-safe representation.
+func NewPublicUser(user User) PublicUser {
+	public := PublicUser{
+		ID:              user.ID,
+		Email:           user.Email,
+		TenantID:        user.TenantID,
+		FirstName:       user.FirstName,
+		LastName:        user.LastName,
+		PhoneNumber:     user.PhoneNumber,
+		IsEmailVerified: user.IsEmailVerified,
+		IsTOTPEnabled:   user.IsTOTPEnabled,
+		Roles:           user.Roles,
+		Permissions:     user.Permissions,
+		Metadata:        user.Metadata,
+		CustomClaims:    user.CustomClaims,
+		CreatedAt:       user.CreatedAt,
+	}
+	if len(user.Tenants) > 0 {
+		public.Tenants = make([]PublicTenant, 0, len(user.Tenants))
+		for _, tenant := range user.Tenants {
+			public.Tenants = append(public.Tenants, PublicTenant{
+				ID:        tenant.ID,
+				Name:      tenant.Name,
+				IsActive:  tenant.IsActive,
+				CreatedAt: tenant.CreatedAt,
+			})
+		}
+	}
+	return public
+}
+
 // Session stores refresh-token bound session metadata.
 type Session struct {
 	ID               string
