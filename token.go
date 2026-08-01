@@ -90,11 +90,7 @@ func (s *Service) parseToken(token, expectedType string) (tokenClaims, error) {
 	if err != nil {
 		return claims, ErrInvalidToken
 	}
-	var jose joseHeader
-	if err := json.Unmarshal(rawHeader, &jose); err != nil {
-		return claims, ErrInvalidToken
-	}
-	if jose.Alg != tokenAlg {
+	if alg, ok := headerAlg(rawHeader); !ok || alg != tokenAlg {
 		return claims, ErrInvalidToken
 	}
 	if !secureEqual(sign(header+"."+payload, s.cfg.Secret), sig) {
@@ -119,8 +115,40 @@ func (s *Service) parseToken(token, expectedType string) (tokenClaims, error) {
 	return claims, nil
 }
 
+// headerAlg returns the alg member of a decoded JOSE header, reporting false
+// when the header is not a JSON object, carries no alg member, or carries one
+// that is not a JSON string.
+//
+// The header is decoded into raw members rather than into joseHeader because
+// encoding/json matches struct fields case-insensitively: unmarshalling into
+// joseHeader accepts a header whose only algorithm member is "ALG", and a
+// header reading {"alg":"none","ALG":"HS256"} would have its "none" overwritten
+// by the later member and be accepted, while every spec-compliant verifier
+// reads that same header as alg "none" and refuses it. joseHeader is still the
+// type used to build headers, where the member names are ours to choose.
+func headerAlg(rawHeader []byte) (string, bool) {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(rawHeader, &members); err != nil {
+		return "", false
+	}
+	rawAlg, ok := members["alg"]
+	if !ok {
+		return "", false
+	}
+	var alg string
+	if err := json.Unmarshal(rawAlg, &alg); err != nil {
+		return "", false
+	}
+	return alg, true
+}
+
 // buildHS256JWT creates a signed HS256 JWT using only standard library
 // packages, mirroring buildRS256JWT in idp.go.
+//
+// The JWS signing input is exactly the ASCII string
+// base64url(header) + "." + base64url(claims), both segments unpadded, as
+// RFC 7515 section 5.1 requires — the header is inside the signed bytes, so it
+// cannot be swapped on a token in flight.
 func buildHS256JWT(claims map[string]any, secret string) (string, error) {
 	headerBytes, err := json.Marshal(joseHeader{Alg: tokenAlg, Typ: "JWT"})
 	if err != nil {

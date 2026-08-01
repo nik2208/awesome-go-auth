@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"strings"
 	"testing"
 	"time"
 )
@@ -33,6 +34,22 @@ func TestIssueToken_SignatureCoversHeaderAndPayload(t *testing.T) {
 	want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	if sig != want {
 		t.Fatalf("signature is not HMAC-SHA256 over header.payload: got %q, want %q", sig, want)
+	}
+	// The signing input is those two segments and nothing else: no padding, no
+	// separator other than the single ASCII ".", nothing appended.
+	if got := header + "." + payload; token != got+"."+sig {
+		t.Fatalf("token is not signingInput + \".\" + signature: %q", token)
+	}
+	// The signature segment is unpadded base64url of the raw 32-byte MAC.
+	if strings.ContainsAny(sig, "+/=") {
+		t.Fatalf("signature segment is not unpadded base64url: %q", sig)
+	}
+	rawSig, err := base64.RawURLEncoding.DecodeString(sig)
+	if err != nil {
+		t.Fatalf("signature segment does not decode as unpadded base64url: %v", err)
+	}
+	if len(rawSig) != sha256.Size {
+		t.Fatalf("expected a %d-byte HMAC-SHA256, got %d bytes", sha256.Size, len(rawSig))
 	}
 }
 
