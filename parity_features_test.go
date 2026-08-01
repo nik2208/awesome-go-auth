@@ -66,7 +66,7 @@ func TestMeIncludesMetadataRolesTenantsAndCustomClaims(t *testing.T) {
 		t.Fatal("expected permission to be granted")
 	}
 
-	payload, _, err := splitToken(tokens.AccessToken)
+	_, payload, _, err := splitToken(tokens.AccessToken)
 	if err != nil {
 		t.Fatalf("split token: %v", err)
 	}

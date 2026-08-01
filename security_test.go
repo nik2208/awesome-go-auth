@@ -194,31 +194,38 @@ func TestSecureEqual_Empty(t *testing.T) {
 }
 
 func TestSplitToken_Valid(t *testing.T) {
-	payload, sig, err := splitToken("abc.def")
+	header, payload, sig, err := splitToken("abc.def.ghi")
 	if err != nil {
 		t.Fatalf("splitToken: %v", err)
 	}
-	if payload != "abc" || sig != "def" {
-		t.Fatalf("unexpected parts: %q %q", payload, sig)
+	if header != "abc" || payload != "def" || sig != "ghi" {
+		t.Fatalf("unexpected parts: %q %q %q", header, payload, sig)
 	}
 }
 
 func TestSplitToken_NoSeparator(t *testing.T) {
-	_, _, err := splitToken("nodot")
+	_, _, _, err := splitToken("nodot")
 	if err == nil {
 		t.Fatal("expected error for token without separator")
 	}
 }
 
+func TestSplitToken_TooFewParts(t *testing.T) {
+	_, _, _, err := splitToken("a.b")
+	if err == nil {
+		t.Fatal("expected error for token with too few parts")
+	}
+}
+
 func TestSplitToken_TooManyParts(t *testing.T) {
-	_, _, err := splitToken("a.b.c")
+	_, _, _, err := splitToken("a.b.c.d")
 	if err == nil {
 		t.Fatal("expected error for token with too many parts")
 	}
 }
 
 func TestSplitToken_Empty(t *testing.T) {
-	_, _, err := splitToken("")
+	_, _, _, err := splitToken("")
 	if err == nil {
 		t.Fatal("expected error for empty token")
 	}
