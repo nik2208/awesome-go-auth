@@ -222,6 +222,72 @@ func TestEmailVerificationModeStrictRefusesLoginUntilVerified(t *testing.T) {
 	}
 }
 
+// createUnverifiedUser writes a user straight to the store, the way an admin
+// provisioning path, a data import or a custom UserStore would.
+func createUnverifiedUser(t *testing.T, svc *Service, email string) User {
+	t.Helper()
+	pw, err := hashPassword("password1")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	now := time.Now()
+	user, err := svc.users.CreateUser(context.Background(), User{
+		ID:              "usr_provisioned",
+		Email:           email,
+		PasswordHash:    pw,
+		TenantID:        "t1",
+		IsEmailVerified: false,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	return user
+}
+
+// Before EmailVerificationMode existed, Login refused every unverified user
+// regardless of configuration. Under none it no longer does; this pins that
+// behaviour change so it cannot be reintroduced or lost silently.
+func TestEmailVerificationModeNoneAllowsExternallyCreatedUnverifiedUser(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeNone)
+	ctx := context.Background()
+
+	user := createUnverifiedUser(t, svc, "provisioned-none@example.com")
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != nil {
+		t.Fatalf("none mode should not enforce verification: %v", err)
+	}
+}
+
+func TestEmailVerificationModeStrictRefusesExternallyCreatedUnverifiedUser(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeStrict)
+	ctx := context.Background()
+
+	user := createUnverifiedUser(t, svc, "provisioned-strict@example.com")
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != ErrEmailNotVerified {
+		t.Fatalf("expected ErrEmailNotVerified, got %v", err)
+	}
+}
+
+// Register hands out a working session even under strict, so the mode gates
+// Login only. This is a known gap (see #7); the test pins today's behaviour so
+// that tightening it is a deliberate, visible change.
+func TestEmailVerificationModeStrictRegisterStillIssuesUsableTokens(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeStrict)
+	ctx := context.Background()
+
+	_, tokens, err := svc.Register(ctx, RegisterInput{Email: "strict-tokens@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if tokens.AccessToken == "" || tokens.RefreshToken == "" {
+		t.Fatal("register should still return a token pair under strict")
+	}
+	if _, err := svc.Me(ctx, tokens.AccessToken); err != nil {
+		t.Fatalf("access token from register is usable today: %v", err)
+	}
+}
+
 func TestTOTPFlow(t *testing.T) {
 	svc := testService(t)
 	ctx := context.Background()
