@@ -106,7 +106,7 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (User, AuthTokens, e
 	if err != nil || !verifyPassword(in.Password, user.PasswordHash) {
 		return User{}, zeroTokens, ErrInvalidCredentials
 	}
-	if !user.IsEmailVerified && s.emailVerificationMode() == EmailVerificationModeStrict {
+	if !user.IsEmailVerified && s.emailVerificationMode() != EmailVerificationModeLazy {
 		return User{}, zeroTokens, ErrEmailNotVerified
 	}
 	if s.requiresTwoFactor(user) {
@@ -627,7 +627,8 @@ func (s *Service) requiresTwoFactor(user User) bool {
 
 // emailVerificationMode returns the normalized Config.EmailVerificationMode,
 // falling back to none so that embedders that never set it keep the historical
-// behaviour of a self-registered user being usable right away.
+// behaviour: a self-registered user is usable right away, and a user that is
+// unverified for any other reason is still refused at login.
 func (s *Service) emailVerificationMode() string {
 	mode := strings.ToLower(strings.TrimSpace(s.cfg.EmailVerificationMode))
 	if mode == "" {

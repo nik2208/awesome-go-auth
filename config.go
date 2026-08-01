@@ -15,8 +15,14 @@ const (
 
 // Email verification modes accepted by Config.EmailVerificationMode.
 //
-//	none   : verification is never required; Register marks the address verified.
-//	lazy   : Register leaves the address unverified but login is still allowed.
+//	none   : Register marks the address verified, so verification never comes up
+//	         on the self-registration path. An address left unverified by some
+//	         other route (admin provisioning, a data import, a custom UserStore
+//	         whose column defaults to false) is still refused at login. This is
+//	         the default and is exactly how the service behaved before the mode
+//	         existed.
+//	lazy   : Register leaves the address unverified and login is allowed anyway.
+//	         This is the only mode in which an unverified address may log in.
 //	strict : Register leaves the address unverified and login is refused until
 //	         the address is confirmed.
 const (

@@ -247,15 +247,40 @@ func createUnverifiedUser(t *testing.T, svc *Service, email string) User {
 }
 
 // Before EmailVerificationMode existed, Login refused every unverified user
-// regardless of configuration. Under none it no longer does; this pins that
-// behaviour change so it cannot be reintroduced or lost silently.
-func TestEmailVerificationModeNoneAllowsExternallyCreatedUnverifiedUser(t *testing.T) {
+// regardless of configuration. The default none keeps that gate in force, so
+// only lazy relaxes it. The three tests below pin one mode each against a user
+// that never went through Register, which is the only way the gate is
+// observable at all.
+func TestEmailVerificationModeNoneRefusesExternallyCreatedUnverifiedUser(t *testing.T) {
 	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeNone)
 	ctx := context.Background()
 
 	user := createUnverifiedUser(t, svc, "provisioned-none@example.com")
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != ErrEmailNotVerified {
+		t.Fatalf("expected ErrEmailNotVerified, got %v", err)
+	}
+}
+
+// The unset mode resolves to none, so it must gate the same way. This is the
+// case that decides whether the PR is backwards compatible for embedders that
+// build a Config literal instead of calling DefaultConfig.
+func TestEmailVerificationModeUnsetRefusesExternallyCreatedUnverifiedUser(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, "")
+	ctx := context.Background()
+
+	user := createUnverifiedUser(t, svc, "provisioned-unset@example.com")
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != ErrEmailNotVerified {
+		t.Fatalf("expected ErrEmailNotVerified, got %v", err)
+	}
+}
+
+func TestEmailVerificationModeLazyAllowsExternallyCreatedUnverifiedUser(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeLazy)
+	ctx := context.Background()
+
+	user := createUnverifiedUser(t, svc, "provisioned-lazy@example.com")
 	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != nil {
-		t.Fatalf("none mode should not enforce verification: %v", err)
+		t.Fatalf("lazy mode should not enforce verification: %v", err)
 	}
 }
 
@@ -270,8 +295,9 @@ func TestEmailVerificationModeStrictRefusesExternallyCreatedUnverifiedUser(t *te
 }
 
 // Register hands out a working session even under strict, so the mode gates
-// Login only. This is a known gap (see #7); the test pins today's behaviour so
-// that tightening it is a deliberate, visible change.
+// Login only. This is a known gap tracked in #21; the test pins today's
+// behaviour on purpose, so that closing the gap means deleting this test rather
+// than wondering whether something broke.
 func TestEmailVerificationModeStrictRegisterStillIssuesUsableTokens(t *testing.T) {
 	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeStrict)
 	ctx := context.Background()
