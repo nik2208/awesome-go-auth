@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Examples**: `examples/chi-postgres/`, `examples/gin-mongodb/`, `examples/echo-sqlite/`
 - **Community files**: CONTRIBUTING.md, CODE_OF_CONDUCT.md, SECURITY.md, issue templates, PR template
 
+### Changed
+- **BREAKING — access and refresh tokens are now standard HS256 JWTs** (`token.go`): tokens are emitted as `base64url(header).base64url(claims).base64url(signature)` with a JOSE header of `{"alg":"HS256","typ":"JWT"}`, replacing the previous two-segment `payload.signature` format. Tokens issued before the upgrade will not validate. The signature is HMAC-SHA256 over the RFC 7515 §5.1 signing input — the ASCII string `base64url(header) + "." + base64url(claims)`, both segments unpadded — so the JOSE header is covered by the signature. Verification enforces an explicit `HS256` allow-list keyed on a strictly-named lowercase `alg` member, so `alg: none`, algorithm-confusion tokens and headers that only spell the member `ALG`/`Alg` are all rejected. Access and refresh tokens now also carry `email`, `role`, `isEmailVerified` and `isTotpEnabled` claims
+
 ## [0.1.0] - Initial Release
 
 ### Added
