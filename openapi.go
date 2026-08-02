@@ -55,7 +55,7 @@ func GenerateOpenAPISpec(info OpenAPIInfo) map[string]any {
 func openAPISchemas() map[string]any {
 	return map[string]any{
 		"RegisterInput": map[string]any{
-			"type": "object",
+			"type":     "object",
 			"required": []string{"email", "password"},
 			"properties": map[string]any{
 				"email":     map[string]any{"type": "string", "format": "email"},
@@ -64,7 +64,7 @@ func openAPISchemas() map[string]any {
 			},
 		},
 		"LoginInput": map[string]any{
-			"type": "object",
+			"type":     "object",
 			"required": []string{"email", "password"},
 			"properties": map[string]any{
 				"email":     map[string]any{"type": "string", "format": "email"},
