@@ -84,7 +84,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (User, AuthTok
 		Email:           in.Email,
 		PasswordHash:    pwHash,
 		TenantID:        in.TenantID,
-		IsEmailVerified: true,
+		IsEmailVerified: s.emailVerificationMode() == EmailVerificationModeNone,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	})
@@ -106,7 +106,7 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (User, AuthTokens, e
 	if err != nil || !verifyPassword(in.Password, user.PasswordHash) {
 		return User{}, zeroTokens, ErrInvalidCredentials
 	}
-	if !user.IsEmailVerified {
+	if !user.IsEmailVerified && s.emailVerificationMode() != EmailVerificationModeLazy {
 		return User{}, zeroTokens, ErrEmailNotVerified
 	}
 	if s.requiresTwoFactor(user) {
@@ -623,6 +623,18 @@ func (s *Service) resolveUser(ctx context.Context, userID, email, tenantID strin
 func (s *Service) requiresTwoFactor(user User) bool {
 	hasTOTP := user.IsTOTPEnabled && strings.TrimSpace(user.TOTPSecret) != ""
 	return s.cfg.Require2FA || user.Require2FA || hasTOTP
+}
+
+// emailVerificationMode returns the normalized Config.EmailVerificationMode,
+// falling back to none so that embedders that never set it keep the historical
+// behaviour: a self-registered user is usable right away, and a user that is
+// unverified for any other reason is still refused at login.
+func (s *Service) emailVerificationMode() string {
+	mode := strings.ToLower(strings.TrimSpace(s.cfg.EmailVerificationMode))
+	if mode == "" {
+		return EmailVerificationModeNone
+	}
+	return mode
 }
 
 func (s *Service) validateSessionForAccess(ctx context.Context, claims tokenClaims) error {

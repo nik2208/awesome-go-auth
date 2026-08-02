@@ -40,6 +40,9 @@ func TestDefaultConfig_Values(t *testing.T) {
 	if cfg.TempTokenTTL != 5*time.Minute {
 		t.Errorf("unexpected temp token ttl: %s", cfg.TempTokenTTL)
 	}
+	if cfg.EmailVerificationMode != EmailVerificationModeNone {
+		t.Errorf("unexpected email verification mode: %s", cfg.EmailVerificationMode)
+	}
 }
 
 func TestConfigValidate_ValidConfig(t *testing.T) {
@@ -142,6 +145,22 @@ func TestConfigValidate_ZeroTempTokenTTL(t *testing.T) {
 	cfg.TempTokenTTL = 0
 	if err := cfg.validate(); err == nil {
 		t.Fatal("expected error for zero temp token TTL")
+	}
+}
+
+func TestConfigValidate_InvalidEmailVerificationMode(t *testing.T) {
+	cfg := DefaultConfig("12345678901234567890123456789012")
+	cfg.EmailVerificationMode = "sometimes"
+	if err := cfg.validate(); err == nil {
+		t.Fatal("expected error for unknown email verification mode")
+	}
+}
+
+func TestConfigValidate_EmptyEmailVerificationMode(t *testing.T) {
+	cfg := DefaultConfig("12345678901234567890123456789012")
+	cfg.EmailVerificationMode = ""
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("expected empty email verification mode to pass: %v", err)
 	}
 }
 

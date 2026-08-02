@@ -96,23 +96,45 @@ Low-level constructor. Use `New()` for most cases.
 
 ```go
 type Config struct {
-    Secret               string                        // HMAC secret (min 32 bytes)
-    Issuer               string
-    AccessTokenTTL       time.Duration                 // default: 15m
-    RefreshTokenTTL      time.Duration                 // default: 7d
-    SessionCheckOn       string                        // allcalls|refresh|none (default: refresh)
-    ResetTokenTTL        time.Duration                 // default: 1h
-    MagicLinkTTL         time.Duration                 // default: 15m
-    SMSCodeTTL           time.Duration                 // default: 10m
-    EmailVerificationTTL time.Duration                 // default: 24h
-    EmailChangeTTL       time.Duration                 // default: 24h
-    ClockSkew            time.Duration                 // default: 5s
-    MinPasswordLen       int                           // default: 8
-    Require2FA           bool
-    BuildTokenClaims     func(ctx, User) (map[string]any, error)
-    Logger               func(format string, args ...any)
+    Secret                string                        // HMAC secret (min 32 bytes)
+    Issuer                string
+    AccessTokenTTL        time.Duration                 // default: 15m
+    RefreshTokenTTL       time.Duration                 // default: 7d
+    SessionCheckOn        string                        // allcalls|refresh|none (default: refresh)
+    ResetTokenTTL         time.Duration                 // default: 1h
+    MagicLinkTTL          time.Duration                 // default: 15m
+    SMSCodeTTL            time.Duration                 // default: 10m
+    EmailVerificationTTL  time.Duration                 // default: 24h
+    EmailVerificationMode string                        // none|lazy|strict (default: none)
+    EmailChangeTTL        time.Duration                 // default: 24h
+    ClockSkew             time.Duration                 // default: 5s
+    MinPasswordLen        int                           // default: 8
+    Require2FA            bool
+    BuildTokenClaims      func(ctx, User) (map[string]any, error)
+    Logger                func(format string, args ...any)
 }
 ```
+
+### `EmailVerificationMode`
+
+| mode | `Register` | `Login` with an unverified address |
+|---|---|---|
+| `none` (default) | marks the address verified | refused (`ErrEmailNotVerified`) |
+| `lazy` | leaves the address unverified | allowed |
+| `strict` | leaves the address unverified | refused (`ErrEmailNotVerified`) |
+
+Under `none` the gate is unobservable through `Register`, because a self-registered
+user is already verified. It still applies to users that reach the store another way
+(admin provisioning, a data import, a custom `UserStore` whose column defaults to
+`false`). `lazy` is the only mode that lets an unverified address log in.
+
+Two limitations apply to `strict`:
+
+- `Register` still returns a usable `AuthTokens` pair, so the mode gates `Login`
+  rather than access as a whole ([#21](https://github.com/nik2208/awesome-go-auth/issues/21)).
+- No shipped HTTP adapter route exposes `SendVerificationEmailToken` or `VerifyEmail`,
+  so `strict` is only reachable by calling the service directly
+  ([#9](https://github.com/nik2208/awesome-go-auth/issues/9)).
 
 ### `DefaultConfig(secret string) Config`
 

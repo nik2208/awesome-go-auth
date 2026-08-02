@@ -81,21 +81,27 @@ func TestSMSLoginFlow(t *testing.T) {
 	}
 }
 
-func TestEmailVerificationAndEmailChangeFlow(t *testing.T) {
-	svc := testService(t)
-	ctx := context.Background()
-	pw, _ := hashPassword("password1")
-	user, err := svc.users.CreateUser(ctx, User{
-		ID:              "usr_manual",
-		Email:           "verify@example.com",
-		PasswordHash:    pw,
-		TenantID:        "t1",
-		IsEmailVerified: false,
-		CreatedAt:       time.Now(),
-		UpdatedAt:       time.Now(),
-	})
+func testServiceWithEmailVerificationMode(t *testing.T, mode string) *Service {
+	t.Helper()
+	cfg := DefaultConfig("01234567890123456789012345678901")
+	cfg.EmailVerificationMode = mode
+	svc, err := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore())
 	if err != nil {
-		t.Fatalf("create user: %v", err)
+		t.Fatalf("new service: %v", err)
+	}
+	return svc
+}
+
+func TestEmailVerificationAndEmailChangeFlow(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeStrict)
+	ctx := context.Background()
+
+	user, _, err := svc.Register(ctx, RegisterInput{Email: "verify@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if user.IsEmailVerified {
+		t.Fatal("strict mode should register an unverified user")
 	}
 
 	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != ErrEmailNotVerified {
@@ -122,6 +128,189 @@ func TestEmailVerificationAndEmailChangeFlow(t *testing.T) {
 	}
 	if _, _, err := svc.Login(ctx, LoginInput{Email: "verify2@example.com", Password: "password1", TenantID: user.TenantID}); err != nil {
 		t.Fatalf("login with new email should work: %v", err)
+	}
+}
+
+func TestEmailVerificationModeNoneRegistersVerified(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeNone)
+	ctx := context.Background()
+
+	user, _, err := svc.Register(ctx, RegisterInput{Email: "none@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if !user.IsEmailVerified {
+		t.Fatal("none mode should register a verified user")
+	}
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != nil {
+		t.Fatalf("login should work right after register: %v", err)
+	}
+	token, err := svc.SendVerificationEmailToken(ctx, EmailVerificationInput{UserID: user.ID, TenantID: user.TenantID})
+	if err != nil || token != "" {
+		t.Fatalf("expected no verification token for a verified user, got %q (%v)", token, err)
+	}
+}
+
+func TestEmailVerificationModeUnsetBehavesLikeNone(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, "")
+	ctx := context.Background()
+
+	user, _, err := svc.Register(ctx, RegisterInput{Email: "unset@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if !user.IsEmailVerified {
+		t.Fatal("an unset mode should keep registering verified users")
+	}
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != nil {
+		t.Fatalf("login should work right after register: %v", err)
+	}
+}
+
+func TestEmailVerificationModeLazyAllowsLoginWhileUnverified(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeLazy)
+	ctx := context.Background()
+
+	user, _, err := svc.Register(ctx, RegisterInput{Email: "lazy@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if user.IsEmailVerified {
+		t.Fatal("lazy mode should register an unverified user")
+	}
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != nil {
+		t.Fatalf("lazy mode should allow login while unverified: %v", err)
+	}
+
+	verifyToken, err := svc.SendVerificationEmailToken(ctx, EmailVerificationInput{UserID: user.ID, TenantID: user.TenantID})
+	if err != nil || verifyToken == "" {
+		t.Fatalf("send verification token: %v", err)
+	}
+	if err := svc.VerifyEmail(ctx, VerifyEmailInput{Token: verifyToken}); err != nil {
+		t.Fatalf("verify email: %v", err)
+	}
+	verified, err := svc.users.GetUserByID(ctx, user.ID, user.TenantID)
+	if err != nil || !verified.IsEmailVerified {
+		t.Fatalf("user should be verified after VerifyEmail: %v", err)
+	}
+}
+
+func TestEmailVerificationModeStrictRefusesLoginUntilVerified(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeStrict)
+	ctx := context.Background()
+
+	user, _, err := svc.Register(ctx, RegisterInput{Email: "strict@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if user.IsEmailVerified {
+		t.Fatal("strict mode should register an unverified user")
+	}
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != ErrEmailNotVerified {
+		t.Fatalf("expected ErrEmailNotVerified, got %v", err)
+	}
+
+	evs, ok := svc.users.(EmailVerificationStore)
+	if !ok {
+		t.Fatal("memory user store should implement EmailVerificationStore")
+	}
+	if err := evs.MarkEmailVerified(ctx, user.ID, user.TenantID, true); err != nil {
+		t.Fatalf("mark email verified: %v", err)
+	}
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != nil {
+		t.Fatalf("login should work once the address is verified: %v", err)
+	}
+}
+
+// createUnverifiedUser writes a user straight to the store, the way an admin
+// provisioning path, a data import or a custom UserStore would.
+func createUnverifiedUser(t *testing.T, svc *Service, email string) User {
+	t.Helper()
+	pw, err := hashPassword("password1")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	now := time.Now()
+	user, err := svc.users.CreateUser(context.Background(), User{
+		ID:              "usr_provisioned",
+		Email:           email,
+		PasswordHash:    pw,
+		TenantID:        "t1",
+		IsEmailVerified: false,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	return user
+}
+
+// Before EmailVerificationMode existed, Login refused every unverified user
+// regardless of configuration. The default none keeps that gate in force, so
+// only lazy relaxes it. The three tests below pin one mode each against a user
+// that never went through Register, which is the only way the gate is
+// observable at all.
+func TestEmailVerificationModeNoneRefusesExternallyCreatedUnverifiedUser(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeNone)
+	ctx := context.Background()
+
+	user := createUnverifiedUser(t, svc, "provisioned-none@example.com")
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != ErrEmailNotVerified {
+		t.Fatalf("expected ErrEmailNotVerified, got %v", err)
+	}
+}
+
+// The unset mode resolves to none, so it must gate the same way. This is the
+// case that decides whether the PR is backwards compatible for embedders that
+// build a Config literal instead of calling DefaultConfig.
+func TestEmailVerificationModeUnsetRefusesExternallyCreatedUnverifiedUser(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, "")
+	ctx := context.Background()
+
+	user := createUnverifiedUser(t, svc, "provisioned-unset@example.com")
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != ErrEmailNotVerified {
+		t.Fatalf("expected ErrEmailNotVerified, got %v", err)
+	}
+}
+
+func TestEmailVerificationModeLazyAllowsExternallyCreatedUnverifiedUser(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeLazy)
+	ctx := context.Background()
+
+	user := createUnverifiedUser(t, svc, "provisioned-lazy@example.com")
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != nil {
+		t.Fatalf("lazy mode should not enforce verification: %v", err)
+	}
+}
+
+func TestEmailVerificationModeStrictRefusesExternallyCreatedUnverifiedUser(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeStrict)
+	ctx := context.Background()
+
+	user := createUnverifiedUser(t, svc, "provisioned-strict@example.com")
+	if _, _, err := svc.Login(ctx, LoginInput{Email: user.Email, Password: "password1", TenantID: user.TenantID}); err != ErrEmailNotVerified {
+		t.Fatalf("expected ErrEmailNotVerified, got %v", err)
+	}
+}
+
+// Register hands out a working session even under strict, so the mode gates
+// Login only. This is a known gap tracked in #21; the test pins today's
+// behaviour on purpose, so that closing the gap means deleting this test rather
+// than wondering whether something broke.
+func TestEmailVerificationModeStrictRegisterStillIssuesUsableTokens(t *testing.T) {
+	svc := testServiceWithEmailVerificationMode(t, EmailVerificationModeStrict)
+	ctx := context.Background()
+
+	_, tokens, err := svc.Register(ctx, RegisterInput{Email: "strict-tokens@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if tokens.AccessToken == "" || tokens.RefreshToken == "" {
+		t.Fatal("register should still return a token pair under strict")
+	}
+	if _, err := svc.Me(ctx, tokens.AccessToken); err != nil {
+		t.Fatalf("access token from register is usable today: %v", err)
 	}
 }
 
