@@ -5,6 +5,90 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Work towards v0.2.0, which aligns the HTTP surface with the family wire contract
+(#22). This entry covers item 1: the shared response envelope and conventions
+every later route builds on.
+
+### Changed
+- **BREAKING — `GET /auth/me` returns the user object unwrapped.** It was
+  `{"user": {...}}`; it is now the object itself, matching the reference and the
+  shipped Angular, Flutter and `auth.js` clients.
+- **BREAKING — `login`, `register` and `refresh` no longer return tokens or the
+  user in the body by default.** Cookie mode (the default) answers
+  `{"success": true}` — plus `"userId"` on register — and sets the cookies.
+  Sending `X-Auth-Strategy: bearer` (exact, case-sensitive) switches to
+  `{"success": true, "accessToken": "...", "refreshToken": "..."}` with **no**
+  `Set-Cookie` at all, including no CSRF cookie.
+- **BREAKING — cookies are renamed and prefix-resolved.** `access_token` and
+  `refresh_token` become `accessToken` and `refreshToken`, and the written name
+  is resolved per the reference rule: insecure → bare, secure + root path + no
+  domain → `__Host-<name>`, otherwise `__Secure-<name>`. Because `Secure`
+  defaults to true, the default names are now `__Host-accessToken`,
+  `__Host-refreshToken` and `__Host-csrf-token`. Existing sessions are logged
+  out on upgrade. Every read site tries `__Host-` → `__Secure-` → bare, so a
+  client is never locked out by a configuration change; logout expires all three
+  variants of each cookie.
+- **BREAKING — errors are JSON, not `text/plain`.** Every error is
+  `{"error": "<message>", "code": "<CODE>"}`, with `code` omitted where the
+  reference emits none. The codes are the reference catalog
+  (`INVALID_CREDENTIALS`, `EMAIL_NOT_VERIFIED`, `SESSION_REVOKED`,
+  `INVALID_REFRESH_TOKEN`, `CSRF_INVALID`, …) plus `USER_EXISTS`,
+  `WEAK_PASSWORD` and `INVALID_BODY`, which have no reference counterpart. A
+  revoked session is `401 {"code": "SESSION_REVOKED"}` on both `POST /refresh`
+  and, under `SessionCheckOn: allcalls`, on any middleware-protected route.
+- **BREAKING — a missing or unusable access token is `403`, not `401`, and
+  carries no `code`.** This reproduces the reference middleware exactly. It is
+  surprising next to the 401s, and it means a client keying refresh-retry on 401
+  will not retry on an expired access token — but that is the behaviour the
+  shipped clients were built against, and `SESSION_REVOKED` stays the one coded
+  401 on the refresh path.
+- **BREAKING — `POST /auth/logout` never fails.** It reads the refresh token
+  from the body or the cookie, revokes best-effort, expires every cookie variant
+  and answers `200 {"success": true}` even with no token at all. It used to
+  answer `400` without one.
+- **BREAKING — `POST /auth/refresh` accepts an empty body in cookie mode** and
+  answers `401 {"error": "No refresh token provided"}` (was `400`) when no token
+  is present anywhere. The body is read first, the cookie second.
+- **BREAKING — `CSRFMiddleware` now takes an `HTTPConfig`** and
+  `DefaultCSRFConfig` takes no arguments; the cookie attributes moved into
+  `HTTPConfig.Cookies`. Enforcement follows the reference matrix: only
+  cookie-authenticated unsafe methods on routes that sit behind the auth
+  middleware. `logout` is exempt — the reference deliberately leaves it
+  unprotected — as are bearer requests and safe methods. Rejection is
+  `403 {"error": "CSRF token validation failed", "code": "CSRF_INVALID"}`.
+- **BREAKING — gin and echo now agree with net/http on cookie attributes.** Gin
+  used to give the refresh cookie an arbitrary lifetime of ten times the access
+  token's; both now write through the same serialiser, so the four adapters emit
+  identical bytes.
+- The CSRF cookie is distributed by router-level auto-init only, as in the
+  reference — a request without a readable one gets a fresh 32-hex-character
+  token. Unlike the reference, it is not additionally rotated inside
+  login/refresh, which would emit two conflicting `Set-Cookie` headers for the
+  same name on a first login. The client-visible behaviour is unchanged.
+
+### Added
+- `wire.go`: the shared conventions in the root package (stdlib only) —
+  `HTTPConfig`, `CookieOptions`, `HTTPError` and the error catalog,
+  `WriteJSON`/`WriteHTTPError`/`WriteSuccess`/`WriteTokens`, `CookieValue`,
+  `IsBearerRequest`, `AccessTokenFromRequest`, `RefreshTokenFromRequest`. Routes
+  added by later PRs call these rather than re-deriving shapes.
+- `MountWithConfig` and `NewWithConfig` on all four adapters, so the mount prefix
+  and cookie policy are configurable and identical across frameworks.
+- `auth.WithSessionCheckOn`, without which the middleware's `SESSION_REVOKED`
+  branch was unreachable through `auth.New`.
+- `Service.TokenTTLs`, so cookie lifetimes track token lifetimes instead of
+  being hardcoded.
+- `adapter/internal/wiretest`: one conformance suite asserting status, exact
+  body key set, exact `Set-Cookie` attributes and both delivery modes, run
+  against all four adapters.
+
+### Known limitations
+- `openapi.go` and the served `ui/auth.js` still describe and consume the
+  pre-0.2.0 shapes (`{"tokens": …}`, snake_case request fields). Bringing them
+  onto the new contract is follow-up work, tracked with the rest of #22.
+
 ## [0.1.0] - 2026-08-02
 
 First tagged release. The repository had never been tagged, so this release
