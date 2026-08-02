@@ -15,10 +15,19 @@ func Middleware(a *auth.Auth) func(http.Handler) http.Handler {
 
 // Mount mounts auth routes onto a Chi router.
 func Mount(r chi.Router, a *auth.Auth) {
-	h := nethttpadapter.New(a)
-	r.MethodFunc(http.MethodPost, "/auth/register", h.Register)
-	r.MethodFunc(http.MethodPost, "/auth/login", h.Login)
-	r.MethodFunc(http.MethodPost, "/auth/refresh", h.Refresh)
-	r.MethodFunc(http.MethodPost, "/auth/logout", h.Logout)
-	r.With(Middleware(a)).MethodFunc(http.MethodGet, "/auth/me", h.Me)
+	MountWithConfig(r, a, auth.DefaultHTTPConfig())
+}
+
+// MountWithConfig mounts auth routes using the supplied wire conventions.
+func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
+	h := nethttpadapter.NewWithConfig(a, cfg)
+	resolved := h.Config()
+	prefix := resolved.Prefix()
+	csrf := auth.CSRFMiddleware(resolved)
+
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/register", h.Register)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/login", h.Login)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/refresh", h.Refresh)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/logout", h.Logout)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodGet, prefix+"/me", h.Me)
 }

@@ -3,10 +3,7 @@ package nethttp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
-	"strings"
-	"time"
 
 	auth "github.com/nik2208/awesome-go-auth"
 )
@@ -22,37 +19,49 @@ func UserFromContext(ctx context.Context) (auth.User, bool) {
 // Adapter exposes standard net/http handlers and middleware.
 type Adapter struct {
 	auth *auth.Auth
+	cfg  auth.HTTPConfig
 }
 
-// New returns a net/http adapter for the provided auth instance.
+// New returns a net/http adapter using the default wire conventions.
 func New(a *auth.Auth) *Adapter {
-	return &Adapter{auth: a}
+	return NewWithConfig(a, auth.DefaultHTTPConfig())
 }
+
+// NewWithConfig returns a net/http adapter using the supplied wire conventions.
+func NewWithConfig(a *auth.Auth, cfg auth.HTTPConfig) *Adapter {
+	return &Adapter{auth: a, cfg: a.ResolveHTTPConfig(cfg)}
+}
+
+// Config reports the resolved wire conventions this adapter serves.
+func (a *Adapter) Config() auth.HTTPConfig { return a.cfg }
 
 // Middleware validates access tokens and injects the authenticated user in context.
 func Middleware(a *auth.Auth) func(http.Handler) http.Handler {
-	adapter := New(a)
-	return adapter.Middleware()
+	return New(a).Middleware()
 }
 
 // Mount attaches auth endpoints to the provided mux.
 func Mount(mux *http.ServeMux, a *auth.Auth) {
-	adapter := New(a)
-	adapter.Mount(mux)
+	New(a).Mount(mux)
+}
+
+// MountWithConfig attaches auth endpoints using the supplied wire conventions.
+func MountWithConfig(mux *http.ServeMux, a *auth.Auth, cfg auth.HTTPConfig) {
+	NewWithConfig(a, cfg).Mount(mux)
 }
 
 // Middleware validates access tokens and injects user context.
 func (a *Adapter) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			accessToken := accessTokenFromRequest(r)
+			accessToken := auth.AccessTokenFromRequest(r)
 			if accessToken == "" {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				auth.WriteHTTPError(w, auth.HTTPErrNoAccessToken)
 				return
 			}
 			user, err := a.auth.Me(r.Context(), accessToken)
 			if err != nil {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				auth.WriteHTTPError(w, auth.AccessHTTPError(err))
 				return
 			}
 			ctx := context.WithValue(r.Context(), userContextKey{}, user)
@@ -63,11 +72,18 @@ func (a *Adapter) Middleware() func(http.Handler) http.Handler {
 
 // Mount attaches auth endpoints.
 func (a *Adapter) Mount(mux *http.ServeMux) {
-	mux.HandleFunc("POST /auth/register", a.Register)
-	mux.HandleFunc("POST /auth/login", a.Login)
-	mux.HandleFunc("POST /auth/refresh", a.Refresh)
-	mux.HandleFunc("POST /auth/logout", a.Logout)
-	mux.Handle("GET /auth/me", a.Middleware()(http.HandlerFunc(a.Me)))
+	prefix := a.cfg.Prefix()
+	mux.Handle("POST "+prefix+"/register", a.guard(http.HandlerFunc(a.Register)))
+	mux.Handle("POST "+prefix+"/login", a.guard(http.HandlerFunc(a.Login)))
+	mux.Handle("POST "+prefix+"/refresh", a.guard(http.HandlerFunc(a.Refresh)))
+	mux.Handle("POST "+prefix+"/logout", a.guard(http.HandlerFunc(a.Logout)))
+	mux.Handle("GET "+prefix+"/me", a.guard(a.Middleware()(http.HandlerFunc(a.Me))))
+}
+
+// guard wraps a mounted route in the CSRF middleware, which also distributes
+// the CSRF cookie the browser clients read.
+func (a *Adapter) guard(h http.Handler) http.Handler {
+	return auth.CSRFMiddleware(a.cfg)(h)
 }
 
 type registerRequest struct {
@@ -82,11 +98,7 @@ type loginRequest struct {
 	TenantID string `json:"tenantId"`
 }
 
-type refreshRequest struct {
-	RefreshToken string `json:"refreshToken"`
-}
-
-// Register handles POST /auth/register.
+// Register handles POST <prefix>/register.
 func (a *Adapter) Register(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
 	if !decodeJSON(w, r, &req) {
@@ -94,147 +106,72 @@ func (a *Adapter) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	user, tokens, err := a.auth.Register(r.Context(), auth.RegisterInput{Email: req.Email, Password: req.Password, TenantID: req.TenantID})
 	if err != nil {
-		writeError(w, err)
+		auth.WriteServiceError(w, err)
 		return
 	}
-	setAuthCookies(w, tokens)
-	writeJSON(w, http.StatusCreated, map[string]any{"user": auth.NewPublicUser(user), "tokens": tokens})
+	a.cfg.WriteTokens(w, r, http.StatusCreated, tokens, map[string]any{"userId": user.ID})
 }
 
-// Login handles POST /auth/login.
+// Login handles POST <prefix>/login.
 func (a *Adapter) Login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	user, tokens, err := a.auth.Login(r.Context(), auth.LoginInput{Email: req.Email, Password: req.Password, TenantID: req.TenantID})
+	_, tokens, err := a.auth.Login(r.Context(), auth.LoginInput{Email: req.Email, Password: req.Password, TenantID: req.TenantID})
 	if err != nil {
-		writeError(w, err)
+		auth.WriteServiceError(w, err)
 		return
 	}
-	setAuthCookies(w, tokens)
-	writeJSON(w, http.StatusOK, map[string]any{"user": auth.NewPublicUser(user), "tokens": tokens})
+	a.cfg.WriteTokens(w, r, http.StatusOK, tokens, nil)
 }
 
-// Refresh handles POST /auth/refresh.
+// Refresh handles POST <prefix>/refresh.
 func (a *Adapter) Refresh(w http.ResponseWriter, r *http.Request) {
-	refreshToken := refreshTokenFromRequest(r)
+	refreshToken := auth.RefreshTokenFromRequest(r)
 	if refreshToken == "" {
-		var req refreshRequest
-		if decodeJSON(w, r, &req) {
-			refreshToken = strings.TrimSpace(req.RefreshToken)
-		}
-	}
-	if refreshToken == "" {
-		http.Error(w, "missing refresh token", http.StatusBadRequest)
+		auth.WriteHTTPError(w, auth.HTTPErrNoRefreshToken)
 		return
 	}
 	tokens, err := a.auth.Refresh(r.Context(), refreshToken)
 	if err != nil {
-		writeError(w, err)
+		auth.WriteHTTPError(w, auth.RefreshHTTPError(err))
 		return
 	}
-	setAuthCookies(w, tokens)
-	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens})
+	a.cfg.WriteTokens(w, r, http.StatusOK, tokens, nil)
 }
 
-// Logout handles POST /auth/logout.
+// Logout handles POST <prefix>/logout.
 func (a *Adapter) Logout(w http.ResponseWriter, r *http.Request) {
-	refreshToken := refreshTokenFromRequest(r)
-	if refreshToken == "" {
-		var req refreshRequest
-		if decodeJSON(w, r, &req) {
-			refreshToken = strings.TrimSpace(req.RefreshToken)
-		}
+	// Best effort, as in the reference: an absent or already-unusable token must
+	// still leave the caller logged out rather than stranded with live cookies.
+	if refreshToken := auth.RefreshTokenFromRequest(r); refreshToken != "" {
+		_ = a.auth.Logout(r.Context(), refreshToken)
 	}
-	if refreshToken == "" {
-		http.Error(w, "missing refresh token", http.StatusBadRequest)
-		return
-	}
-	if err := a.auth.Logout(r.Context(), refreshToken); err != nil {
-		writeError(w, err)
-		return
-	}
-	http.SetCookie(w, &http.Cookie{Name: "refresh_token", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true})
-	http.SetCookie(w, &http.Cookie{Name: "access_token", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	a.cfg.Cookies.ClearAuthCookies(w, a.cfg.CSRF.Enabled)
+	auth.WriteSuccess(w, http.StatusOK, nil)
 }
 
-// Me handles GET /auth/me.
+// Me handles GET <prefix>/me. The user object is the whole body: the family
+// clients read it unwrapped.
 func (a *Adapter) Me(w http.ResponseWriter, r *http.Request) {
 	user, ok := UserFromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		auth.WriteHTTPError(w, auth.HTTPErrNoAccessToken)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": auth.NewPublicUser(user)})
+	auth.WriteJSON(w, http.StatusOK, auth.NewPublicUser(user))
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	if r.Body == nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+		auth.WriteHTTPError(w, auth.HTTPErrInvalidBody)
 		return false
 	}
 	defer r.Body.Close()
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+		auth.WriteHTTPError(w, auth.HTTPErrInvalidBody)
 		return false
 	}
 	return true
-}
-
-func setAuthCookies(w http.ResponseWriter, tokens auth.AuthTokens) {
-	http.SetCookie(w, &http.Cookie{Name: "access_token", Value: tokens.AccessToken, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(tokens.ExpiresIn)})
-	http.SetCookie(w, &http.Cookie{Name: "refresh_token", Value: tokens.RefreshToken, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
-}
-
-func accessTokenFromRequest(r *http.Request) string {
-	if token := bearerToken(r.Header.Get("Authorization")); token != "" {
-		return token
-	}
-	if c, err := r.Cookie("access_token"); err == nil {
-		return strings.TrimSpace(c.Value)
-	}
-	return ""
-}
-
-func refreshTokenFromRequest(r *http.Request) string {
-	if c, err := r.Cookie("refresh_token"); err == nil {
-		return strings.TrimSpace(c.Value)
-	}
-	if token := bearerToken(r.Header.Get("Authorization")); token != "" {
-		return token
-	}
-	return ""
-}
-
-func bearerToken(authHeader string) string {
-	authHeader = strings.TrimSpace(authHeader)
-	if authHeader == "" {
-		return ""
-	}
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return ""
-	}
-	return strings.TrimSpace(parts[1])
-}
-
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func writeError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, auth.ErrInvalidCredentials), errors.Is(err, auth.ErrInvalidToken), errors.Is(err, auth.ErrSessionNotFound), errors.Is(err, auth.ErrSessionRevoked), errors.Is(err, auth.ErrEmailNotVerified), errors.Is(err, auth.ErrInvalidCode), errors.Is(err, auth.ErrTwoFactorRequired):
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-	case errors.Is(err, auth.ErrUserExists), errors.Is(err, auth.ErrAlreadyExists):
-		http.Error(w, err.Error(), http.StatusConflict)
-	case errors.Is(err, auth.ErrWeakPassword):
-		http.Error(w, err.Error(), http.StatusBadRequest)
-	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
 }
