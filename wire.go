@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -113,8 +114,13 @@ var (
 	HTTPErrTwoFactorRequired  = HTTPError{Status: http.StatusForbidden, Message: "Two-factor authentication required", Code: CodeTwoFactorRequired}
 	HTTPErrInvalidToken       = HTTPError{Status: http.StatusUnauthorized, Message: "Invalid or expired token", Code: CodeInvalidToken}
 	HTTPErrCSRFInvalid        = HTTPError{Status: http.StatusForbidden, Message: "CSRF token validation failed", Code: CodeCSRFInvalid}
-	HTTPErrUserNotFound       = HTTPError{Status: http.StatusNotFound, Message: "User not found", Code: CodeUserNotFound}
-	HTTPErrNotImplemented     = HTTPError{Status: http.StatusNotImplemented, Message: "Feature not supported by the configured stores", Code: CodeNotImplemented}
+	// HTTPErrUserNotFound carries no code: every reference site that emits the
+	// literal "User not found" emits it code-less (GET /me, /change-password,
+	// /sms/send, the magic-link 2fa branch). The one coded USER_NOT_FOUND in the
+	// reference is a different message ("Target user not found", /link-request),
+	// so a route reusing this value must not gain a code by accident.
+	HTTPErrUserNotFound   = HTTPError{Status: http.StatusNotFound, Message: "User not found"}
+	HTTPErrNotImplemented = HTTPError{Status: http.StatusNotImplemented, Message: "Feature not supported by the configured stores", Code: CodeNotImplemented}
 
 	// HTTPErrInternal deliberately carries neither a code nor the underlying
 	// error text: an unexpected failure must not describe itself to the caller.
@@ -128,6 +134,15 @@ var (
 // HTTPErrorFor maps a service sentinel onto the envelope. Routes whose failure
 // means something more specific than the sentinel says — /refresh and the auth
 // middleware both narrow "invalid token" — use their own mapper below.
+//
+// Anything unmapped becomes a 500, so a sentinel that reaches a route before it
+// reaches this switch turns a client-visible failure into an internal error.
+// The sentinels deliberately left out are the ones whose reference wire string
+// is route-specific and must not be guessed here: ErrInvalidCode is "Invalid or
+// expired SMS code" on /sms/verify and "Invalid TOTP code" on /2fa/verify (both
+// 401, both code-less), and ErrTenantNotFound / ErrRoleNotFound belong to admin
+// routes. A route that can return one of those has to write it itself.
+// TestUnmappedSentinelsAreDeliberate keeps that list honest.
 func HTTPErrorFor(err error) HTTPError {
 	switch {
 	case err == nil:
@@ -479,6 +494,51 @@ func (c HTTPConfig) WriteTokens(w http.ResponseWriter, r *http.Request, status i
 	cookies.SetAccessTokenCookie(w, tokens.AccessToken)
 	cookies.SetRefreshTokenCookie(w, tokens.RefreshToken)
 	WriteJSON(w, status, body)
+}
+
+// LogoutRequest ends the session the caller presents, best effort, and is the
+// single logout revocation path all four adapters call.
+//
+// The order matters. A refresh token in the body or the refresh cookie revokes
+// the whole session, so it is tried first. But the refresh cookie is scoped to
+// <prefix>/refresh in every configuration whose name does not resolve to
+// __Host- — a Domain, or a non-root cookie Path — and a browser therefore sends
+// nothing at all to <prefix>/logout. That is why the reference logout reads the
+// *access* token cookie (auth.router.ts:592) and revokes payload.sid: the access
+// cookie is scoped to "/" and is always in scope. Without the fallback, logout
+// answers 200 {"success":true}, clears the cookies, and leaves the refresh token
+// and the session live server-side.
+//
+// Every failure is swallowed: an absent or already-unusable credential must
+// still leave the caller logged out rather than stranded with live cookies.
+func (a *Auth) LogoutRequest(ctx context.Context, r *http.Request) {
+	if token := RefreshTokenFromRequest(r); token != "" {
+		if err := a.Logout(ctx, token); err == nil {
+			return
+		}
+	}
+	if token := AccessTokenFromRequest(r); token != "" {
+		_ = a.LogoutAccessToken(ctx, token)
+	}
+}
+
+// LogoutAccessToken revokes the session an access token belongs to. It is the
+// revocation path a cookie client's logout takes, since the refresh cookie is
+// out of scope for <prefix>/logout whenever it is path-scoped.
+func (a *Auth) LogoutAccessToken(ctx context.Context, accessToken string) error {
+	return a.service.LogoutAccessToken(ctx, accessToken)
+}
+
+// LogoutAccessToken revokes the session named by an access token's sid claim.
+func (s *Service) LogoutAccessToken(ctx context.Context, accessToken string) error {
+	claims, err := s.parseToken(accessToken, "access")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(claims.Sid) == "" {
+		return ErrSessionNotFound
+	}
+	return s.RevokeSessionByID(ctx, claims.Sid)
 }
 
 // RefreshTokenFromRequest applies the reference's acceptance order for

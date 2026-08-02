@@ -145,9 +145,7 @@ func (a *Adapter) Refresh(w http.ResponseWriter, r *http.Request) {
 func (a *Adapter) Logout(w http.ResponseWriter, r *http.Request) {
 	// Best effort, as in the reference: an absent or already-unusable token must
 	// still leave the caller logged out rather than stranded with live cookies.
-	if refreshToken := auth.RefreshTokenFromRequest(r); refreshToken != "" {
-		_ = a.auth.Logout(r.Context(), refreshToken)
-	}
+	a.auth.LogoutRequest(r.Context(), r)
 	a.cfg.Cookies.ClearAuthCookies(w, a.cfg.CSRF.Enabled)
 	auth.WriteSuccess(w, http.StatusOK, nil)
 }

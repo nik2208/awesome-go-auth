@@ -46,21 +46,39 @@ func DefaultCSRFConfig() CSRFConfig {
 // middleware. CSRF is enforced inside that middleware, so these routes are
 // never checked — including /logout, which the reference deliberately leaves
 // unprotected so that a client with a stale CSRF cookie can still log out.
+//
+// This table is the contract for every route added later: a mutating route that
+// is absent from it is CSRF-checked, so leaving an unauthenticated route out
+// breaks it and putting an authenticated one in silently unprotects it. It is
+// pinned literal-by-literal by TestCSRFExemptionsMatchTheReference.
+//
+// Three entries are not simply "routes without the auth middleware":
+//   - /2fa/verify is a pre-login step-up call with no auth gate, so the
+//     reference never CSRF-checks it (wire-contract §3, "CSRF does not apply
+//     to: … /2fa/verify").
+//   - /change-email/confirm has no auth gate either: the emailed token is the
+//     credential, so the link has to work from a browser with no session and no
+//     CSRF cookie at all (auth.router.ts:1040-1067).
+//   - /link-request is deliberately NOT here. It has no auth middleware but the
+//     reference performs its own manual double-submit check inside the handler
+//     (auth.router.ts:1489-1495), so it is the one unauthenticated route that
+//     is CSRF-protected.
 var csrfExemptPaths = map[string]bool{
-	"/login":             true,
-	"/register":          true,
-	"/refresh":           true,
-	"/logout":            true,
-	"/forgot-password":   true,
-	"/reset-password":    true,
-	"/verify-email":      true,
-	"/magic-link/send":   true,
-	"/magic-link/verify": true,
-	"/sms/send":          true,
-	"/sms/verify":        true,
-	"/link-request":      true,
-	"/link-verify":       true,
-	"/sessions/cleanup":  true,
+	"/login":                true,
+	"/register":             true,
+	"/refresh":              true,
+	"/logout":               true,
+	"/forgot-password":      true,
+	"/reset-password":       true,
+	"/verify-email":         true,
+	"/change-email/confirm": true,
+	"/magic-link/send":      true,
+	"/magic-link/verify":    true,
+	"/sms/send":             true,
+	"/sms/verify":           true,
+	"/2fa/verify":           true,
+	"/link-verify":          true,
+	"/sessions/cleanup":     true,
 }
 
 // CSRFMiddleware distributes and enforces the double-submit token.
@@ -124,10 +142,11 @@ func csrfEnforced(r *http.Request, prefix string) bool {
 	if !isMutatingMethod(r.Method) {
 		return false
 	}
-	if !strings.HasPrefix(r.URL.Path, prefix) {
+	rel, mounted := csrfRelativePath(r.URL.Path, prefix)
+	if !mounted {
 		return false
 	}
-	return !csrfExemptPaths[csrfRelativePath(r.URL.Path, prefix)]
+	return !csrfExemptPaths[rel]
 }
 
 func isMutatingMethod(method string) bool {
@@ -139,10 +158,29 @@ func isMutatingMethod(method string) bool {
 	}
 }
 
-func csrfRelativePath(path, prefix string) string {
-	rel := strings.TrimPrefix(path, prefix)
-	if !strings.HasPrefix(rel, "/") {
-		rel = "/" + rel
+// csrfRelativePath locates the mount prefix inside a request path and returns
+// the route below it.
+//
+// The prefix has to land on a segment boundary — "/authenticate/login" is not
+// "/auth" plus "enticate/login" — and it may sit after a base path, because a
+// host app that mounts the adapter on a gin/echo group or a chi Route serves
+// <base><prefix>/<route> while the middleware only ever knows <prefix>. Matching
+// on the head of the path alone would leave every group-mounted deployment with
+// enforcement silently switched off.
+func csrfRelativePath(path, prefix string) (string, bool) {
+	if prefix == "" || prefix == "/" {
+		return strings.TrimSuffix(path, "/"), true
 	}
-	return strings.TrimSuffix(rel, "/")
+	for i := 0; i+len(prefix) <= len(path); i++ {
+		offset := strings.Index(path[i:], prefix)
+		if offset < 0 {
+			return "", false
+		}
+		i += offset
+		rest := path[i+len(prefix):]
+		if rest == "" || strings.HasPrefix(rest, "/") {
+			return strings.TrimSuffix(rest, "/"), true
+		}
+	}
+	return "", false
 }

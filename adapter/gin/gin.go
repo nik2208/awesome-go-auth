@@ -156,9 +156,7 @@ func (ad *Adapter) refresh(c *gin.Context) {
 }
 
 func (ad *Adapter) logout(c *gin.Context) {
-	if refresh := auth.RefreshTokenFromRequest(c.Request); refresh != "" {
-		_ = ad.auth.Logout(c.Request.Context(), refresh)
-	}
+	ad.auth.LogoutRequest(c.Request.Context(), c.Request)
 	ad.cfg.Cookies.ClearAuthCookies(c.Writer, ad.cfg.CSRF.Enabled)
 	auth.WriteSuccess(c.Writer, http.StatusOK, nil)
 }

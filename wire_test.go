@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -175,6 +177,15 @@ func TestErrorCatalogLiterals(t *testing.T) {
 		HTTPErrInvalidRefreshToken: {401, "Invalid refresh token", ""},
 		HTTPErrExpiredRefreshToken: {401, "Invalid or expired refresh token", "INVALID_REFRESH_TOKEN"},
 		HTTPErrInternal:            {500, "Internal server error", ""},
+		HTTPErrTwoFactorRequired:   {403, "Two-factor authentication required", "2FA_REQUIRED"},
+		HTTPErrInvalidToken:        {401, "Invalid or expired token", "INVALID_TOKEN"},
+		// Code-less on purpose: every reference site emitting this literal emits
+		// it without a code, and the one coded USER_NOT_FOUND says "Target user
+		// not found" instead.
+		HTTPErrUserNotFound: {404, "User not found", ""},
+		HTTPErrUserExists:   {409, "User already exists", "USER_EXISTS"},
+		HTTPErrWeakPassword: {400, "Password is too weak", "WEAK_PASSWORD"},
+		HTTPErrInvalidBody:  {400, "Invalid request body", "INVALID_BODY"},
 	}
 	for got, want := range messages {
 		if got.Status != want.status || got.Message != want.message || got.Code != want.code {
@@ -209,6 +220,107 @@ func TestErrorMapping(t *testing.T) {
 			t.Errorf("mapping %v = %+v, want %+v", tc.err, got, tc.want)
 		}
 	}
+}
+
+// TestUnmappedSentinelsAreDeliberate makes the 500 fallback a decision instead
+// of an accident. HTTPErrorFor is what every later route calls through
+// WriteServiceError, so a sentinel nobody mapped turns a client-visible failure
+// into "Internal server error". Adding a sentinel to errors.go without touching
+// the switch fails here; the exceptions are the ones whose reference wire string
+// is route-specific and must be written by the route itself.
+func TestUnmappedSentinelsAreDeliberate(t *testing.T) {
+	routeSpecific := map[error]string{
+		// 401 "Invalid or expired SMS code" on /sms/verify, 401 "Invalid TOTP
+		// code" on /2fa/verify — both code-less, both route literals.
+		ErrInvalidCode: "wire-contract §3 /sms/verify and /2fa/verify",
+		// Admin-router routes, which emit plain {"error": …} bodies.
+		ErrTenantNotFound: "wire-contract §5 tenants",
+		ErrRoleNotFound:   "wire-contract §5 roles",
+	}
+	all := []error{
+		ErrInvalidCredentials, ErrUserExists, ErrInvalidToken, ErrSessionNotFound,
+		ErrSessionRevoked, ErrWeakPassword, ErrFeatureNotSupported, ErrEmailNotVerified,
+		ErrInvalidCode, ErrTwoFactorRequired, ErrAlreadyExists, ErrTenantNotFound,
+		ErrRoleNotFound,
+	}
+	for _, err := range all {
+		mapped := HTTPErrorFor(err) != HTTPErrInternal
+		if reason, exempt := routeSpecific[err]; exempt {
+			if mapped {
+				t.Errorf("%v is now mapped centrally; drop it from the route-specific list (%s)", err, reason)
+			}
+			continue
+		}
+		if !mapped {
+			t.Errorf("%v falls through to 500: map it in HTTPErrorFor or list it as route-specific", err)
+		}
+	}
+}
+
+// TestLogoutAccessTokenRevokesTheSession pins the revocation path a cookie
+// client's logout actually takes. The refresh cookie is scoped to
+// <prefix>/refresh in every non-__Host- configuration, so a browser sends only
+// the access cookie to <prefix>/logout; if that does not revoke, logout answers
+// 200 and leaves the session live.
+func TestLogoutAccessTokenRevokesTheSession(t *testing.T) {
+	a, err := New(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	ctx := context.Background()
+	_, tokens, err := a.Register(ctx, RegisterInput{Email: "revoke@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := a.LogoutAccessToken(ctx, tokens.AccessToken); err != nil {
+		t.Fatalf("LogoutAccessToken: %v", err)
+	}
+	if _, err := a.Refresh(ctx, tokens.RefreshToken); !errors.Is(err, ErrSessionRevoked) {
+		t.Fatalf("refresh after logout = %v, want ErrSessionRevoked", err)
+	}
+}
+
+// TestLogoutRequestFallsBackToTheAccessCookie is the same claim one level up,
+// through the helper all four adapters call, with the cookie set a browser
+// would actually send to <prefix>/logout in the __Secure- configuration.
+func TestLogoutRequestFallsBackToTheAccessCookie(t *testing.T) {
+	a, err := New(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	ctx := context.Background()
+	_, tokens, err := a.Register(ctx, RegisterInput{Email: "scoped@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: "__Secure-accessToken", Value: tokens.AccessToken})
+	a.LogoutRequest(ctx, req)
+
+	if _, err := a.Refresh(ctx, tokens.RefreshToken); !errors.Is(err, ErrSessionRevoked) {
+		t.Fatalf("refresh after logout = %v, want ErrSessionRevoked", err)
+	}
+}
+
+// TestLogoutRequestToleratesEveryMissingCredential — logout must never fail.
+func TestLogoutRequestToleratesEveryMissingCredential(t *testing.T) {
+	a, err := New(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/auth/logout", nil),
+		httptest.NewRequest(http.MethodPost, "/auth/logout", strings.NewReader("{not json")),
+		withCookie(httptest.NewRequest(http.MethodPost, "/auth/logout", nil), "accessToken", "garbage"),
+		withCookie(httptest.NewRequest(http.MethodPost, "/auth/logout", nil), "refreshToken", "garbage"),
+	} {
+		a.LogoutRequest(context.Background(), req)
+	}
+}
+
+func withCookie(r *http.Request, name, value string) *http.Request {
+	r.AddCookie(&http.Cookie{Name: name, Value: value})
+	return r
 }
 
 func TestHTTPConfigResolvesDerivedDefaults(t *testing.T) {

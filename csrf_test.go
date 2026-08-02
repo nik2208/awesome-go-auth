@@ -96,6 +96,14 @@ func TestCSRFMiddlewareEnforcementMatrix(t *testing.T) {
 		// so a stale CSRF cookie must not trap a client in a logged-in state.
 		{name: "logout is exempt", method: http.MethodPost, path: "/auth/logout", cookie: "tok", want: http.StatusOK},
 		{name: "routes outside the prefix are untouched", method: http.MethodPost, path: "/api/orders", cookie: "tok", want: http.StatusOK},
+		// A path that merely starts with the prefix's characters is not the mount.
+		{name: "a longer segment is not the prefix", method: http.MethodPost, path: "/authenticate/login", cookie: "tok", want: http.StatusOK},
+		{name: "an unrelated segment containing the prefix is untouched", method: http.MethodPost, path: "/api/authors/create", cookie: "tok", want: http.StatusOK},
+		// gin/echo groups and chi Route serve <base><prefix>/<route>: enforcement
+		// must not switch itself off just because the mount sits below a base path.
+		{name: "a group-mounted protected route is enforced", method: http.MethodPatch, path: "/api/auth/profile", cookie: "tok", want: http.StatusForbidden},
+		{name: "a group-mounted protected route passes with the header", method: http.MethodPatch, path: "/api/auth/profile", cookie: "tok", header: "tok", want: http.StatusOK},
+		{name: "a group-mounted exempt route stays exempt", method: http.MethodPost, path: "/api/auth/login", cookie: "tok", want: http.StatusOK},
 	}
 
 	for _, tc := range cases {
@@ -121,6 +129,76 @@ func TestCSRFMiddlewareEnforcementMatrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCSRFExemptionsMatchTheReference pins the exemption table route by route
+// against wire-contract.md. Every route in the reference auth router that this
+// port will eventually mount is listed, so a route added later cannot inherit a
+// wrong default: the table itself is the thing under test, not the five routes
+// that happen to be mounted today (all of which are exempt, which is why the
+// per-adapter suites cannot catch a mistake here).
+func TestCSRFExemptionsMatchTheReference(t *testing.T) {
+	// Enforced: the reference puts these behind authMiddleware, where the
+	// double-submit check lives — plus /link-request, which has no auth
+	// middleware but does its own manual check (auth.router.ts:1489-1495).
+	enforced := []string{
+		"/profile",
+		"/add-phone",
+		"/change-password",
+		"/send-verification-email",
+		"/change-email/request",
+		"/2fa/setup",
+		"/2fa/verify-setup",
+		"/2fa/disable",
+		"/sessions/some-handle",
+		"/account",
+		"/linked-accounts/google/123",
+		"/link-request",
+	}
+	// Exempt: mounted without authMiddleware, so never checked.
+	exempt := []string{
+		"/login",
+		"/register",
+		"/refresh",
+		"/logout",
+		"/forgot-password",
+		"/reset-password",
+		"/verify-email",
+		"/change-email/confirm",
+		"/magic-link/send",
+		"/magic-link/verify",
+		"/sms/send",
+		"/sms/verify",
+		"/2fa/verify",
+		"/link-verify",
+		"/sessions/cleanup",
+	}
+
+	for _, route := range enforced {
+		t.Run("enforced"+route, func(t *testing.T) {
+			if got := statusFor(t, http.MethodPost, "/auth"+route); got != http.StatusForbidden {
+				t.Errorf("POST %s = %d, want 403: CSRF is not enforced on a protected route", route, got)
+			}
+		})
+	}
+	for _, route := range exempt {
+		t.Run("exempt"+route, func(t *testing.T) {
+			if got := statusFor(t, http.MethodPost, "/auth"+route); got != http.StatusOK {
+				t.Errorf("POST %s = %d, want 200: an unauthenticated route must not be CSRF-checked", route, got)
+			}
+		})
+	}
+}
+
+// statusFor drives the middleware with a CSRF cookie and no header — the shape
+// every cookie client has before it mirrors the token.
+func statusFor(t *testing.T, method, path string) int {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	req.AddCookie(&http.Cookie{Name: "csrf-token", Value: "tok"})
+	rec := httptest.NewRecorder()
+	csrfHandler(insecureHTTPConfig()).ServeHTTP(rec, req)
+	return rec.Code
 }
 
 func TestCSRFRejectionBody(t *testing.T) {

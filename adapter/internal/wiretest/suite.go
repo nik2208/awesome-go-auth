@@ -269,6 +269,42 @@ func testLogout(t *testing.T, mount Mounter) {
 		AssertStatus(t, bare, http.StatusOK)
 		AssertKeys(t, Body(t, bare), "success")
 	})
+
+	// Answering 200 {"success":true} is only half of logout. The session has to
+	// be dead afterwards, and it has to be dead in the configurations where the
+	// refresh cookie is path-scoped away from <prefix>/logout — otherwise the
+	// browser looks logged out while the refresh token stays usable forever.
+	for _, tc := range []struct {
+		name   string
+		mutate func(*auth.HTTPConfig)
+	}{
+		{name: "__Host- configuration", mutate: func(*auth.HTTPConfig) {}},
+		// Both of these keep the access cookie at "/" but scope the refresh cookie
+		// to <prefix>/refresh, so logout only ever sees the access cookie — which
+		// is exactly the credential the reference logout reads.
+		{name: "__Secure- via domain", mutate: func(c *auth.HTTPConfig) { c.Cookies.Domain = "example.com" }},
+		{name: "bare via insecure", mutate: func(c *auth.HTTPConfig) { c.Cookies.Secure = false }},
+		// Cookies.Path = "/app" is deliberately not covered: it scopes every auth
+		// cookie away from the auth mount itself, so no credential reaches logout
+		// in any implementation, the reference included.
+	} {
+		t.Run("revokes the session, "+tc.name, func(t *testing.T) {
+			cfg := auth.DefaultHTTPConfig()
+			tc.mutate(&cfg)
+			env := NewEnv(t, mount, cfg)
+			env.Seed("logoutrevoke@example.com")
+			login := env.Do(env.Request(http.MethodPost, "/login", credentials("logoutrevoke@example.com")))
+
+			logoutReq := httptest.NewRequest(http.MethodPost, env.Config.Prefix()+"/logout", nil)
+			AssertStatus(t, env.Do(Replay(logoutReq, login)), http.StatusOK)
+
+			// The refresh credential the login handed out must be dead. Replay it
+			// against /refresh the way the client would, path scoping and all.
+			refreshReq := httptest.NewRequest(http.MethodPost, env.Config.Prefix()+"/refresh", nil)
+			rec := env.Do(Replay(refreshReq, login))
+			AssertError(t, rec, http.StatusUnauthorized, "Session has been revoked", auth.CodeSessionRevoked)
+		})
+	}
 }
 
 func testMe(t *testing.T, mount Mounter) {

@@ -44,10 +44,15 @@ every later route builds on.
   will not retry on an expired access token — but that is the behaviour the
   shipped clients were built against, and `SESSION_REVOKED` stays the one coded
   401 on the refresh path.
-- **BREAKING — `POST /auth/logout` never fails.** It reads the refresh token
-  from the body or the cookie, revokes best-effort, expires every cookie variant
-  and answers `200 {"success": true}` even with no token at all. It used to
-  answer `400` without one.
+- **BREAKING — `POST /auth/logout` never fails.** It revokes best-effort,
+  expires every cookie variant and answers `200 {"success": true}` even with no
+  token at all. It used to answer `400` without one. Revocation goes through the
+  new `(*Auth).LogoutRequest`, which tries the refresh token from the body or
+  cookie first and then falls back to the access-token cookie — the credential
+  the reference logout reads. The fallback is not optional: the refresh cookie is
+  scoped to `<prefix>/refresh` in every configuration whose name does not resolve
+  to `__Host-`, so a browser sends nothing to `<prefix>/logout` and a
+  refresh-token-only logout silently leaves the session live server-side.
 - **BREAKING — `POST /auth/refresh` accepts an empty body in cookie mode** and
   answers `401 {"error": "No refresh token provided"}` (was `400`) when no token
   is present anywhere. The body is read first, the cookie second.
@@ -58,6 +63,14 @@ every later route builds on.
   middleware. `logout` is exempt — the reference deliberately leaves it
   unprotected — as are bearer requests and safe methods. Rejection is
   `403 {"error": "CSRF token validation failed", "code": "CSRF_INVALID"}`.
+  The exemption table is the contract for every route added later and is pinned
+  route by route against the reference: `/2fa/verify` and
+  `/change-email/confirm` are exempt (neither has an auth gate), while
+  `/link-request` is **not** — it is the one unauthenticated route the reference
+  CSRF-checks, via a manual double-submit inside the handler. The mount prefix is
+  now located anywhere on a segment boundary in the request path, so an adapter
+  mounted on a gin/echo group or a chi `Route` (URL `<base><prefix>/<route>`) is
+  still enforced instead of silently unprotected.
 - **BREAKING — gin and echo now agree with net/http on cookie attributes.** Gin
   used to give the refresh cookie an arbitrary lifetime of ten times the access
   token's; both now write through the same serialiser, so the four adapters emit

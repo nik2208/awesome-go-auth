@@ -230,14 +230,35 @@ func AssertCookieAttrs(t *testing.T, c *http.Cookie, want CookieSpec) {
 	}
 }
 
-// Replay copies the cookies a response set onto a new request, minus the ones
-// it expired, the way a browser would.
+// Replay copies the cookies a response set onto a new request the way a browser
+// would: expired ones are dropped, and so are the ones whose Path does not cover
+// the new request. Honouring Path is what makes the replay honest — a suite that
+// ignores it cannot tell a cookie scoped to <prefix>/refresh from one scoped to
+// "/", and would pass a handler that only works because the test sent a cookie
+// no browser would have sent.
 func Replay(req *http.Request, rec *httptest.ResponseRecorder) *http.Request {
 	for _, c := range rec.Result().Cookies() {
 		if c.MaxAge < 0 || c.Value == "" {
 			continue
 		}
+		if !pathCovers(c.Path, req.URL.Path) {
+			continue
+		}
 		req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
 	}
 	return req
+}
+
+// pathCovers implements RFC 6265 §5.1.4 path matching.
+func pathCovers(cookiePath, requestPath string) bool {
+	if cookiePath == "" || cookiePath == "/" {
+		return true
+	}
+	if requestPath == cookiePath {
+		return true
+	}
+	if !strings.HasPrefix(requestPath, cookiePath) {
+		return false
+	}
+	return strings.HasSuffix(cookiePath, "/") || strings.HasPrefix(requestPath[len(cookiePath):], "/")
 }
