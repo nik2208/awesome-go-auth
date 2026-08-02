@@ -60,7 +60,7 @@ func Mount(group *echo.Group, a *auth.Auth) {
 			return writeError(c, err)
 		}
 		setAuthCookies(c, tokens)
-		return c.JSON(http.StatusCreated, map[string]any{"user": user, "tokens": tokens})
+		return c.JSON(http.StatusCreated, map[string]any{"user": auth.NewPublicUser(user), "tokens": tokens})
 	})
 
 	group.POST("/auth/login", func(c echo.Context) error {
@@ -77,7 +77,7 @@ func Mount(group *echo.Group, a *auth.Auth) {
 			return writeError(c, err)
 		}
 		setAuthCookies(c, tokens)
-		return c.JSON(http.StatusOK, map[string]any{"user": user, "tokens": tokens})
+		return c.JSON(http.StatusOK, map[string]any{"user": auth.NewPublicUser(user), "tokens": tokens})
 	})
 
 	group.POST("/auth/refresh", func(c echo.Context) error {
@@ -134,7 +134,7 @@ func Mount(group *echo.Group, a *auth.Auth) {
 			if !ok {
 				return c.JSON(http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			}
-			return c.JSON(http.StatusOK, map[string]any{"user": user})
+			return c.JSON(http.StatusOK, map[string]any{"user": auth.NewPublicUser(user)})
 		})(c)
 	})
 }

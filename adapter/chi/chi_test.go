@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -158,10 +159,42 @@ func TestMount_Me_Authenticated(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
+	assertNoCredentialMaterial(t, rr.Body.Bytes())
 	var resp map[string]any
 	json.NewDecoder(rr.Body).Decode(&resp)
 	if resp["user"] == nil {
 		t.Fatal("expected user in /auth/me response")
+	}
+	user, ok := resp["user"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected user object, got %T", resp["user"])
+	}
+	if user["email"] != "chime@example.com" {
+		t.Fatalf("expected camelCase email in /auth/me response, got %v", resp["user"])
+	}
+	if _, ok := user["id"]; !ok {
+		t.Fatalf("expected camelCase id in /auth/me response, got %v", resp["user"])
+	}
+}
+
+// assertNoCredentialMaterial fails when a response body carries user credential
+// material. The check is case-insensitive so it survives field renames.
+func assertNoCredentialMaterial(t *testing.T, body []byte) {
+	t.Helper()
+	lowered := strings.ToLower(string(body))
+	for _, field := range []string{
+		"PasswordHash",
+		"TOTPSecret",
+		"ResetTokenHash",
+		"MagicLinkTokenHash",
+		"SMSCodeHash",
+		"EmailVerificationTokenHash",
+		"EmailChangeTokenHash",
+		"PendingEmail",
+	} {
+		if strings.Contains(lowered, strings.ToLower(field)) {
+			t.Errorf("response exposes %q: %s", field, body)
+		}
 	}
 }
 
