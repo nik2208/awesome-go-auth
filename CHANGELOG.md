@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-08-02
+
+First tagged release. The repository had never been tagged, so this release
+carries everything built so far, including the four fixes below. Earlier work is
+listed under "Pre-release baseline" and was only ever available as a pseudo-version.
 
 ### Added
 - **OAuth 2.0 + Account Linking** (`oauth.go`): `OAuthService`, `GoogleProvider`, `GitHubProvider`, `HandleCallback`, `MemoryLinkedAccounts`, `PendingLinkStore`, `LinkedAccountStore`
@@ -32,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **BREAKING — access and refresh tokens are now standard HS256 JWTs** (`token.go`): tokens are emitted as `base64url(header).base64url(claims).base64url(signature)` with a JOSE header of `{"alg":"HS256","typ":"JWT"}`, replacing the previous two-segment `payload.signature` format. Tokens issued before the upgrade will not validate. The signature is HMAC-SHA256 over the RFC 7515 §5.1 signing input — the ASCII string `base64url(header) + "." + base64url(claims)`, both segments unpadded — so the JOSE header is covered by the signature. Verification enforces an explicit `HS256` allow-list keyed on a strictly-named lowercase `alg` member, so `alg: none`, algorithm-confusion tokens and headers that only spell the member `ALG`/`Alg` are all rejected. Access and refresh tokens now also carry `email`, `role`, `isEmailVerified` and `isTotpEnabled` claims
 
-## [0.1.0] - Initial Release
+## Pre-release baseline (never tagged)
 
 ### Added
 - Core auth service: Register, Login, Refresh, Logout, Me
