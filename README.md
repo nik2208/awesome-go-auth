@@ -68,10 +68,31 @@ func main() {
 
 - `auth.New(...)` entrypoint with functional options (`WithSecret`, `WithTokenTTLs`, `WithUserStore`, `WithSessionStore`, etc.).
 - Framework-agnostic adapters available:
-  - `adapter/nethttp` (`Middleware`, `Mount`)
-  - `adapter/chi` (`Middleware`, `Mount`)
-  - `adapter/gin` (`Middleware`, `Mount`)
-  - `adapter/echo` (`Middleware`, `Mount`)
+  - `adapter/nethttp` (`Middleware`, `Mount`, `MountWithConfig`)
+  - `adapter/chi` (`Middleware`, `Mount`, `MountWithConfig`)
+  - `adapter/gin` (`Middleware`, `Mount`, `MountWithConfig`)
+  - `adapter/echo` (`Middleware`, `Mount`, `MountWithConfig`)
+- All four adapters serve the same wire contract, configured by a single
+  `auth.HTTPConfig` (mount prefix, cookie policy, CSRF) and written through the
+  shared helpers in `wire.go`.
+
+## HTTP wire conventions
+
+The HTTP surface follows the `awesome-node-auth` contract the family clients
+(Angular, Flutter, the served `auth.js`) are pinned to:
+
+- `GET <prefix>/me` returns the user object **unwrapped**.
+- Cookie mode (default) answers `{"success": true}` and sets the cookies;
+  `X-Auth-Strategy: bearer` (exact, case-sensitive) answers with top-level
+  `accessToken`/`refreshToken` and sets no cookies.
+- Cookie names resolve to `__Host-` / `__Secure-` / bare from the cookie policy,
+  and every read tries `__Host-` → `__Secure-` → bare.
+- Errors are `{"error": "<message>", "code": "<CODE>"}`; a revoked session is
+  `401 {"code": "SESSION_REVOKED"}`, the signal both browser clients use to stop
+  refreshing and log out.
+- CSRF is double-submit on `X-CSRF-Token`, enforced for cookie-authenticated
+  unsafe methods only. There is no `/csrf` endpoint: the cookie is distributed by
+  the router-level middleware.
 
 ## Parity Snapshot vs `awesome-node-auth`
 

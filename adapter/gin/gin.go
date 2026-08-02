@@ -2,14 +2,12 @@ package gin
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	auth "github.com/nik2208/awesome-go-auth"
 )
 
 const userContextKey = "awesome_go_auth_user"
-const refreshCookieTTLMultiplier = 10
 
 // UserFromContext extracts authenticated user from gin.Context.
 func UserFromContext(c *gin.Context) (auth.User, bool) {
@@ -21,22 +19,55 @@ func UserFromContext(c *gin.Context) (auth.User, bool) {
 	return user, ok
 }
 
+// Adapter serves the auth routes on Gin. Responses are written through the
+// shared wire helpers rather than gin's own JSON writer so that every adapter
+// emits byte-identical bodies and cookies.
+type Adapter struct {
+	auth *auth.Auth
+	cfg  auth.HTTPConfig
+}
+
+// New returns a Gin adapter using the default wire conventions.
+func New(a *auth.Auth) *Adapter {
+	return NewWithConfig(a, auth.DefaultHTTPConfig())
+}
+
+// NewWithConfig returns a Gin adapter using the supplied wire conventions.
+func NewWithConfig(a *auth.Auth, cfg auth.HTTPConfig) *Adapter {
+	return &Adapter{auth: a, cfg: a.ResolveHTTPConfig(cfg)}
+}
+
+// Config reports the resolved wire conventions this adapter serves.
+func (ad *Adapter) Config() auth.HTTPConfig { return ad.cfg }
+
 // Middleware returns a Gin-native middleware.
 func Middleware(a *auth.Auth) gin.HandlerFunc {
+	return New(a).Middleware()
+}
+
+// Mount mounts all auth routes into a Gin RouterGroup.
+func Mount(group gin.IRoutes, a *auth.Auth) {
+	New(a).Mount(group)
+}
+
+// MountWithConfig mounts all auth routes using the supplied wire conventions.
+func MountWithConfig(group gin.IRoutes, a *auth.Auth, cfg auth.HTTPConfig) {
+	NewWithConfig(a, cfg).Mount(group)
+}
+
+// Middleware validates access tokens and injects the user into the context.
+func (ad *Adapter) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := bearerToken(c.GetHeader("Authorization"))
+		token := auth.AccessTokenFromRequest(c.Request)
 		if token == "" {
-			if cookie, err := c.Cookie("access_token"); err == nil {
-				token = strings.TrimSpace(cookie)
-			}
-		}
-		if token == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			auth.WriteHTTPError(c.Writer, auth.HTTPErrNoAccessToken)
+			c.Abort()
 			return
 		}
-		user, err := a.Me(c.Request.Context(), token)
+		user, err := ad.auth.Me(c.Request.Context(), token)
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			auth.WriteHTTPError(c.Writer, auth.AccessHTTPError(err))
+			c.Abort()
 			return
 		}
 		c.Set(userContextKey, user)
@@ -44,135 +75,97 @@ func Middleware(a *auth.Auth) gin.HandlerFunc {
 	}
 }
 
-// Mount mounts all auth routes into a Gin RouterGroup.
-func Mount(group gin.IRoutes, a *auth.Auth) {
-	group.POST("/auth/register", func(c *gin.Context) {
-		var req struct {
-			Email    string `json:"email"`
-			Password string `json:"password"`
-			TenantID string `json:"tenantId"`
-		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
-			return
-		}
-		user, tokens, err := a.Register(c.Request.Context(), auth.RegisterInput{Email: req.Email, Password: req.Password, TenantID: req.TenantID})
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		setAuthCookies(c, tokens)
-		c.JSON(http.StatusCreated, gin.H{"user": auth.NewPublicUser(user), "tokens": tokens})
-	})
-
-	group.POST("/auth/login", func(c *gin.Context) {
-		var req struct {
-			Email    string `json:"email"`
-			Password string `json:"password"`
-			TenantID string `json:"tenantId"`
-		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
-			return
-		}
-		user, tokens, err := a.Login(c.Request.Context(), auth.LoginInput{Email: req.Email, Password: req.Password, TenantID: req.TenantID})
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		setAuthCookies(c, tokens)
-		c.JSON(http.StatusOK, gin.H{"user": auth.NewPublicUser(user), "tokens": tokens})
-	})
-
-	group.POST("/auth/refresh", func(c *gin.Context) {
-		refresh := ""
-		if cookie, err := c.Cookie("refresh_token"); err == nil {
-			refresh = strings.TrimSpace(cookie)
-		}
-		if refresh == "" {
-			var req struct {
-				RefreshToken string `json:"refreshToken"`
-			}
-			if err := c.ShouldBindJSON(&req); err == nil {
-				refresh = strings.TrimSpace(req.RefreshToken)
-			}
-		}
-		if refresh == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "missing refresh token"})
-			return
-		}
-		tokens, err := a.Refresh(c.Request.Context(), refresh)
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		setAuthCookies(c, tokens)
-		c.JSON(http.StatusOK, gin.H{"tokens": tokens})
-	})
-
-	group.POST("/auth/logout", func(c *gin.Context) {
-		refresh := ""
-		if cookie, err := c.Cookie("refresh_token"); err == nil {
-			refresh = strings.TrimSpace(cookie)
-		}
-		if refresh == "" {
-			var req struct {
-				RefreshToken string `json:"refreshToken"`
-			}
-			if err := c.ShouldBindJSON(&req); err == nil {
-				refresh = strings.TrimSpace(req.RefreshToken)
-			}
-		}
-		if refresh == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "missing refresh token"})
-			return
-		}
-		if err := a.Logout(c.Request.Context(), refresh); err != nil {
-			writeError(c, err)
-			return
-		}
-		c.SetCookie("access_token", "", -1, "/", "", true, true)
-		c.SetCookie("refresh_token", "", -1, "/", "", true, true)
-		c.JSON(http.StatusOK, gin.H{"ok": true})
-	})
-
-	group.GET("/auth/me", Middleware(a), func(c *gin.Context) {
-		user, ok := UserFromContext(c)
-		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"user": auth.NewPublicUser(user)})
-	})
+// Mount attaches the auth endpoints.
+func (ad *Adapter) Mount(group gin.IRoutes) {
+	prefix := ad.cfg.Prefix()
+	group.POST(prefix+"/register", ad.guard(ad.register))
+	group.POST(prefix+"/login", ad.guard(ad.login))
+	group.POST(prefix+"/refresh", ad.guard(ad.refresh))
+	group.POST(prefix+"/logout", ad.guard(ad.logout))
+	group.GET(prefix+"/me", ad.guard(ad.Middleware()), ad.me)
 }
 
-func setAuthCookies(c *gin.Context, tokens auth.AuthTokens) {
-	maxAge := int(tokens.ExpiresIn.Seconds())
-	if maxAge < 1 {
-		maxAge = 1
+// guard runs the shared CSRF middleware in front of a Gin handler. Reusing the
+// net/http middleware — rather than reimplementing it here — is what keeps the
+// enforcement matrix identical across adapters.
+func (ad *Adapter) guard(h gin.HandlerFunc) gin.HandlerFunc {
+	mw := auth.CSRFMiddleware(ad.cfg)
+	return func(c *gin.Context) {
+		reached := false
+		mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			reached = true
+			c.Request = r
+			h(c)
+		})).ServeHTTP(c.Writer, c.Request)
+		if !reached {
+			// The middleware rejected the request and already wrote the body;
+			// gin would otherwise run the rest of the chain on top of it.
+			c.Abort()
+		}
 	}
-	c.SetCookie("access_token", tokens.AccessToken, maxAge, "/", "", true, true)
-	c.SetCookie("refresh_token", tokens.RefreshToken, maxAge*refreshCookieTTLMultiplier, "/", "", true, true)
 }
 
-func writeError(c *gin.Context, err error) {
-	status := http.StatusInternalServerError
-	switch err {
-	case auth.ErrInvalidCredentials, auth.ErrInvalidToken, auth.ErrSessionNotFound, auth.ErrSessionRevoked, auth.ErrEmailNotVerified, auth.ErrInvalidCode, auth.ErrTwoFactorRequired:
-		status = http.StatusUnauthorized
-	case auth.ErrUserExists, auth.ErrAlreadyExists:
-		status = http.StatusConflict
-	case auth.ErrWeakPassword:
-		status = http.StatusBadRequest
+func (ad *Adapter) register(c *gin.Context) {
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		TenantID string `json:"tenantId"`
 	}
-	c.JSON(status, gin.H{"error": err.Error()})
+	if err := c.ShouldBindJSON(&req); err != nil {
+		auth.WriteHTTPError(c.Writer, auth.HTTPErrInvalidBody)
+		return
+	}
+	user, tokens, err := ad.auth.Register(c.Request.Context(), auth.RegisterInput{Email: req.Email, Password: req.Password, TenantID: req.TenantID})
+	if err != nil {
+		auth.WriteServiceError(c.Writer, err)
+		return
+	}
+	ad.cfg.WriteTokens(c.Writer, c.Request, http.StatusCreated, tokens, map[string]any{"userId": user.ID})
 }
 
-func bearerToken(header string) string {
-	header = strings.TrimSpace(header)
-	parts := strings.SplitN(header, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return ""
+func (ad *Adapter) login(c *gin.Context) {
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		TenantID string `json:"tenantId"`
 	}
-	return strings.TrimSpace(parts[1])
+	if err := c.ShouldBindJSON(&req); err != nil {
+		auth.WriteHTTPError(c.Writer, auth.HTTPErrInvalidBody)
+		return
+	}
+	_, tokens, err := ad.auth.Login(c.Request.Context(), auth.LoginInput{Email: req.Email, Password: req.Password, TenantID: req.TenantID})
+	if err != nil {
+		auth.WriteServiceError(c.Writer, err)
+		return
+	}
+	ad.cfg.WriteTokens(c.Writer, c.Request, http.StatusOK, tokens, nil)
+}
+
+func (ad *Adapter) refresh(c *gin.Context) {
+	refresh := auth.RefreshTokenFromRequest(c.Request)
+	if refresh == "" {
+		auth.WriteHTTPError(c.Writer, auth.HTTPErrNoRefreshToken)
+		return
+	}
+	tokens, err := ad.auth.Refresh(c.Request.Context(), refresh)
+	if err != nil {
+		auth.WriteHTTPError(c.Writer, auth.RefreshHTTPError(err))
+		return
+	}
+	ad.cfg.WriteTokens(c.Writer, c.Request, http.StatusOK, tokens, nil)
+}
+
+func (ad *Adapter) logout(c *gin.Context) {
+	ad.auth.LogoutRequest(c.Request.Context(), c.Request)
+	ad.cfg.Cookies.ClearAuthCookies(c.Writer, ad.cfg.CSRF.Enabled)
+	auth.WriteSuccess(c.Writer, http.StatusOK, nil)
+}
+
+func (ad *Adapter) me(c *gin.Context) {
+	user, ok := UserFromContext(c)
+	if !ok {
+		auth.WriteHTTPError(c.Writer, auth.HTTPErrNoAccessToken)
+		return
+	}
+	auth.WriteJSON(c.Writer, http.StatusOK, auth.NewPublicUser(user))
 }
