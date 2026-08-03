@@ -36,6 +36,10 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("CookieReadPriority", func(t *testing.T) { testCookieReadPriority(t, mount) })
 	t.Run("CSRF", func(t *testing.T) { testCSRF(t, mount) })
 	t.Run("Redaction", func(t *testing.T) { testRedaction(t, mount) })
+	t.Run("MagicLink", func(t *testing.T) { testMagicLink(t, mount) })
+	t.Run("SMSOTP", func(t *testing.T) { testSMSOTP(t, mount) })
+	t.Run("TwoFactor", func(t *testing.T) { testTwoFactor(t, mount) })
+	t.Run("StepUpModeDefault", func(t *testing.T) { testStepUpModeDefault(t, mount) })
 }
 
 // sensitiveFields must never appear in an adapter response body.
