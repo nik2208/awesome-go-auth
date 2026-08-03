@@ -47,14 +47,32 @@ type OAuthPendingMeta struct {
 	RedirectURL string
 	TenantID    string
 	UserID      string // non-empty when linking to existing account
+	// Email and ProviderAccountID carry the account-linking stash: the address
+	// a /link-request token was issued for, and the provider account a callback
+	// conflict parked for it.
+	Email             string
+	ProviderAccountID string
+	// ExpiresAt lets a consumer enforce the deadline itself rather than trusting
+	// the store to have honoured the ttl argument.
+	ExpiresAt time.Time
 }
 
 // OAuthLinkedAccount stores a linked provider<->user association.
+//
+// Email, Name and Picture are the reference's optional LinkedAccount profile
+// columns (linked-accounts-store.interface.ts:9-14). GET /linked-accounts
+// projects all three, and clients render them: the family admin UI falls back
+// through `a.name || a.email || a.providerAccountId`. The library fills Email at
+// every link it writes, as the reference's linkAccount calls do; Name and Picture
+// are left for a host store that wants to keep them, again as in the reference.
 type OAuthLinkedAccount struct {
 	ID         string
 	UserID     string
 	Provider   string
 	ProviderID string
+	Email      string
+	Name       string
+	Picture    string
 	CreatedAt  time.Time
 }
 
@@ -111,6 +129,14 @@ func GitHubProvider(clientID, clientSecret, redirectURL string) OAuthProvider {
 
 // AuthorizeURL builds the redirect URL for the given provider and state token.
 func (s *OAuthService) AuthorizeURL(providerName, state string) (string, error) {
+	return s.AuthorizeURLPKCE(providerName, state, "")
+}
+
+// AuthorizeURLPKCE builds the redirect URL and, when codeChallenge is non-empty,
+// binds the exchange to it with the S256 method (RFC 7636). The HTTP routes
+// always pass a challenge; the plain AuthorizeURL stays for embedders driving
+// the service themselves.
+func (s *OAuthService) AuthorizeURLPKCE(providerName, state, codeChallenge string) (string, error) {
 	p, ok := s.providers[providerName]
 	if !ok {
 		return "", fmt.Errorf("auth: unknown oauth provider %q", providerName)
@@ -125,12 +151,22 @@ func (s *OAuthService) AuthorizeURL(providerName, state string) (string, error) 
 	q.Set("response_type", "code")
 	q.Set("scope", strings.Join(p.Scopes, " "))
 	q.Set("state", state)
+	if codeChallenge != "" {
+		q.Set("code_challenge", codeChallenge)
+		q.Set("code_challenge_method", "S256")
+	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }
 
 // ExchangeCode exchanges an authorization code for user info.
 func (s *OAuthService) ExchangeCode(ctx context.Context, providerName, code string) (OAuthUserInfo, error) {
+	return s.ExchangeCodePKCE(ctx, providerName, code, "")
+}
+
+// ExchangeCodePKCE exchanges an authorization code, sending the PKCE verifier
+// when one was used to build the authorization URL.
+func (s *OAuthService) ExchangeCodePKCE(ctx context.Context, providerName, code, codeVerifier string) (OAuthUserInfo, error) {
 	p, ok := s.providers[providerName]
 	if !ok {
 		return OAuthUserInfo{}, fmt.Errorf("auth: unknown oauth provider %q", providerName)
@@ -142,6 +178,9 @@ func (s *OAuthService) ExchangeCode(ctx context.Context, providerName, code stri
 	data.Set("redirect_uri", p.RedirectURL)
 	data.Set("client_id", p.ClientID)
 	data.Set("client_secret", p.ClientSecret)
+	if codeVerifier != "" {
+		data.Set("code_verifier", codeVerifier)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.TokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
@@ -152,22 +191,25 @@ func (s *OAuthService) ExchangeCode(ctx context.Context, providerName, code stri
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return OAuthUserInfo{}, fmt.Errorf("auth: oauth token exchange: %w", err)
+		return OAuthUserInfo{}, fmt.Errorf("%w: %v", errOAuthTokenExchange, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return OAuthUserInfo{}, err
+		return OAuthUserInfo{}, fmt.Errorf("%w: %v", errOAuthTokenExchange, err)
+	}
+	if resp.StatusCode >= 400 {
+		return OAuthUserInfo{}, fmt.Errorf("%w: status %d", errOAuthTokenExchange, resp.StatusCode)
 	}
 	var tok struct {
 		AccessToken string `json:"access_token"`
 		Error       string `json:"error"`
 	}
 	if err := json.Unmarshal(body, &tok); err != nil {
-		return OAuthUserInfo{}, fmt.Errorf("auth: parse token response: %w", err)
+		return OAuthUserInfo{}, fmt.Errorf("%w: parse token response: %v", errOAuthTokenExchange, err)
 	}
 	if tok.Error != "" || tok.AccessToken == "" {
-		return OAuthUserInfo{}, fmt.Errorf("auth: oauth token error: %s", tok.Error)
+		return OAuthUserInfo{}, fmt.Errorf("%w: %s", errOAuthTokenExchange, tok.Error)
 	}
 
 	uReq, err := http.NewRequestWithContext(ctx, http.MethodGet, p.UserInfoURL, nil)
@@ -179,16 +221,22 @@ func (s *OAuthService) ExchangeCode(ctx context.Context, providerName, code stri
 
 	uResp, err := s.client.Do(uReq)
 	if err != nil {
-		return OAuthUserInfo{}, fmt.Errorf("auth: oauth userinfo: %w", err)
+		return OAuthUserInfo{}, fmt.Errorf("%w: %v", errOAuthProfile, err)
 	}
 	defer uResp.Body.Close()
 	uBody, err := io.ReadAll(uResp.Body)
 	if err != nil {
-		return OAuthUserInfo{}, err
+		return OAuthUserInfo{}, fmt.Errorf("%w: %v", errOAuthProfile, err)
+	}
+	// The status check is new: without it a provider's 401 JSON parsed cleanly
+	// into an empty profile and the callback went on to create a user with no
+	// email and no provider id.
+	if uResp.StatusCode >= 400 {
+		return OAuthUserInfo{}, fmt.Errorf("%w: status %d", errOAuthProfile, uResp.StatusCode)
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(uBody, &raw); err != nil {
-		return OAuthUserInfo{}, err
+		return OAuthUserInfo{}, fmt.Errorf("%w: %v", errOAuthProfile, err)
 	}
 
 	info := OAuthUserInfo{Provider: providerName, Raw: raw}
@@ -239,6 +287,7 @@ func (s *OAuthService) HandleCallback(
 			UserID:     linkToUserID,
 			Provider:   info.Provider,
 			ProviderID: info.ProviderID,
+			Email:      info.Email,
 			CreatedAt:  time.Now(),
 		}
 		if err := linkedAccounts.Save(ctx, link); err != nil {
@@ -268,9 +317,13 @@ func (s *OAuthService) HandleCallback(
 		user, err := authSvc.users.GetUserByEmail(ctx, info.Email, tenantID)
 		if err == nil {
 			linkID, _ := newID("lnk")
+			// The reference's linkAccount always carries the callback profile's
+			// email (auth.router.ts:1336-1343), which is what GET /linked-accounts
+			// renders.
 			_ = linkedAccounts.Save(ctx, OAuthLinkedAccount{
 				ID: linkID, UserID: user.ID,
 				Provider: info.Provider, ProviderID: info.ProviderID,
+				Email:     info.Email,
 				CreatedAt: time.Now(),
 			})
 			tokens, err := authSvc.newSessionTokens(ctx, user)
@@ -299,6 +352,7 @@ func (s *OAuthService) HandleCallback(
 	_ = linkedAccounts.Save(ctx, OAuthLinkedAccount{
 		ID: linkID, UserID: newUser.ID,
 		Provider: info.Provider, ProviderID: info.ProviderID,
+		Email:     info.Email,
 		CreatedAt: now,
 	})
 	tokens, err := authSvc.newSessionTokens(ctx, newUser)

@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	auth "github.com/nik2208/awesome-go-auth"
+	nethttpadapter "github.com/nik2208/awesome-go-auth/adapter/nethttp"
 )
 
 const userContextKey = "awesome_go_auth_user"
@@ -96,6 +97,36 @@ func (ad *Adapter) Mount(group gin.IRoutes) {
 	group.POST(prefix+"/2fa/verify", ad.guard(ad.twoFactorVerify))
 	group.POST(prefix+"/2fa/disable", ad.guard(ad.Middleware()), ad.twoFactorDisable)
 	ad.mountPasswordEmail(group, prefix)
+
+	// OAuth and account linking. Gin registers the routes with its own ":param"
+	// syntax but serves the shared net/http handlers: the group's behaviour is
+	// entirely path- and body-driven, so re-implementing it here would only
+	// create somewhere for the adapters to drift.
+	oauth := nethttpadapter.NewWithConfig(ad.auth, ad.cfg)
+	group.GET(prefix+"/oauth/:provider", serveHTTP(oauth.OAuthAuthorizeHandler()))
+	group.GET(prefix+"/oauth/:provider/callback", serveHTTP(oauth.OAuthCallbackHandler()))
+	group.GET(prefix+"/linked-accounts", serveHTTP(oauth.LinkedAccountsHandler()))
+	// The unlink route is registered as a catch-all, not as two path parameters.
+	// Gin matches on the UNESCAPED path, so a providerAccountId containing %2F —
+	// which net/http, chi and echo all deliver to the handler intact, as Express
+	// does — arrives here as three segments and would miss a two-parameter
+	// pattern entirely, giving gin a 404 where every other adapter answers 200.
+	// The shared handler reads its parameters off r.URL.EscapedPath() and rejects
+	// any shape that is not exactly <provider>/<providerAccountId> with the same
+	// bare 404 the other routers emit, so the catch-all widens what reaches the
+	// handler without widening what the route answers. The bare :provider entry
+	// is there to keep gin from answering a one-segment path with a 307 to the
+	// catch-all's trailing slash.
+	group.DELETE(prefix+"/linked-accounts/:provider", serveHTTP(oauth.UnlinkAccountHandler()))
+	group.DELETE(prefix+"/linked-accounts/:provider/*providerAccountId", serveHTTP(oauth.UnlinkAccountHandler()))
+	group.POST(prefix+"/link-request", serveHTTP(oauth.LinkRequestHandler()))
+	group.POST(prefix+"/link-verify", serveHTTP(oauth.LinkVerifyHandler()))
+}
+
+// serveHTTP adapts a net/http handler to gin. The handler is terminal, so
+// there is no chain left to abort.
+func serveHTTP(h http.Handler) gin.HandlerFunc {
+	return func(c *gin.Context) { h.ServeHTTP(c.Writer, c.Request) }
 }
 
 // guard runs the shared CSRF middleware in front of a Gin handler. Reusing the
