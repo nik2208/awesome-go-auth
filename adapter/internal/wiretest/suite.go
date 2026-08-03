@@ -32,6 +32,8 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("Logout", func(t *testing.T) { testLogout(t, mount) })
 	t.Run("Me", func(t *testing.T) { testMe(t, mount) })
 	t.Run("SessionRevoked", func(t *testing.T) { testSessionRevoked(t, mount) })
+	t.Run("Sessions", func(t *testing.T) { testSessions(t, mount) })
+	t.Run("Account", func(t *testing.T) { testAccount(t, mount) })
 	t.Run("CookieNames", func(t *testing.T) { testCookieNames(t, mount) })
 	t.Run("CookieReadPriority", func(t *testing.T) { testCookieReadPriority(t, mount) })
 	t.Run("CSRF", func(t *testing.T) { testCSRF(t, mount) })

@@ -78,6 +78,12 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 	mux.Handle("POST "+prefix+"/refresh", a.guard(http.HandlerFunc(a.Refresh)))
 	mux.Handle("POST "+prefix+"/logout", a.guard(http.HandlerFunc(a.Logout)))
 	mux.Handle("GET "+prefix+"/me", a.guard(a.Middleware()(http.HandlerFunc(a.Me))))
+	mux.Handle("GET "+prefix+"/sessions", a.guard(a.Middleware()(http.HandlerFunc(a.Sessions))))
+	mux.Handle("DELETE "+prefix+"/sessions/{handle}", a.guard(a.Middleware()(http.HandlerFunc(a.RevokeSession))))
+	mux.Handle("POST "+prefix+"/sessions/cleanup", a.guard(http.HandlerFunc(a.CleanupSessions)))
+	mux.Handle("PATCH "+prefix+"/profile", a.guard(a.Middleware()(http.HandlerFunc(a.UpdateProfile))))
+	mux.Handle("POST "+prefix+"/add-phone", a.guard(a.Middleware()(http.HandlerFunc(a.AddPhone))))
+	mux.Handle("DELETE "+prefix+"/account", a.guard(a.Middleware()(http.HandlerFunc(a.DeleteAccount))))
 }
 
 // guard wraps a mounted route in the CSRF middleware, which also distributes

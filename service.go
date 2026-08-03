@@ -586,13 +586,15 @@ func (s *Service) UpdateProfile(ctx context.Context, in UpdateProfileInput) (Use
 	return s.enrichUser(ctx, updated)
 }
 
+// DeleteAccount runs the reference's account cleanup in the reference's order
+// (auth.router.ts:1597-1636): sessions, then role assignments, then tenant
+// memberships, then metadata, and the user record last. The order is not
+// cosmetic — deleting the identity first and failing anywhere afterwards leaves
+// sessions that still authenticate a user who no longer exists.
 func (s *Service) DeleteAccount(ctx context.Context, in DeleteAccountInput) error {
 	accountStore, ok := s.users.(UserAccountStore)
 	if !ok {
 		return ErrFeatureNotSupported
-	}
-	if err := accountStore.DeleteUser(ctx, in.UserID, in.TenantID); err != nil {
-		return fmt.Errorf("auth: delete account: %w", err)
 	}
 	if adminStore, ok := s.sessions.(SessionAdminStore); ok {
 		sessions, err := adminStore.ListSessionsForUser(ctx, in.UserID, in.TenantID)
@@ -602,8 +604,27 @@ func (s *Service) DeleteAccount(ctx context.Context, in DeleteAccountInput) erro
 			}
 		}
 	}
+	if s.rbac != nil {
+		roles, err := s.rbac.GetRolesForUser(ctx, in.UserID, in.TenantID)
+		if err == nil {
+			for _, role := range roles {
+				_ = s.rbac.RemoveRoleFromUser(ctx, in.UserID, role, in.TenantID)
+			}
+		}
+	}
+	if s.tenants != nil {
+		tenants, err := s.tenants.GetTenantsForUser(ctx, in.UserID)
+		if err == nil {
+			for _, tenant := range tenants {
+				_ = s.tenants.DisassociateUserFromTenant(ctx, in.UserID, tenant.ID)
+			}
+		}
+	}
 	if s.metadata != nil {
 		_ = s.metadata.ClearMetadata(ctx, in.UserID)
+	}
+	if err := accountStore.DeleteUser(ctx, in.UserID, in.TenantID); err != nil {
+		return fmt.Errorf("auth: delete account: %w", err)
 	}
 	return nil
 }

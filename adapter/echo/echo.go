@@ -83,6 +83,12 @@ func (ad *Adapter) Mount(group *echo.Group) {
 	group.POST(prefix+"/refresh", ad.guard(ad.refresh))
 	group.POST(prefix+"/logout", ad.guard(ad.logout))
 	group.GET(prefix+"/me", ad.guard(ad.Middleware()(ad.me)))
+	group.GET(prefix+"/sessions", ad.guard(ad.Middleware()(ad.sessions)))
+	group.DELETE(prefix+"/sessions/:handle", ad.guard(ad.Middleware()(ad.revokeSession)))
+	group.POST(prefix+"/sessions/cleanup", ad.guard(ad.cleanupSessions))
+	group.PATCH(prefix+"/profile", ad.guard(ad.Middleware()(ad.updateProfile)))
+	group.POST(prefix+"/add-phone", ad.guard(ad.Middleware()(ad.addPhone)))
+	group.DELETE(prefix+"/account", ad.guard(ad.Middleware()(ad.deleteAccount)))
 }
 
 // guard runs the shared CSRF middleware in front of an Echo handler. Reusing
