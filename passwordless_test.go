@@ -37,7 +37,7 @@ func TestStepUpErrorCatalogLiterals(t *testing.T) {
 		// The same failure, one route apart: /2fa/verify says INVALID_ACCESS_TOKEN
 		// where its siblings say INVALID_TEMP_TOKEN.
 		HTTPErrInvalidStepUpToken:        {401, "Invalid or expired access token", "INVALID_ACCESS_TOKEN"},
-		HTTPErrEmailRequired:             {400, "email is required", ""},
+		HTTPErrPasswordlessEmailRequired: {400, "email is required", ""},
 		HTTPErrUserIDOrEmailRequired:     {400, "userId or email is required", ""},
 		HTTPErrUserIDRequired:            {400, "userId is required", ""},
 		HTTPErrPhoneNotSet:               {400, "User does not have a phone number configured", "PHONE_NOT_SET"},

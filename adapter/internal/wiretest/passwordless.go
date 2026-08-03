@@ -131,7 +131,7 @@ func totpCode(t *testing.T, secret string, at time.Time) string {
 
 // bearer marks a request as a bearer client and, when a token is given,
 // authenticates it.
-func bearer(req *http.Request, accessToken string) *http.Request {
+func passwordlessBearer(req *http.Request, accessToken string) *http.Request {
 	req.Header.Set(auth.AuthStrategyHeader, auth.AuthStrategyBearer)
 	if accessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+accessToken)
@@ -151,7 +151,7 @@ func csrfMirror(req *http.Request, rec *httptest.ResponseRecorder) *http.Request
 	return req
 }
 
-func storedUser(t *testing.T, store *auth.MemoryUserStore, id string) auth.User {
+func passwordlessStoredUser(t *testing.T, store *auth.MemoryUserStore, id string) auth.User {
 	t.Helper()
 	user, err := store.GetUserByID(context.Background(), id, testTenant)
 	if err != nil {
@@ -189,7 +189,7 @@ func testMagicLink(t *testing.T, mount Mounter) {
 		if body["success"] != true {
 			t.Fatalf("success = %v", body["success"])
 		}
-		if storedUser(t, store, user.ID).MagicLinkTokenHash == "" {
+		if passwordlessStoredUser(t, store, user.ID).MagicLinkTokenHash == "" {
 			t.Fatal("no magic-link token was stored: the route answered without doing anything")
 		}
 	})
@@ -241,10 +241,10 @@ func testMagicLink(t *testing.T, mount Mounter) {
 
 		AssertStatus(t, rec, http.StatusOK)
 		AssertKeys(t, Body(t, rec), "success")
-		if storedUser(t, store, subject.ID).MagicLinkTokenHash == "" {
+		if passwordlessStoredUser(t, store, subject.ID).MagicLinkTokenHash == "" {
 			t.Error("the step-up subject got no magic link")
 		}
-		if storedUser(t, store, other.ID).MagicLinkTokenHash != "" {
+		if passwordlessStoredUser(t, store, other.ID).MagicLinkTokenHash != "" {
 			t.Error("the body address got a magic link: the 2fa branch must ignore it")
 		}
 	})
@@ -267,7 +267,7 @@ func testMagicLink(t *testing.T, mount Mounter) {
 		user, _ := env.Seed("magicbearer@example.com")
 		token := magicLinkToken(t, env, user)
 
-		rec := env.Do(bearer(env.Request(http.MethodPost, "/magic-link/verify", map[string]any{"token": token}), ""))
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/magic-link/verify", map[string]any{"token": token}), ""))
 
 		AssertStatus(t, rec, http.StatusOK)
 		body := Body(t, rec)
@@ -384,7 +384,7 @@ func testMagicLink(t *testing.T, mount Mounter) {
 		}))
 
 		AssertStatus(t, rec, http.StatusOK)
-		if !storedUser(t, store, user.ID).IsEmailVerified {
+		if !passwordlessStoredUser(t, store, user.ID).IsEmailVerified {
 			t.Error("a login-mode magic link did not verify the address")
 		}
 	})
@@ -401,7 +401,7 @@ func testMagicLink(t *testing.T, mount Mounter) {
 		}))
 
 		AssertStatus(t, rec, http.StatusOK)
-		if storedUser(t, store, user.ID).IsEmailVerified {
+		if passwordlessStoredUser(t, store, user.ID).IsEmailVerified {
 			t.Error("the step-up branch verified the address: that side effect is login-mode only")
 		}
 	})
@@ -472,7 +472,7 @@ func testSMSOTP(t *testing.T, mount Mounter) {
 
 		AssertStatus(t, rec, http.StatusOK)
 		AssertKeys(t, Body(t, rec), "success")
-		if storedUser(t, store, user.ID).SMSCodeHash == "" {
+		if passwordlessStoredUser(t, store, user.ID).SMSCodeHash == "" {
 			t.Fatal("no SMS code was stored: the route answered without doing anything")
 		}
 	})
@@ -487,7 +487,7 @@ func testSMSOTP(t *testing.T, mount Mounter) {
 
 		AssertStatus(t, rec, http.StatusOK)
 		AssertKeys(t, Body(t, rec), "success")
-		if storedUser(t, store, user.ID).SMSCodeHash == "" {
+		if passwordlessStoredUser(t, store, user.ID).SMSCodeHash == "" {
 			t.Fatal("no SMS code was stored")
 		}
 	})
@@ -548,7 +548,7 @@ func testSMSOTP(t *testing.T, mount Mounter) {
 		}))
 		AssertStatus(t, rec, http.StatusOK)
 		AssertKeys(t, Body(t, rec), "success")
-		if storedUser(t, store, user.ID).SMSCodeHash == "" {
+		if passwordlessStoredUser(t, store, user.ID).SMSCodeHash == "" {
 			t.Fatal("no SMS code was stored for the step-up subject")
 		}
 	})
@@ -573,7 +573,7 @@ func testSMSOTP(t *testing.T, mount Mounter) {
 		user, _ := env.Seed("smsbearer@example.com")
 		code := smsCode(t, env, user)
 
-		rec := env.Do(bearer(env.Request(http.MethodPost, "/sms/verify", map[string]any{
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/sms/verify", map[string]any{
 			"userId": user.ID, "code": code, "tenantId": testTenant,
 		}), ""))
 
@@ -679,7 +679,7 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
 		_, tokens := env.Seed("setup2fa@example.com")
 
-		rec := env.Do(bearer(env.Request(http.MethodPost, "/2fa/setup", nil), tokens.AccessToken))
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/setup", nil), tokens.AccessToken))
 
 		AssertStatus(t, rec, http.StatusOK)
 		body := Body(t, rec)
@@ -701,8 +701,8 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 	t.Run("setup is a fresh secret every call", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
 		_, tokens := env.Seed("setuptwice@example.com")
-		first := Body(t, env.Do(bearer(env.Request(http.MethodPost, "/2fa/setup", nil), tokens.AccessToken)))["secret"]
-		second := Body(t, env.Do(bearer(env.Request(http.MethodPost, "/2fa/setup", nil), tokens.AccessToken)))["secret"]
+		first := Body(t, env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/setup", nil), tokens.AccessToken)))["secret"]
+		second := Body(t, env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/setup", nil), tokens.AccessToken)))["secret"]
 		if first == second {
 			t.Fatal("two setups returned the same secret")
 		}
@@ -711,7 +711,7 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 	// 403 with no code, as everywhere else behind the access-token middleware.
 	t.Run("setup without a credential", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
-		rec := env.Do(bearer(env.Request(http.MethodPost, "/2fa/setup", nil), ""))
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/setup", nil), ""))
 		AssertError(t, rec, http.StatusForbidden, "No access token provided", "")
 	})
 
@@ -733,7 +733,7 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 		_, tokens := env.Seed("enrol@example.com")
 		enrolTOTP(t, env, tokens.AccessToken)
 
-		me := env.Do(bearer(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/me", nil), tokens.AccessToken))
+		me := env.Do(passwordlessBearer(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/me", nil), tokens.AccessToken))
 		AssertStatus(t, me, http.StatusOK)
 		if Body(t, me)["isTotpEnabled"] != true {
 			t.Fatalf("isTotpEnabled = %v after enrolment", Body(t, me)["isTotpEnabled"])
@@ -745,9 +745,9 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 	t.Run("verify-setup with the wrong code", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
 		_, tokens := env.Seed("enrolbad@example.com")
-		secret, _ := Body(t, env.Do(bearer(env.Request(http.MethodPost, "/2fa/setup", nil), tokens.AccessToken)))["secret"].(string)
+		secret, _ := Body(t, env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/setup", nil), tokens.AccessToken)))["secret"].(string)
 
-		rec := env.Do(bearer(env.Request(http.MethodPost, "/2fa/verify-setup", map[string]any{
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/verify-setup", map[string]any{
 			"token": "000000", "secret": secret,
 		}), tokens.AccessToken))
 		AssertError(t, rec, http.StatusBadRequest, "Invalid TOTP code", "")
@@ -773,7 +773,7 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 		user, tokens := env.Seed("stepuptotpbearer@example.com")
 		secret := enrolTOTP(t, env, tokens.AccessToken)
 
-		rec := env.Do(bearer(env.Request(http.MethodPost, "/2fa/verify", map[string]any{
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/verify", map[string]any{
 			"tempToken": tempTokenFor(t, env, user), "totpCode": totpCode(t, secret, time.Now()),
 		}), ""))
 
@@ -829,11 +829,11 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 		_, tokens := env.Seed("disable2fa@example.com")
 		enrolTOTP(t, env, tokens.AccessToken)
 
-		rec := env.Do(bearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
 		AssertStatus(t, rec, http.StatusOK)
 		AssertKeys(t, Body(t, rec), "success")
 
-		me := env.Do(bearer(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/me", nil), tokens.AccessToken))
+		me := env.Do(passwordlessBearer(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/me", nil), tokens.AccessToken))
 		if Body(t, me)["isTotpEnabled"] != false {
 			t.Fatal("the factor survived /2fa/disable")
 		}
@@ -844,7 +844,7 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithUserStore(store))
 		_, tokens := env.Seed("mustkeep@example.com")
 
-		rec := env.Do(bearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
 		AssertError(t, rec, http.StatusForbidden, "Cannot disable 2FA: required for your account", auth.CodeTwoFactorRequired)
 	})
 
@@ -861,12 +861,12 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 		_, tokens := env.Seed("vanishing@example.com")
 
 		store.arm(0)
-		me := env.Do(bearer(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/me", nil), tokens.AccessToken))
+		me := env.Do(passwordlessBearer(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/me", nil), tokens.AccessToken))
 		AssertStatus(t, me, http.StatusOK)
 		gate := store.lookups()
 
 		store.arm(gate)
-		rec := env.Do(bearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
 		AssertStatus(t, rec, http.StatusOK)
 		AssertKeys(t, Body(t, rec), "success")
 	})
@@ -875,7 +875,7 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithRequire2FA(true))
 		_, tokens := env.Seed("policy@example.com")
 
-		rec := env.Do(bearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
 		AssertError(t, rec, http.StatusForbidden, "Cannot disable 2FA: required by system policy", auth.CodeTwoFactorRequired)
 	})
 
@@ -901,13 +901,13 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 // client proves it can generate a code from it, and only then is it stored.
 func enrolTOTP(t *testing.T, env *Env, accessToken string) string {
 	t.Helper()
-	setup := env.Do(bearer(env.Request(http.MethodPost, "/2fa/setup", nil), accessToken))
+	setup := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/setup", nil), accessToken))
 	AssertStatus(t, setup, http.StatusOK)
 	secret, _ := Body(t, setup)["secret"].(string)
 	if secret == "" {
 		t.Fatal("setup returned no secret")
 	}
-	verify := env.Do(bearer(env.Request(http.MethodPost, "/2fa/verify-setup", map[string]any{
+	verify := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/verify-setup", map[string]any{
 		"token": totpCode(t, secret, time.Now()), "secret": secret,
 	}), accessToken))
 	AssertStatus(t, verify, http.StatusOK)
@@ -975,7 +975,7 @@ func testStepUpEmptyBody(t *testing.T, mount Mounter) {
 	t.Run("/2fa/verify-setup", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
 		_, tokens := env.Seed("emptybodyenrol@example.com")
-		rec := env.Do(bearer(env.Request(http.MethodPost, "/2fa/verify-setup", nil), tokens.AccessToken))
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/verify-setup", nil), tokens.AccessToken))
 		AssertError(t, rec, http.StatusBadRequest, "Invalid TOTP code", "")
 	})
 

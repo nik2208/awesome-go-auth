@@ -113,7 +113,7 @@ func (a *Adapter) MagicLinkSend(w http.ResponseWriter, r *http.Request) {
 		}
 		email, tenantID = user.Email, user.TenantID
 	} else if strings.TrimSpace(email) == "" {
-		auth.WriteHTTPError(w, auth.HTTPErrEmailRequired)
+		auth.WriteHTTPError(w, auth.HTTPErrPasswordlessEmailRequired)
 		return
 	}
 	// An unknown address answers 200 as well: the send call is silent about

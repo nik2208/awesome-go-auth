@@ -62,10 +62,10 @@ var (
 	// siblings.
 	HTTPErrInvalidStepUpToken = HTTPError{Status: http.StatusUnauthorized, Message: "Invalid or expired access token", Code: CodeInvalidAccessToken}
 
-	HTTPErrEmailRequired         = HTTPError{Status: http.StatusBadRequest, Message: "email is required"}
-	HTTPErrUserIDOrEmailRequired = HTTPError{Status: http.StatusBadRequest, Message: "userId or email is required"}
-	HTTPErrUserIDRequired        = HTTPError{Status: http.StatusBadRequest, Message: "userId is required"}
-	HTTPErrPhoneNotSet           = HTTPError{Status: http.StatusBadRequest, Message: "User does not have a phone number configured", Code: CodePhoneNotSet}
+	HTTPErrPasswordlessEmailRequired = HTTPError{Status: http.StatusBadRequest, Message: "email is required"}
+	HTTPErrUserIDOrEmailRequired     = HTTPError{Status: http.StatusBadRequest, Message: "userId or email is required"}
+	HTTPErrUserIDRequired            = HTTPError{Status: http.StatusBadRequest, Message: "userId is required"}
+	HTTPErrPhoneNotSet               = HTTPError{Status: http.StatusBadRequest, Message: "User does not have a phone number configured", Code: CodePhoneNotSet}
 
 	HTTPErrInvalidSMSCode = HTTPError{Status: http.StatusUnauthorized, Message: "Invalid or expired SMS code"}
 

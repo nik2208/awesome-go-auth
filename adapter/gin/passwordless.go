@@ -62,7 +62,7 @@ func (ad *Adapter) magicLinkSend(c *gin.Context) {
 		}
 		email, tenantID = user.Email, user.TenantID
 	} else if strings.TrimSpace(email) == "" {
-		auth.WriteHTTPError(c.Writer, auth.HTTPErrEmailRequired)
+		auth.WriteHTTPError(c.Writer, auth.HTTPErrPasswordlessEmailRequired)
 		return
 	}
 	if _, err := ad.auth.SendMagicLink(c.Request.Context(), auth.MagicLinkSendInput{Email: email, TenantID: tenantID}); err != nil {
