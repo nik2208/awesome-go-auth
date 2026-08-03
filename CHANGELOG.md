@@ -71,6 +71,18 @@ every later route builds on.
   now located anywhere on a segment boundary in the request path, so an adapter
   mounted on a gin/echo group or a chi `Route` (URL `<base><prefix>/<route>`) is
   still enforced instead of silently unprotected.
+
+  "Cookie-authenticated" is literal: a mutating request that carries no
+  `accessToken` cookie is passed through to the access-token gate, which answers
+  `403 {"error": "No access token provided"}` with **no** `code`. That is the
+  reference's ordering — it extracts the token first and only then reaches its
+  CSRF branch (`auth.middleware.ts:29-42`) — and it is what a client with neither
+  credential now sees, where an earlier revision of this port answered
+  `CSRF_INVALID`. `POST /auth/link-request` is the exception: it has no auth gate
+  behind it, so it stays enforced with no credential at all, mirroring the
+  reference's hand-written check (`auth.router.ts:1489-1495`). Without that carve-out
+  a pure cross-site form post — no cookies, no `Authorization`, no headers —
+  would reach the handler and overwrite an in-flight account-link token.
 - **BREAKING — gin and echo now agree with net/http on cookie attributes.** Gin
   used to give the refresh cookie an arbitrary lifetime of ten times the access
   token's; both now write through the same serialiser, so the four adapters emit

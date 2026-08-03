@@ -9,6 +9,8 @@ import (
 // Auth is the top-level entrypoint configured with functional options.
 type Auth struct {
 	service *Service
+	// oauth is nil unless WithOAuth was supplied; see oauth_wire.go.
+	oauth *OAuthWiring
 }
 
 // Option configures Auth initialization.
@@ -19,6 +21,7 @@ type authBuilder struct {
 	users    UserStore
 	sessions SessionStore
 	svcOpts  []ServiceOption
+	oauth    *OAuthWiring
 }
 
 // New creates a configured Auth instance.
@@ -42,7 +45,7 @@ func New(opts ...Option) (*Auth, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Auth{service: svc}, nil
+	return &Auth{service: svc, oauth: b.oauth}, nil
 }
 
 // Service exposes the configured core service.

@@ -614,16 +614,18 @@ func testUpdateProfile(t *testing.T, mount Mounter) {
 		AssertError(t, env.Do(req), http.StatusBadRequest, "Invalid request body", auth.CodeInvalidBody)
 	})
 
-	// [DEVIATION] The reference enforces CSRF inside its auth middleware, so an
-	// unauthenticated PATCH is refused with "No access token provided". Here the
-	// CSRF middleware wraps the auth middleware — that is what makes the cookie
-	// auto-init router-level, as the reference's is — so the unsafe method is
-	// judged first and the caller sees CSRF_INVALID. Both are 403; pinned so the
-	// precedence cannot change unnoticed.
+	// The reference enforces CSRF inside its auth middleware, *after* the access
+	// token has been extracted, so an unauthenticated PATCH is refused with
+	// "No access token provided" and no code — it never reaches the CSRF branch
+	// (auth.middleware.ts:29-32 then :33-42). The port keeps its CSRF middleware in
+	// front of the auth middleware, which is what makes the cookie auto-init
+	// router-level as the reference's is, and recovers the ordering by scoping
+	// enforcement to requests that carry an access-token cookie. This used to be a
+	// pinned deviation answering CSRF_INVALID.
 	t.Run("without a token", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
 		rec := env.Do(env.Request(http.MethodPatch, "/profile", map[string]string{"firstName": "Nobody"}))
-		AssertError(t, rec, http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
+		AssertError(t, rec, http.StatusForbidden, "No access token provided", "")
 	})
 }
 
@@ -801,17 +803,16 @@ func testDeleteAccount(t *testing.T, mount Mounter) {
 		AssertError(t, me, http.StatusForbidden, "Invalid or expired access token", "")
 	})
 
-	// [DEVIATION] No credential at all. The reference's authMiddleware answers
-	// 403 {"error":"No access token provided"}; here the CSRF middleware wraps the
-	// auth middleware, so an unsafe method with no double-submit is judged first —
-	// the same precedence PATCH /profile pins above. Both are 403. What matters for
-	// the route is the second half: nothing was deleted.
+	// No credential at all: the reference's authMiddleware answers
+	// 403 {"error":"No access token provided"} with no code, the same precedence
+	// PATCH /profile pins above. What matters most for the route is the second
+	// half — nothing was deleted, whichever gate refused the request.
 	t.Run("without a credential", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
 		login, _ := loginSession(t, env, "deletenocred@example.com")
 
 		rec := env.Do(httptest.NewRequest(http.MethodDelete, env.Config.Prefix()+"/account", nil))
-		AssertError(t, rec, http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
+		AssertError(t, rec, http.StatusForbidden, "No access token provided", "")
 		if me := meBody(t, env, login); me["email"] != "deletenocred@example.com" {
 			t.Fatalf("an unauthenticated DELETE removed the account: %v", me["email"])
 		}

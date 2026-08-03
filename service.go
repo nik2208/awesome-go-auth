@@ -308,6 +308,23 @@ func (s *Service) SendMagicLink(ctx context.Context, in MagicLinkSendInput) (str
 }
 
 func (s *Service) VerifyMagicLink(ctx context.Context, in MagicLinkVerifyInput) (User, AuthTokens, error) {
+	return s.verifyMagicLink(ctx, in, "")
+}
+
+// verifyMagicLink consumes a magic link and issues a session for its owner.
+//
+// requireUserID, when set, is the identity the link has to belong to — the
+// step-up flow, where the link is a second factor for a user the caller has
+// already identified. It is checked *before* anything is issued, so a refused
+// request leaves no session behind, and before the email-verification side
+// effect, which the reference applies only on the login path
+// (auth.router.ts:1158-1164 versus the 2fa branch at :1134-1156). The link is
+// still consumed either way: the reference burns it inside the strategy before
+// the router compares ids (magic-link.strategy.ts:50), so a mismatch costs the
+// link there too.
+//
+// See VerifyMagicLinkForUser for the exported entry point.
+func (s *Service) verifyMagicLink(ctx context.Context, in MagicLinkVerifyInput, requireUserID string) (User, AuthTokens, error) {
 	ms, ok := s.users.(MagicLinkStore)
 	if !ok {
 		return User{}, AuthTokens{}, ErrFeatureNotSupported
@@ -319,7 +336,10 @@ func (s *Service) VerifyMagicLink(ctx context.Context, in MagicLinkVerifyInput) 
 	if err := ms.ClearMagicLinkToken(ctx, user.ID, user.TenantID); err != nil {
 		return User{}, AuthTokens{}, err
 	}
-	if !user.IsEmailVerified {
+	if requireUserID != "" && user.ID != requireUserID {
+		return User{}, AuthTokens{}, ErrMagicLinkOwnerMismatch
+	}
+	if requireUserID == "" && !user.IsEmailVerified {
 		if evs, ok := s.users.(EmailVerificationStore); ok {
 			_ = evs.MarkEmailVerified(ctx, user.ID, user.TenantID, true)
 		}

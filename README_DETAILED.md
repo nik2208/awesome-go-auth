@@ -132,9 +132,11 @@ Two limitations apply to `strict`:
 
 - `Register` still returns a usable `AuthTokens` pair, so the mode gates `Login`
   rather than access as a whole ([#21](https://github.com/nik2208/awesome-go-auth/issues/21)).
-- No shipped HTTP adapter route exposes `SendVerificationEmailToken` or `VerifyEmail`,
-  so `strict` is only reachable by calling the service directly
-  ([#9](https://github.com/nik2208/awesome-go-auth/issues/9)).
+- `POST /send-verification-email` and `GET /verify-email` are mounted, but nothing
+  delivers the token they mint: the routes persist it and answer
+  `{"success": true}`, and this port has no mail sender wired into `Config`. Until
+  it has one, a `strict` deployment has to send the mail itself from the token
+  `SendVerificationEmailToken` returns.
 
 ### `DefaultConfig(secret string) Config`
 

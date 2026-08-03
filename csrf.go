@@ -80,7 +80,8 @@ type csrfExemption struct {
 //   - /link-request is deliberately NOT here. It has no auth middleware but the
 //     reference performs its own manual double-submit check inside the handler
 //     (auth.router.ts:1489-1495), so it is the one unauthenticated route that
-//     is CSRF-protected.
+//     is CSRF-protected. It lives in csrfManualCheckRoutes instead, which is
+//     what keeps it enforced even with no cookie credential on the request.
 //
 // Methods are the reference's, route by route (src/router/auth.router.ts:541,
 // 590, 622, 715, 736, 777, 802, 859, 969, 1040, 1078, 1126, 1176, 1244, 1544).
@@ -102,13 +103,50 @@ var csrfExemptRoutes = map[csrfExemption]bool{
 	{http.MethodPost, "/sessions/cleanup"}:     true,
 }
 
+// csrfManualCheckRoutes are the routes the reference CSRF-checks by hand inside
+// the handler instead of inheriting the check from its auth middleware. They are
+// enforced whether or not the request is cookie-authenticated, which is what
+// makes them different from every other enforced route.
+//
+// POST /link-request is the only entry, and it is deliberately not in
+// csrfExemptRoutes. The reference mounts it without authMiddleware, then opens the
+// handler with its own double-submit check gated only on `config.csrf.enabled`
+// (auth.router.ts:1489-1495) — before it extracts any token (:1502). It has to:
+// when no access token resolves, the handler falls back to the pending-link stash
+// (:1513-1524), and that stash stands in for authentication for about an hour. So
+// the route performs a write on behalf of an identity it did not authenticate,
+// and the double-submit is the only thing standing between a cross-site form and
+// that write.
+//
+// Do not fold this into csrfExemptRoutes. Being absent from the exempt table is
+// not enough on its own: enforcement below is otherwise scoped to requests that
+// carry an access-token cookie, and /link-request is precisely the route that
+// needs checking when there is no such cookie. Without this table a pure forgery
+// — no cookies, no Authorization, no headers — reaches linkRequest, which does no
+// manual check of its own, and decodeJSON never inspects Content-Type, so an
+// auto-submitting <form enctype="text/plain"> is enough. That overwrites any
+// in-flight account-link token and mails the victim's address.
+var csrfManualCheckRoutes = map[csrfExemption]bool{
+	{http.MethodPost, "/link-request"}: true,
+}
+
 // CSRFMiddleware distributes and enforces the double-submit token.
 //
 // Distribution mirrors the reference's router-level auto-init: a request that
-// arrives without a readable CSRF cookie gets a fresh one. Enforcement follows
-// the reference matrix — only cookie-authenticated unsafe methods on routes
-// that sit behind the auth middleware are checked; safe methods, bearer
-// requests and the unauthenticated routes above are exempt.
+// arrives without a readable CSRF cookie gets a fresh one.
+//
+// Enforcement follows the reference matrix. A request is checked when it is an
+// unsafe method, on a mounted route, that route is not exempt, the request
+// presents no bearer credential, and either it carries an access-token cookie or
+// the route does its own manual check in the reference:
+//
+//	enforced = mutating && mounted && !exempt && !usingBearerCredential
+//	           && (accessTokenCookiePresent || manualCheckRoute)
+//
+// Safe methods, bearer requests, the unauthenticated routes in csrfExemptRoutes
+// and — for every route but csrfManualCheckRoutes — requests with no cookie
+// credential are passed through. The last of those is the reference's ordering:
+// see csrfEnforced.
 func CSRFMiddleware(cfg HTTPConfig) func(http.Handler) http.Handler {
 	cfg = cfg.resolve(0, 0)
 	prefix := cfg.Prefix()
@@ -174,6 +212,24 @@ func usingBearerCredential(r *http.Request) bool {
 	return r != nil && BearerToken(r.Header.Get("Authorization")) != ""
 }
 
+// csrfEnforced reports whether the double-submit check applies to this request.
+//
+// The reference runs the check inside authMiddleware, *after* the access token has
+// been extracted, and only when the token came from a cookie
+// (auth.middleware.ts:29-42): no token at all short-circuits to
+// 403 {"error":"No access token provided"} with no code, and never reaches the
+// CSRF branch. This port runs CSRF as a middleware wrapping the auth middleware,
+// so it is asked first — which is what keeps cookie distribution router-level, as
+// the reference's is. Scoping enforcement to requests that present an
+// access-token cookie recovers the reference's ordering on the wire: a request
+// with no cookie credential is passed straight through and answered by the auth
+// gate with the reference's literal, while a cookie-authenticated one is still
+// checked before anything touches the session.
+//
+// That scoping is safe only because the auth gate is the second line of defence
+// for every route below. It is not, for the one route that has no auth gate at
+// all, which is why csrfManualCheckRoutes is consulted before the cookie test —
+// see the comment on that table.
 func csrfEnforced(r *http.Request, prefix string) bool {
 	if !isMutatingMethod(r.Method) {
 		return false
@@ -182,7 +238,19 @@ func csrfEnforced(r *http.Request, prefix string) bool {
 	if !mounted {
 		return false
 	}
-	return !csrfExemptRoutes[csrfExemption{method: r.Method, path: rel}]
+	route := csrfExemption{method: r.Method, path: rel}
+	if csrfExemptRoutes[route] {
+		return false
+	}
+	if csrfManualCheckRoutes[route] {
+		return true
+	}
+	// CookieValue resolves the __Host- → __Secure- → bare precedence, so this
+	// asks the same question of the same cookie as the auth gate behind it
+	// (AccessTokenFromRequest). The two must not disagree about whether a request
+	// is cookie-authenticated, or enforcement would switch off for a request the
+	// auth gate then lets through.
+	return CookieValue(r, AccessTokenCookieName) != ""
 }
 
 func isMutatingMethod(method string) bool {

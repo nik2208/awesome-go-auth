@@ -18,6 +18,30 @@ const (
 	hostCSRF    = "__Host-csrf-token"
 )
 
+// csrfPairValue is an arbitrary 32-hex token. The middleware only compares the
+// header against the cookie, so the value's shape is irrelevant — only that the
+// two match.
+const csrfPairValue = "0123456789abcdef0123456789abcdef"
+
+// csrfPair gives a request a valid double-submit pair so that it clears the CSRF
+// middleware and reaches whatever sits behind it.
+//
+// It is needed only for POST /link-request. That route has no auth middleware in
+// the reference, which checks the double-submit by hand inside the handler
+// instead (auth.router.ts:1489-1495), so the port keeps enforcing it whether or
+// not the request is cookie-authenticated. Every other mutating route defers an
+// unauthenticated request to the auth gate, so a credential-less case there needs
+// no pair at all and must not be given one — the pair would hide the very
+// ordering those cases exist to pin.
+//
+// A garbage bearer token is not a substitute for either: the auth gate would
+// answer "Invalid or expired access token" instead of "No access token provided".
+func csrfPair(req *http.Request) *http.Request {
+	req.AddCookie(&http.Cookie{Name: hostCSRF, Value: csrfPairValue})
+	req.Header.Set(auth.CSRFHeaderName, csrfPairValue)
+	return req
+}
+
 const (
 	defaultAccessMaxAge  = int(15 * time.Minute / time.Second)
 	defaultRefreshMaxAge = int(30 * 24 * time.Hour / time.Second)
@@ -38,6 +62,13 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("CookieReadPriority", func(t *testing.T) { testCookieReadPriority(t, mount) })
 	t.Run("CSRF", func(t *testing.T) { testCSRF(t, mount) })
 	t.Run("Redaction", func(t *testing.T) { testRedaction(t, mount) })
+	t.Run("OAuthLinking", func(t *testing.T) { RunOAuthLinking(t, mount) })
+	t.Run("MagicLink", func(t *testing.T) { testMagicLink(t, mount) })
+	t.Run("SMSOTP", func(t *testing.T) { testSMSOTP(t, mount) })
+	t.Run("TwoFactor", func(t *testing.T) { testTwoFactor(t, mount) })
+	t.Run("StepUpModeDefault", func(t *testing.T) { testStepUpModeDefault(t, mount) })
+	t.Run("StepUpEmptyBody", func(t *testing.T) { testStepUpEmptyBody(t, mount) })
+	t.Run("PasswordAndEmail", func(t *testing.T) { testPasswordAndEmail(t, mount) })
 }
 
 // sensitiveFields must never appear in an adapter response body.
@@ -528,6 +559,56 @@ func testCSRF(t *testing.T, mount Mounter) {
 		req := env.Request(http.MethodPost, "/login", credentials("csrflogin@example.com"))
 		req.AddCookie(&http.Cookie{Name: hostCSRF, Value: "not-mirrored-in-the-header"})
 		AssertStatus(t, env.Do(req), http.StatusOK)
+	})
+
+	// ── Ordering: the auth gate answers before CSRF ──────────────────────────
+	//
+	// The reference extracts the access token first and only then reaches its CSRF
+	// branch (auth.middleware.ts:29-32 then :33-42), so a request with no token at
+	// all is answered 403 {"error":"No access token provided"} with **no code** and
+	// never sees CSRF_INVALID. The port runs CSRF as a middleware in front of the
+	// auth middleware, so it recovers that ordering by scoping enforcement to
+	// requests that carry an access-token cookie.
+	//
+	// These cases are the wire-level statement of that. The absent `code` is the
+	// load-bearing half: CSRF_INVALID would carry one, so a regression that put
+	// the CSRF middleware back in front of the auth gate fails here rather than
+	// only in the unit tests.
+	t.Run("an unauthenticated mutating request is answered by the auth gate", func(t *testing.T) {
+		routes := []struct {
+			method string
+			route  string
+			body   any
+		}{
+			{http.MethodPatch, "/profile", map[string]string{"firstName": "Nobody"}},
+			{http.MethodPost, "/add-phone", map[string]string{"phoneNumber": "+390000000000"}},
+			{http.MethodDelete, "/account", nil},
+			{http.MethodPost, "/2fa/setup", nil},
+			{http.MethodPost, "/change-password", map[string]string{"currentPassword": "password1", "newPassword": "newpassword1"}},
+			{http.MethodPost, "/send-verification-email", nil},
+			{http.MethodPost, "/change-email/request", map[string]string{"newEmail": "changed@example.com"}},
+			{http.MethodDelete, "/sessions/some-handle", nil},
+		}
+		for _, rt := range routes {
+			t.Run(rt.method+" "+rt.route, func(t *testing.T) {
+				env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+				// No cookies, no Authorization, no CSRF header: the shape a native
+				// client has on its first call, and the shape of a forgery.
+				req := env.Request(rt.method, rt.route, rt.body)
+				AssertError(t, env.Do(req), http.StatusForbidden, "No access token provided", "")
+			})
+		}
+	})
+
+	// The same request once a session cookie is present is CSRF-checked again, so
+	// the scoping above cannot be read as "CSRF is off for cookie clients".
+	t.Run("a cookie-authenticated request is still CSRF-checked", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		env.Seed("csrfscope@example.com")
+		login := env.Do(env.Request(http.MethodPost, "/login", credentials("csrfscope@example.com")))
+
+		req := Replay(env.Request(http.MethodPatch, "/profile", map[string]string{"firstName": "Forged"}), login)
+		AssertError(t, env.Do(req), http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
 	})
 }
 
