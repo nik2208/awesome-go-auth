@@ -95,6 +95,7 @@ func (ad *Adapter) Mount(group gin.IRoutes) {
 	group.POST(prefix+"/2fa/verify-setup", ad.guard(ad.Middleware()), ad.twoFactorVerifySetup)
 	group.POST(prefix+"/2fa/verify", ad.guard(ad.twoFactorVerify))
 	group.POST(prefix+"/2fa/disable", ad.guard(ad.Middleware()), ad.twoFactorDisable)
+	ad.mountPasswordEmail(group, prefix)
 }
 
 // guard runs the shared CSRF middleware in front of a Gin handler. Reusing the

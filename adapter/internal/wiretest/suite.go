@@ -41,6 +41,7 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("TwoFactor", func(t *testing.T) { testTwoFactor(t, mount) })
 	t.Run("StepUpModeDefault", func(t *testing.T) { testStepUpModeDefault(t, mount) })
 	t.Run("StepUpEmptyBody", func(t *testing.T) { testStepUpEmptyBody(t, mount) })
+	t.Run("PasswordAndEmail", func(t *testing.T) { testPasswordAndEmail(t, mount) })
 }
 
 // sensitiveFields must never appear in an adapter response body.
