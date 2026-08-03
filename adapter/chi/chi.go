@@ -31,6 +31,16 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/logout", h.Logout)
 	r.With(csrf, h.Middleware()).MethodFunc(http.MethodGet, prefix+"/me", h.Me)
 
+	// Passwordless and 2FA. Chi serves the net/http handlers unchanged, so the
+	// only chi-specific part is the registration.
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/magic-link/send", h.MagicLinkSend)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/magic-link/verify", h.MagicLinkVerify)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/sms/send", h.SMSSend)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/sms/verify", h.SMSVerify)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodPost, prefix+"/2fa/setup", h.TwoFactorSetup)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodPost, prefix+"/2fa/verify-setup", h.TwoFactorVerifySetup)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/2fa/verify", h.TwoFactorVerify)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodPost, prefix+"/2fa/disable", h.TwoFactorDisable)
 	// Password management and email verification (wire-contract §2).
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/forgot-password", h.ForgotPassword)
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/reset-password", h.ResetPassword)

@@ -79,6 +79,17 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 	mux.Handle("POST "+prefix+"/logout", a.guard(http.HandlerFunc(a.Logout)))
 	mux.Handle("GET "+prefix+"/me", a.guard(a.Middleware()(http.HandlerFunc(a.Me))))
 
+	// Passwordless and 2FA (passwordless.go). The four send/verify routes are
+	// unauthenticated by contract; the three enrolment routes sit behind the
+	// access-token middleware and are therefore the only ones CSRF-checked.
+	mux.Handle("POST "+prefix+"/magic-link/send", a.guard(http.HandlerFunc(a.MagicLinkSend)))
+	mux.Handle("POST "+prefix+"/magic-link/verify", a.guard(http.HandlerFunc(a.MagicLinkVerify)))
+	mux.Handle("POST "+prefix+"/sms/send", a.guard(http.HandlerFunc(a.SMSSend)))
+	mux.Handle("POST "+prefix+"/sms/verify", a.guard(http.HandlerFunc(a.SMSVerify)))
+	mux.Handle("POST "+prefix+"/2fa/setup", a.guard(a.Middleware()(http.HandlerFunc(a.TwoFactorSetup))))
+	mux.Handle("POST "+prefix+"/2fa/verify-setup", a.guard(a.Middleware()(http.HandlerFunc(a.TwoFactorVerifySetup))))
+	mux.Handle("POST "+prefix+"/2fa/verify", a.guard(http.HandlerFunc(a.TwoFactorVerify)))
+	mux.Handle("POST "+prefix+"/2fa/disable", a.guard(a.Middleware()(http.HandlerFunc(a.TwoFactorDisable))))
 	// Password management and email verification (wire-contract §2). Handlers in
 	// password_email.go.
 	mux.Handle("POST "+prefix+"/forgot-password", a.guard(http.HandlerFunc(a.ForgotPassword)))
