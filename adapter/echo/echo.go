@@ -83,6 +83,18 @@ func (ad *Adapter) Mount(group *echo.Group) {
 	group.POST(prefix+"/refresh", ad.guard(ad.refresh))
 	group.POST(prefix+"/logout", ad.guard(ad.logout))
 	group.GET(prefix+"/me", ad.guard(ad.Middleware()(ad.me)))
+
+	// Passwordless and 2FA (passwordless.go). The four send/verify routes are
+	// unauthenticated by contract; the three enrolment routes sit behind the
+	// access-token middleware and are therefore the only ones CSRF-checked.
+	group.POST(prefix+"/magic-link/send", ad.guard(ad.magicLinkSend))
+	group.POST(prefix+"/magic-link/verify", ad.guard(ad.magicLinkVerify))
+	group.POST(prefix+"/sms/send", ad.guard(ad.smsSend))
+	group.POST(prefix+"/sms/verify", ad.guard(ad.smsVerify))
+	group.POST(prefix+"/2fa/setup", ad.guard(ad.Middleware()(ad.twoFactorSetup)))
+	group.POST(prefix+"/2fa/verify-setup", ad.guard(ad.Middleware()(ad.twoFactorVerifySetup)))
+	group.POST(prefix+"/2fa/verify", ad.guard(ad.twoFactorVerify))
+	group.POST(prefix+"/2fa/disable", ad.guard(ad.Middleware()(ad.twoFactorDisable)))
 }
 
 // guard runs the shared CSRF middleware in front of an Echo handler. Reusing
