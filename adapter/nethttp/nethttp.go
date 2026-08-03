@@ -85,6 +85,27 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 	mux.Handle("DELETE "+prefix+"/linked-accounts/{provider}/{providerAccountId}", a.UnlinkAccountHandler())
 	mux.Handle("POST "+prefix+"/link-request", a.LinkRequestHandler())
 	mux.Handle("POST "+prefix+"/link-verify", a.LinkVerifyHandler())
+
+	// Passwordless and 2FA (passwordless.go). The four send/verify routes are
+	// unauthenticated by contract; the three enrolment routes sit behind the
+	// access-token middleware and are therefore the only ones CSRF-checked.
+	mux.Handle("POST "+prefix+"/magic-link/send", a.guard(http.HandlerFunc(a.MagicLinkSend)))
+	mux.Handle("POST "+prefix+"/magic-link/verify", a.guard(http.HandlerFunc(a.MagicLinkVerify)))
+	mux.Handle("POST "+prefix+"/sms/send", a.guard(http.HandlerFunc(a.SMSSend)))
+	mux.Handle("POST "+prefix+"/sms/verify", a.guard(http.HandlerFunc(a.SMSVerify)))
+	mux.Handle("POST "+prefix+"/2fa/setup", a.guard(a.Middleware()(http.HandlerFunc(a.TwoFactorSetup))))
+	mux.Handle("POST "+prefix+"/2fa/verify-setup", a.guard(a.Middleware()(http.HandlerFunc(a.TwoFactorVerifySetup))))
+	mux.Handle("POST "+prefix+"/2fa/verify", a.guard(http.HandlerFunc(a.TwoFactorVerify)))
+	mux.Handle("POST "+prefix+"/2fa/disable", a.guard(a.Middleware()(http.HandlerFunc(a.TwoFactorDisable))))
+	// Password management and email verification (wire-contract §2). Handlers in
+	// password_email.go.
+	mux.Handle("POST "+prefix+"/forgot-password", a.guard(http.HandlerFunc(a.ForgotPassword)))
+	mux.Handle("POST "+prefix+"/reset-password", a.guard(http.HandlerFunc(a.ResetPassword)))
+	mux.Handle("POST "+prefix+"/change-password", a.guard(a.Middleware()(http.HandlerFunc(a.ChangePassword))))
+	mux.Handle("POST "+prefix+"/send-verification-email", a.guard(a.Middleware()(http.HandlerFunc(a.SendVerificationEmail))))
+	mux.Handle("GET "+prefix+"/verify-email", a.guard(http.HandlerFunc(a.VerifyEmail)))
+	mux.Handle("POST "+prefix+"/change-email/request", a.guard(a.Middleware()(http.HandlerFunc(a.ChangeEmailRequest))))
+	mux.Handle("POST "+prefix+"/change-email/confirm", a.guard(http.HandlerFunc(a.ChangeEmailConfirm)))
 }
 
 // guard wraps a mounted route in the CSRF middleware, which also distributes

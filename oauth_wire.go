@@ -60,7 +60,11 @@ var (
 	// error rather than a redirect (wire-contract.md §4, gap 5).
 	HTTPErrOAuthState = HTTPError{Status: http.StatusUnauthorized, Message: "Invalid or expired OAuth state", Code: CodeOAuthStateInvalid}
 
-	HTTPErrEmailRequired      = HTTPError{Status: http.StatusBadRequest, Message: "email is required", Code: CodeEmailRequired}
+	// Coded, unlike its passwordless sibling. The reference throws AuthError with
+	// EMAIL_REQUIRED here (auth.router.ts:1498) but answers uncoded on
+	// /magic-link/send (auth.router.ts:1111), so the two are not interchangeable.
+	// See HTTPErrPasswordlessEmailRequired.
+	HTTPErrLinkEmailRequired  = HTTPError{Status: http.StatusBadRequest, Message: "email is required", Code: CodeEmailRequired}
 	HTTPErrTokenRequired      = HTTPError{Status: http.StatusBadRequest, Message: "token is required", Code: CodeTokenRequired}
 	HTTPErrInvalidLinkToken   = HTTPError{Status: http.StatusBadRequest, Message: "Invalid account-link token", Code: CodeInvalidLinkToken}
 	HTTPErrLinkTokenExpired   = HTTPError{Status: http.StatusBadRequest, Message: "Account-link token has expired", Code: CodeLinkTokenExpired}
@@ -140,7 +144,7 @@ func OAuthHTTPError(err error) HTTPError {
 	case errors.Is(err, errStoreNotConfigured):
 		return HTTPErrNotImplemented
 	case errors.Is(err, errEmailRequired):
-		return HTTPErrEmailRequired
+		return HTTPErrLinkEmailRequired
 	case errors.Is(err, errTokenRequired):
 		return HTTPErrTokenRequired
 	case errors.Is(err, errLinkTokenInvalid):
