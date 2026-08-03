@@ -186,6 +186,13 @@ func testSessions(t *testing.T, mount Mounter) {
 	}{
 		{name: "verbatim handle", handle: "ses_plain+form:1", request: "ses_plain+form:1"},
 		{name: "URI-escaped handle", handle: "ses_escaped+form:2", request: "ses_escaped%2Bform%3A2"},
+		// A handle carrying a literal percent is the row that catches a *double*
+		// decode. net/http and gin hand the segment over already unescaped, so
+		// unescaping it again turns "ses_50%25off" into "ses_50%off" and 404s a
+		// live session; chi and echo hand it over still encoded, so for them one
+		// decode is right. The two rows above are both idempotent under a second
+		// decode and so cannot tell the two cases apart at all.
+		{name: "handle containing a percent", handle: "ses_50%25off", request: "ses_50%2525off"},
 	} {
 		t.Run("DELETE accepts a "+tc.name, func(t *testing.T) {
 			store := auth.NewMemorySessionStore()

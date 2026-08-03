@@ -78,28 +78,37 @@ func NewPublicSessions(sessions []Session) []PublicSession {
 // everywhere else.
 var HTTPErrSessionNotFound = HTTPError{Status: http.StatusNotFound, Message: "Session not found"}
 
-// SessionHandleParam normalises the {handle} path parameter.
+// SessionHandleParam normalises the {handle} path parameter: exactly one
+// percent-decode, the way the reference's decodeURIComponent does
+// (auth.router.ts:761). One family client URI-escapes the handle and the other
+// posts it verbatim, so both forms have to name the same session.
 //
-// Two things vary and both have to be absorbed here. One family client
-// URI-escapes the handle and the other posts it verbatim, so the value is
-// unescaped when it is escaped — the reference decodeURIComponent's it
-// unconditionally (auth.router.ts:761). And each router hands the segment over
-// differently: net/http and gin decode it, chi and echo do not, so a handler
-// that trusted its router would work on two adapters and 404 on the other two.
+// The decode deliberately does not start from the router's own path parameter,
+// because the four routers disagree about what they hand over: chi (via
+// r.PathValue, which chi populates from its escaped route path) and echo (which
+// routes on r.URL.RawPath when it is set) pass the segment still encoded, while
+// net/http and gin pass it already decoded. Unescaping whatever arrives is
+// therefore one decode on two adapters and two on the other two, and no
+// inspection of the string can tell the cases apart — "ses_50%25off" is both a
+// valid decoded handle and the encoded form of "ses_50%off".
 //
-// raw is the router's own path parameter; when a router does not expose one, the
-// last path segment is used instead. A handle containing an encoded slash is not
-// recoverable in Go — url.Path has already merged it into the path — but the
-// handles this package issues are "ses_" plus hex.
+// r.URL.EscapedPath() is router-independent (RawPath when the request carried
+// one, the re-encoded Path otherwise), so taking the last segment of it and
+// decoding once gives all four adapters the same handle. raw is kept as the
+// fallback for a path that yields no segment.
+//
+// A handle containing an encoded slash is still not recoverable — the path has
+// already been split on it — but the handles this package issues are "ses_"
+// plus hex.
 func SessionHandleParam(r *http.Request, raw string) string {
-	handle := strings.TrimSpace(raw)
-	if handle == "" && r != nil && r.URL != nil {
-		handle = lastPathSegment(r.URL.Path)
+	if r != nil && r.URL != nil {
+		if segment := lastPathSegment(r.URL.EscapedPath()); segment != "" {
+			if decoded, err := url.PathUnescape(segment); err == nil {
+				return strings.TrimSpace(decoded)
+			}
+		}
 	}
-	if decoded, err := url.PathUnescape(handle); err == nil {
-		return decoded
-	}
-	return handle
+	return strings.TrimSpace(raw)
 }
 
 func lastPathSegment(path string) string {

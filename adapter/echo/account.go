@@ -30,8 +30,10 @@ func (ad *Adapter) revokeSession(c echo.Context) error {
 	if !ok {
 		return nil
 	}
-	// Echo hands the path parameter over still percent-encoded, which is exactly
-	// why the normalisation lives in the core package.
+	// Echo routes on r.URL.RawPath when the request carried one, so its parameter
+	// arrives still encoded where net/http's and gin's arrive decoded — which is
+	// exactly why the normalisation lives in the core package and works off the
+	// request's escaped path rather than off this value.
 	handle := auth.SessionHandleParam(c.Request(), c.Param("handle"))
 	if err := ad.auth.RevokeUserSession(c.Request().Context(), user.ID, user.TenantID, handle); err != nil {
 		if errors.Is(err, auth.ErrSessionNotFound) {
