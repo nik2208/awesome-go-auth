@@ -15,13 +15,30 @@ import (
 // and change state, so they are also the first on which the CSRF double-submit
 // is actually enforceable in cookie mode.
 
+// updateProfileRequest carries pointers so that a key the caller omitted stays
+// distinguishable from one it sent empty: PATCH /profile is a partial update and
+// an absent firstName must not erase the stored one (§3.5).
 type updateProfileRequest struct {
-	FirstName string `json:"firstName"`
-	LastName  string `json:"lastName"`
+	FirstName *string `json:"firstName"`
+	LastName  *string `json:"lastName"`
 }
 
 type addPhoneRequest struct {
 	PhoneNumber string `json:"phoneNumber"`
+}
+
+// decodeAccountBody decodes the body of PATCH /profile or POST /add-phone,
+// tolerating a bodyless request the way express.json() does. It is the shared
+// core decoder rather than each framework's binder, because that is precisely
+// where the four adapters used to disagree: echo answered 200 to a bodyless
+// PATCH and net/http, chi and gin answered 400 INVALID_BODY. The reference
+// answers 200.
+func decodeAccountBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if err := auth.DecodeOptionalJSONBody(r, dst); err != nil {
+		auth.WriteHTTPError(w, auth.HTTPErrInvalidBody)
+		return false
+	}
+	return true
 }
 
 // Sessions handles GET <prefix>/sessions. The list is wrapped in a "sessions"
@@ -78,7 +95,7 @@ func (a *Adapter) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req updateProfileRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeAccountBody(w, r, &req) {
 		return
 	}
 	if _, err := a.auth.UpdateProfile(r.Context(), auth.UpdateProfileInput{
@@ -101,7 +118,7 @@ func (a *Adapter) AddPhone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req addPhoneRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeAccountBody(w, r, &req) {
 		return
 	}
 	if _, err := a.auth.UpdatePhoneNumber(r.Context(), auth.AddPhoneInput{

@@ -64,11 +64,15 @@ func (ad *Adapter) updateProfile(c echo.Context) error {
 	if !ok {
 		return nil
 	}
+	// Pointers, so an omitted key stays distinguishable from an empty one: the
+	// route is a partial update (§3.5). Decoded by the shared core helper rather
+	// than by echo's Bind, so that all four adapters answer a bodyless request and
+	// a malformed one identically.
 	var req struct {
-		FirstName string `json:"firstName"`
-		LastName  string `json:"lastName"`
+		FirstName *string `json:"firstName"`
+		LastName  *string `json:"lastName"`
 	}
-	if err := c.Bind(&req); err != nil {
+	if err := auth.DecodeOptionalJSONBody(c.Request(), &req); err != nil {
 		auth.WriteHTTPError(c.Response(), auth.HTTPErrInvalidBody)
 		return nil
 	}
@@ -93,7 +97,7 @@ func (ad *Adapter) addPhone(c echo.Context) error {
 	var req struct {
 		PhoneNumber string `json:"phoneNumber"`
 	}
-	if err := c.Bind(&req); err != nil {
+	if err := auth.DecodeOptionalJSONBody(c.Request(), &req); err != nil {
 		auth.WriteHTTPError(c.Response(), auth.HTTPErrInvalidBody)
 		return nil
 	}

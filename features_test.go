@@ -6,6 +6,10 @@ import (
 	"time"
 )
 
+// strPtr addresses a literal, for the optional fields of UpdateProfileInput
+// where nil and "" mean different things.
+func strPtr(s string) *string { return &s }
+
 func TestPasswordResetFlow(t *testing.T) {
 	svc := testService(t)
 	ctx := context.Background()
@@ -384,14 +388,43 @@ func TestUpdateProfileAndDeleteAccountFlow(t *testing.T) {
 	updated, err := svc.UpdateProfile(ctx, UpdateProfileInput{
 		UserID:    user.ID,
 		TenantID:  user.TenantID,
-		FirstName: "Mario",
-		LastName:  "Rossi",
+		FirstName: strPtr("Mario"),
+		LastName:  strPtr("Rossi"),
 	})
 	if err != nil {
 		t.Fatalf("update profile: %v", err)
 	}
 	if updated.FirstName != "Mario" || updated.LastName != "Rossi" {
 		t.Fatalf("unexpected updated profile: %+v", updated)
+	}
+
+	// A partial patch leaves the field it omits alone: nil means "not submitted",
+	// which is what the reference's omitted key means (§3.5). A plain string here
+	// made every partial call erase the other name.
+	partial, err := svc.UpdateProfile(ctx, UpdateProfileInput{
+		UserID:    user.ID,
+		TenantID:  user.TenantID,
+		FirstName: strPtr("Luigi"),
+	})
+	if err != nil {
+		t.Fatalf("partial update profile: %v", err)
+	}
+	if partial.FirstName != "Luigi" || partial.LastName != "Rossi" {
+		t.Fatalf("partial update did not preserve lastName: %+v", partial)
+	}
+
+	// An explicit empty string still clears, which is the reference's nullable
+	// field. That is the distinction nil could not carry.
+	cleared, err := svc.UpdateProfile(ctx, UpdateProfileInput{
+		UserID:   user.ID,
+		TenantID: user.TenantID,
+		LastName: strPtr(""),
+	})
+	if err != nil {
+		t.Fatalf("clear lastName: %v", err)
+	}
+	if cleared.FirstName != "Luigi" || cleared.LastName != "" {
+		t.Fatalf("explicit empty lastName did not clear: %+v", cleared)
 	}
 
 	if err := svc.DeleteAccount(ctx, DeleteAccountInput{UserID: user.ID, TenantID: user.TenantID}); err != nil {

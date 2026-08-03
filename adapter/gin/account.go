@@ -57,11 +57,15 @@ func (ad *Adapter) updateProfile(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// Pointers, so an omitted key stays distinguishable from an empty one: the
+	// route is a partial update (§3.5). Decoded by the shared core helper rather
+	// than by ShouldBindJSON, which reports a bodyless request as io.EOF where the
+	// reference answers 200 — the drift that had echo alone answering 200 here.
 	var req struct {
-		FirstName string `json:"firstName"`
-		LastName  string `json:"lastName"`
+		FirstName *string `json:"firstName"`
+		LastName  *string `json:"lastName"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := auth.DecodeOptionalJSONBody(c.Request, &req); err != nil {
 		auth.WriteHTTPError(c.Writer, auth.HTTPErrInvalidBody)
 		return
 	}
@@ -85,7 +89,7 @@ func (ad *Adapter) addPhone(c *gin.Context) {
 	var req struct {
 		PhoneNumber string `json:"phoneNumber"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := auth.DecodeOptionalJSONBody(c.Request, &req); err != nil {
 		auth.WriteHTTPError(c.Writer, auth.HTTPErrInvalidBody)
 		return
 	}

@@ -36,15 +36,24 @@ type AddPhoneInput struct {
 // shape an adapter may serialise: Session carries the refresh-token hash, which
 // is credential material and must never reach a response body.
 //
-// The field names are the family's: both browser clients read sessionHandle off
-// each entry and post it straight back to DELETE /sessions/{handle}.
+// The field names and the key set are the reference's SessionInfo
+// (session.model.ts:8-27, wire-contract §3.9): sessionHandle, userId, createdAt,
+// expiresAt and an optional tenantId. Both browser clients read sessionHandle
+// off each entry and post it straight back to DELETE /sessions/{handle}.
+//
+// There is deliberately no revokedAt key. SessionInfo has no such field, so no
+// shipped client knows it exists or could filter on it, and the reference never
+// needs one: revokeSession deletes the record, so a revoked session is absent
+// from the next list rather than flagged in it. Emitting the tombstone as an
+// extra key would be an unrequested addition to the contract and, worse, the
+// only way a client could tell a live session from a dead one — see
+// Auth.ListSessions, which drops them instead.
 type PublicSession struct {
-	SessionHandle string     `json:"sessionHandle"`
-	UserID        string     `json:"userId"`
-	TenantID      string     `json:"tenantId,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	ExpiresAt     time.Time  `json:"expiresAt"`
-	RevokedAt     *time.Time `json:"revokedAt,omitempty"`
+	SessionHandle string    `json:"sessionHandle"`
+	UserID        string    `json:"userId"`
+	TenantID      string    `json:"tenantId,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	ExpiresAt     time.Time `json:"expiresAt"`
 }
 
 // NewPublicSession projects a Session onto its response-safe representation.
@@ -55,7 +64,6 @@ func NewPublicSession(session Session) PublicSession {
 		TenantID:      session.TenantID,
 		CreatedAt:     session.CreatedAt,
 		ExpiresAt:     session.ExpiresAt,
-		RevokedAt:     session.RevokedAt,
 	}
 }
 
@@ -150,6 +158,15 @@ func (s *Service) UpdatePhoneNumber(ctx context.Context, in AddPhoneInput) (User
 // RevokeUserSession revokes one of a user's own sessions. Ownership is part of
 // the lookup rather than a check bolted on afterwards: a handle belonging to
 // another user is indistinguishable from one that never existed.
+//
+// A handle that resolves to a session which is already revoked, or which has
+// expired, is also indistinguishable from one that never existed. The reference
+// resolves the handle with getSession, documented to return null "when the
+// session does not exist or has expired" (session-store.interface.ts:51-54), and
+// its revokeSession deletes the record — so both cases reach the same
+// `if (!session || …) → 404` as an unknown handle (auth.router.ts:762-767). A
+// second DELETE of the same handle is therefore *not* idempotently successful,
+// and neither is a DELETE of an expired one.
 func (s *Service) RevokeUserSession(ctx context.Context, userID, tenantID, sessionID string) error {
 	store, ok := s.sessions.(SessionAdminStore)
 	if !ok {
@@ -163,17 +180,49 @@ func (s *Service) RevokeUserSession(ctx context.Context, userID, tenantID, sessi
 	if err != nil {
 		return fmt.Errorf("auth: revoke session: %w", err)
 	}
+	now := s.now()
 	for _, session := range sessions {
-		if session.ID == handle {
-			return store.RevokeSessionByID(ctx, handle)
+		if session.ID != handle {
+			continue
 		}
+		if session.RevokedAt != nil || now.After(session.ExpiresAt) {
+			return ErrSessionNotFound
+		}
+		return store.RevokeSessionByID(ctx, handle)
 	}
 	return ErrSessionNotFound
 }
 
-// ListSessions delegates to Service.ListSessions.
+// ListSessions returns a user's *active* sessions, which is what the reference's
+// GET /sessions serves: ISessionStore.getSessionsForUser is documented "Return
+// all active sessions for the given user" (session-store.interface.ts:58-61),
+// and because revokeSession is documented to "Invalidate (delete) a single
+// session" (:70-76) — which the family's own store does literally, `async
+// revokeSession(h) { this.sessions.delete(h); }`
+// (ng-awesome-node-auth/src/server/in-memory-session-store.ts:29-31) — a revoked
+// session is simply gone from the next list.
+//
+// This port's MemorySessionStore tombstones instead of deleting, and correctly
+// so: /refresh needs the tombstone to answer 401 SESSION_REVOKED rather than
+// "not found". The filter therefore has to live above the store, and this is the
+// accessor the routes go through.
+//
+// Expired-but-not-revoked sessions are deliberately NOT filtered. The
+// reference's store does not filter them out of getSessionsForUser either — only
+// deleteExpiredSessions removes them — so a device-manager UI sees them there
+// too.
 func (a *Auth) ListSessions(ctx context.Context, userID, tenantID string) ([]Session, error) {
-	return a.service.ListSessions(ctx, userID, tenantID)
+	sessions, err := a.service.ListSessions(ctx, userID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	active := make([]Session, 0, len(sessions))
+	for _, session := range sessions {
+		if session.RevokedAt == nil {
+			active = append(active, session)
+		}
+	}
+	return active, nil
 }
 
 // RevokeUserSession delegates to Service.RevokeUserSession.

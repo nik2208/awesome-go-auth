@@ -42,43 +42,64 @@ func DefaultCSRFConfig() CSRFConfig {
 	}
 }
 
-// csrfExemptPaths are the routes the reference mounts without its auth
+// csrfExemption identifies one exempt route. The method is part of the key
+// because the reference's exemptions are Express *routes*, not paths: it is
+// `router.post('/sessions/cleanup', …)` that carries no auth middleware, while
+// `router.delete('/sessions/:handle', …, authMiddleware, …)` does. Keying on the
+// path alone let DELETE <prefix>/sessions/cleanup resolve to the exempt cleanup
+// entry and skip the double-submit — so a session whose handle was literally
+// "cleanup" could be revoked cross-site. Unreachable with the "ses_"+hex handles
+// this package issues, but a custom store can mint anything.
+type csrfExemption struct {
+	method string
+	path   string
+}
+
+// csrfExemptRoutes are the routes the reference mounts without its auth
 // middleware. CSRF is enforced inside that middleware, so these routes are
-// never checked — including /logout, which the reference deliberately leaves
-// unprotected so that a client with a stale CSRF cookie can still log out.
+// never checked — including POST /logout, which the reference deliberately
+// leaves unprotected so that a client with a stale CSRF cookie can still log
+// out.
 //
 // This table is the contract for every route added later: a mutating route that
 // is absent from it is CSRF-checked, so leaving an unauthenticated route out
 // breaks it and putting an authenticated one in silently unprotects it. It is
-// pinned literal-by-literal by TestCSRFExemptionsMatchTheReference.
+// pinned method-by-method by TestCSRFExemptionsMatchTheReference.
 //
-// Three entries are not simply "routes without the auth middleware":
-//   - /2fa/verify is a pre-login step-up call with no auth gate, so the
+// Four entries are not simply "routes without the auth middleware":
+//   - POST /2fa/verify is a pre-login step-up call with no auth gate, so the
 //     reference never CSRF-checks it (wire-contract §3, "CSRF does not apply
 //     to: … /2fa/verify").
-//   - /change-email/confirm has no auth gate either: the emailed token is the
-//     credential, so the link has to work from a browser with no session and no
-//     CSRF cookie at all (auth.router.ts:1040-1067).
+//   - POST /change-email/confirm has no auth gate either: the emailed token is
+//     the credential, so the link has to work from a browser with no session and
+//     no CSRF cookie at all (auth.router.ts:1040-1067).
+//   - GET /verify-email is listed for completeness only. It is a GET, so it is
+//     already exempt as a safe method and the entry can never be the reason a
+//     request passes; recording it keeps the table a faithful transcription of
+//     the reference's unauthenticated surface.
 //   - /link-request is deliberately NOT here. It has no auth middleware but the
 //     reference performs its own manual double-submit check inside the handler
 //     (auth.router.ts:1489-1495), so it is the one unauthenticated route that
 //     is CSRF-protected.
-var csrfExemptPaths = map[string]bool{
-	"/login":                true,
-	"/register":             true,
-	"/refresh":              true,
-	"/logout":               true,
-	"/forgot-password":      true,
-	"/reset-password":       true,
-	"/verify-email":         true,
-	"/change-email/confirm": true,
-	"/magic-link/send":      true,
-	"/magic-link/verify":    true,
-	"/sms/send":             true,
-	"/sms/verify":           true,
-	"/2fa/verify":           true,
-	"/link-verify":          true,
-	"/sessions/cleanup":     true,
+//
+// Methods are the reference's, route by route (src/router/auth.router.ts:541,
+// 590, 622, 715, 736, 777, 802, 859, 969, 1040, 1078, 1126, 1176, 1244, 1544).
+var csrfExemptRoutes = map[csrfExemption]bool{
+	{http.MethodPost, "/login"}:                true,
+	{http.MethodPost, "/register"}:             true,
+	{http.MethodPost, "/refresh"}:              true,
+	{http.MethodPost, "/logout"}:               true,
+	{http.MethodPost, "/forgot-password"}:      true,
+	{http.MethodPost, "/reset-password"}:       true,
+	{http.MethodGet, "/verify-email"}:          true,
+	{http.MethodPost, "/change-email/confirm"}: true,
+	{http.MethodPost, "/magic-link/send"}:      true,
+	{http.MethodPost, "/magic-link/verify"}:    true,
+	{http.MethodPost, "/sms/send"}:             true,
+	{http.MethodPost, "/sms/verify"}:           true,
+	{http.MethodPost, "/2fa/verify"}:           true,
+	{http.MethodPost, "/link-verify"}:          true,
+	{http.MethodPost, "/sessions/cleanup"}:     true,
 }
 
 // CSRFMiddleware distributes and enforces the double-submit token.
@@ -99,16 +120,13 @@ func CSRFMiddleware(cfg HTTPConfig) func(http.Handler) http.Handler {
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// A bearer caller is not a cookie client: it cannot be driven by a
-			// cross-site form post, and it never reads the CSRF cookie. Skipping
-			// it here is what makes "bearer requests set no cookies" true of the
-			// whole response and not just of the token delivery.
-			if isBearerClient(r) {
-				next.ServeHTTP(w, r)
-				return
-			}
+			// Cookie distribution. A bearer caller never reads the CSRF cookie and
+			// asked not to be sent cookies, so it gets none — that is what makes
+			// "bearer requests set no cookies" true of the whole response and not
+			// just of the token delivery. Note this is the only thing the
+			// client-declared X-Auth-Strategy header may decide.
 			token := CookieValue(r, cookieName)
-			if token == "" {
+			if token == "" && !isBearerClient(r) {
 				fresh, err := randomHex(csrfTokenBytes)
 				if err != nil {
 					WriteHTTPError(w, HTTPErrInternal)
@@ -118,7 +136,15 @@ func CSRFMiddleware(cfg HTTPConfig) func(http.Handler) http.Handler {
 				cfg.Cookies.SetCSRFTokenCookie(w, token)
 			}
 
-			if !csrfEnforced(r, prefix) {
+			// Enforcement. Only a request that actually presents a bearer token is
+			// exempt: the reference skips the check on `usingBearer`, which is set
+			// solely by an "Authorization: Bearer …" header (§1.2,
+			// auth.middleware.ts:22-35). A request that authenticates by cookie is
+			// checked whatever it claims in X-Auth-Strategy — that header is
+			// attacker-controllable on any request the attacker can make at all, so
+			// letting it switch the control off would hand the exemption to exactly
+			// the caller the control exists to stop.
+			if usingBearerCredential(r) || !csrfEnforced(r, prefix) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -132,10 +158,20 @@ func CSRFMiddleware(cfg HTTPConfig) func(http.Handler) http.Handler {
 	}
 }
 
-// isBearerClient reports whether the caller authenticates with a bearer token
-// or asked for bearer delivery.
+// isBearerClient reports whether the caller authenticates with a bearer token or
+// asked for bearer delivery. It governs cookie *distribution* only: a client
+// that declared the bearer strategy does not want cookies, and honouring that is
+// harmless. It must not govern enforcement — see usingBearerCredential.
 func isBearerClient(r *http.Request) bool {
-	return IsBearerRequest(r) || BearerToken(r.Header.Get("Authorization")) != ""
+	return IsBearerRequest(r) || usingBearerCredential(r)
+}
+
+// usingBearerCredential reports whether the request actually presents a bearer
+// token, which is the reference's `usingBearer` (auth.middleware.ts:22-26) and
+// the only condition that exempts a request from the double-submit check. A
+// declared strategy is not a credential.
+func usingBearerCredential(r *http.Request) bool {
+	return r != nil && BearerToken(r.Header.Get("Authorization")) != ""
 }
 
 func csrfEnforced(r *http.Request, prefix string) bool {
@@ -146,7 +182,7 @@ func csrfEnforced(r *http.Request, prefix string) bool {
 	if !mounted {
 		return false
 	}
-	return !csrfExemptPaths[rel]
+	return !csrfExemptRoutes[csrfExemption{method: r.Method, path: rel}]
 }
 
 func isMutatingMethod(method string) bool {

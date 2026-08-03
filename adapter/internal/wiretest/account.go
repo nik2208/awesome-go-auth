@@ -102,6 +102,36 @@ func findSession(t *testing.T, entries []map[string]any, handle string) map[stri
 	return nil
 }
 
+// assertSessionAbsent is the shape of a revoked session in the reference: gone
+// from the next list, not flagged in it. The reference's revokeSession deletes
+// the record (session-store.interface.ts:70-76), so a client that lists sessions
+// after revoking one never sees it again — and since SessionInfo has no
+// revokedAt, no shipped client could filter it out itself.
+func assertSessionAbsent(t *testing.T, entries []map[string]any, handle string) {
+	t.Helper()
+	for _, entry := range entries {
+		if entry["sessionHandle"] == handle {
+			t.Fatalf("session %q is still listed after being revoked: %v", handle, entry)
+		}
+	}
+}
+
+// listSessions fetches GET /sessions with a bearer credential and returns the
+// entries, asserting the envelope and that no entry carries a key outside
+// SessionInfo — revokedAt above all.
+func listSessions(t *testing.T, env *Env, accessToken string) []map[string]any {
+	t.Helper()
+	rec := env.Do(bearerRequest(http.MethodGet, env.Config.Prefix()+"/sessions", accessToken))
+	AssertStatus(t, rec, http.StatusOK)
+	entries := sessionEntries(t, rec)
+	for i, entry := range entries {
+		if _, extra := entry["revokedAt"]; extra {
+			t.Fatalf("sessions[%d] carries revokedAt, which is not a SessionInfo field: %v", i, entry)
+		}
+	}
+	return entries
+}
+
 func testSessions(t *testing.T, mount Mounter) {
 	t.Run("the list is wrapped in a sessions key", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
@@ -207,13 +237,82 @@ func testSessions(t *testing.T, mount Mounter) {
 				t.Fatalf("success = %v", Body(t, rec)["success"])
 			}
 
-			list := env.Do(bearerRequest(http.MethodGet, env.Config.Prefix()+"/sessions", tokens.AccessToken))
-			entry := findSession(t, sessionEntries(t, list), tc.handle)
-			if _, revoked := entry["revokedAt"]; !revoked {
-				t.Fatalf("session %q was not revoked: %v", tc.handle, entry)
-			}
+			// The revoke really happened, and the way the reference shows it: the
+			// handle is gone from the next list. Asserting a revokedAt key here
+			// instead used to pin the opposite — a dead session still listed.
+			assertSessionAbsent(t, listSessions(t, env, tokens.AccessToken), tc.handle)
 		})
 	}
+
+	// GET /sessions serves active sessions only (getSessionsForUser is documented
+	// "Return all active sessions for the given user",
+	// session-store.interface.ts:58-61). This port's store tombstones rather than
+	// deleting, so the filter lives above it — and it has to, because no client can
+	// filter for itself: SessionInfo has no revokedAt.
+	t.Run("a revoked session disappears from the list", func(t *testing.T) {
+		store := auth.NewMemorySessionStore()
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithSessionStore(store))
+		user, tokens := env.Seed("revokedhidden@example.com")
+		seedSession(t, store, "ses_doomed", user)
+		seedSession(t, store, "ses_kept", user)
+
+		// Three: the seeding register issued one, plus the two seeded here.
+		if before := listSessions(t, env, tokens.AccessToken); len(before) != 3 {
+			t.Fatalf("sessions = %d entries before the revoke, want 3", len(before))
+		}
+
+		rec := env.Do(bearerRequest(http.MethodDelete, env.Config.Prefix()+"/sessions/ses_doomed", tokens.AccessToken))
+		AssertStatus(t, rec, http.StatusOK)
+
+		after := listSessions(t, env, tokens.AccessToken)
+		if len(after) != 2 {
+			t.Fatalf("sessions = %d entries after the revoke, want 2: %v", len(after), after)
+		}
+		assertSessionAbsent(t, after, "ses_doomed")
+		findSession(t, after, "ses_kept")
+	})
+
+	// An expired-but-not-revoked session stays listed: the reference's own store
+	// does not filter those out of getSessionsForUser either — only
+	// deleteExpiredSessions removes them — so a device manager sees them there too.
+	t.Run("an expired session stays in the list", func(t *testing.T) {
+		store := auth.NewMemorySessionStore()
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithSessionStore(store))
+		user, tokens := env.Seed("expiredlisted@example.com")
+		seedExpiredSession(t, store, "ses_stale", user)
+
+		findSession(t, listSessions(t, env, tokens.AccessToken), "ses_stale")
+	})
+
+	// The reference resolves the handle with getSession, documented to return null
+	// "when the session does not exist or has expired"
+	// (session-store.interface.ts:51-54), and its revokeSession deletes the record.
+	// So a second DELETE of the same handle, and a DELETE of an expired one, both
+	// take the same `if (!session || …) → 404` branch as an unknown handle
+	// (auth.router.ts:762-767). Answering 200 twice told a device-manager UI it had
+	// just killed a session that was already dead.
+	t.Run("DELETE an already-revoked handle", func(t *testing.T) {
+		store := auth.NewMemorySessionStore()
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithSessionStore(store))
+		user, tokens := env.Seed("doublerevoke@example.com")
+		seedSession(t, store, "ses_twice", user)
+
+		first := env.Do(bearerRequest(http.MethodDelete, env.Config.Prefix()+"/sessions/ses_twice", tokens.AccessToken))
+		AssertStatus(t, first, http.StatusOK)
+
+		second := env.Do(bearerRequest(http.MethodDelete, env.Config.Prefix()+"/sessions/ses_twice", tokens.AccessToken))
+		AssertError(t, second, http.StatusNotFound, "Session not found", "")
+	})
+
+	t.Run("DELETE an expired handle", func(t *testing.T) {
+		store := auth.NewMemorySessionStore()
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithSessionStore(store))
+		user, tokens := env.Seed("revokeexpired@example.com")
+		seedExpiredSession(t, store, "ses_gone", user)
+
+		rec := env.Do(bearerRequest(http.MethodDelete, env.Config.Prefix()+"/sessions/ses_gone", tokens.AccessToken))
+		AssertError(t, rec, http.StatusNotFound, "Session not found", "")
+	})
 
 	// Not found and not yours are the same answer, so the route cannot be used
 	// to probe for another account's live sessions.
@@ -282,6 +381,25 @@ func seedSession(t *testing.T, store *auth.MemorySessionStore, handle string, us
 	}
 	if _, err := store.CreateSession(context.Background(), session); err != nil {
 		t.Fatalf("seed session %q: %v", handle, err)
+	}
+}
+
+// seedExpiredSession plants a session whose lifetime has already run out but
+// which no cleanup has removed yet — the state the reference's getSession reports
+// as null.
+func seedExpiredSession(t *testing.T, store *auth.MemorySessionStore, handle string, user auth.User) {
+	t.Helper()
+	now := time.Now()
+	session := auth.Session{
+		ID:               handle,
+		UserID:           user.ID,
+		TenantID:         user.TenantID,
+		RefreshTokenHash: "hash-" + handle,
+		CreatedAt:        now.Add(-48 * time.Hour),
+		ExpiresAt:        now.Add(-time.Hour),
+	}
+	if _, err := store.CreateSession(context.Background(), session); err != nil {
+		t.Fatalf("seed expired session %q: %v", handle, err)
 	}
 }
 
@@ -391,6 +509,111 @@ func testUpdateProfile(t *testing.T, mount Mounter) {
 		}
 	})
 
+	// The X-Auth-Strategy header is set by the caller, so it must not be able to
+	// switch the double-submit off: the reference exempts a request only when its
+	// token actually came from the Authorization header (usingBearer,
+	// auth.middleware.ts:22-35). This request authenticates entirely by cookie and
+	// only *claims* to be a bearer client.
+	t.Run("the bearer strategy header does not skip the CSRF check", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		login, _ := loginSession(t, env, "profilestrategy@example.com")
+
+		req := Replay(env.Request(http.MethodPatch, "/profile", map[string]string{"firstName": "Forged"}), login)
+		req.Header.Set(auth.AuthStrategyHeader, auth.AuthStrategyBearer)
+		AssertError(t, env.Do(req), http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
+		if me := meBody(t, env, login); me["firstName"] != nil {
+			t.Fatalf("a header-only bearer claim still wrote the profile: %v", me["firstName"])
+		}
+	})
+
+	// PATCH /profile is a *partial* update: §3.5 types both fields optional and
+	// passes the body through verbatim, so a key the caller omitted reaches the
+	// store as undefined and the stored column is left alone. Sending only
+	// firstName used to wipe the stored lastName — silent data loss on the common
+	// case, since a form that edits one field submits one field.
+	t.Run("a partial patch leaves the omitted field alone", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		login, csrf := loginSession(t, env, "partialprofile@example.com")
+
+		both := Replay(env.Request(http.MethodPatch, "/profile", map[string]string{"firstName": "Mario", "lastName": "Rossi"}), login)
+		both.Header.Set(auth.CSRFHeaderName, csrf)
+		AssertStatus(t, env.Do(both), http.StatusOK)
+
+		only := Replay(env.Request(http.MethodPatch, "/profile", map[string]string{"firstName": "Luigi"}), login)
+		only.Header.Set(auth.CSRFHeaderName, csrf)
+		AssertStatus(t, env.Do(only), http.StatusOK)
+
+		me := meBody(t, env, login)
+		if me["firstName"] != "Luigi" {
+			t.Errorf("firstName = %v, want \"Luigi\"", me["firstName"])
+		}
+		if me["lastName"] != "Rossi" {
+			t.Fatalf("lastName = %v, want \"Rossi\": the omitted field was erased", me["lastName"])
+		}
+	})
+
+	// An explicitly empty value still clears, which is what the reference's
+	// nullable field does. This is the half a plain string could not express
+	// separately from "omitted".
+	t.Run("an explicit empty value clears the field", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		login, csrf := loginSession(t, env, "clearprofile@example.com")
+
+		both := Replay(env.Request(http.MethodPatch, "/profile", map[string]string{"firstName": "Mario", "lastName": "Rossi"}), login)
+		both.Header.Set(auth.CSRFHeaderName, csrf)
+		AssertStatus(t, env.Do(both), http.StatusOK)
+
+		clear := Replay(env.Request(http.MethodPatch, "/profile", map[string]string{"lastName": ""}), login)
+		clear.Header.Set(auth.CSRFHeaderName, csrf)
+		AssertStatus(t, env.Do(clear), http.StatusOK)
+
+		me := meBody(t, env, login)
+		if me["firstName"] != "Mario" {
+			t.Errorf("firstName = %v, want \"Mario\"", me["firstName"])
+		}
+		if me["lastName"] != nil && me["lastName"] != "" {
+			t.Fatalf("lastName = %v, want cleared", me["lastName"])
+		}
+	})
+
+	// The reference runs behind express.json(), which leaves req.body = {} for a
+	// request with no body; §3.5 then reads two optional fields off it, so a
+	// bodyless PATCH is a 200 no-op. The four adapters used to disagree here —
+	// echo answered 200 and net/http, chi and gin 400 INVALID_BODY — which is
+	// exactly the drift this suite exists to prevent.
+	t.Run("a bodyless PATCH is a 200 no-op", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		login, csrf := loginSession(t, env, "bodylessprofile@example.com")
+
+		seed := Replay(env.Request(http.MethodPatch, "/profile", map[string]string{"firstName": "Mario", "lastName": "Rossi"}), login)
+		seed.Header.Set(auth.CSRFHeaderName, csrf)
+		AssertStatus(t, env.Do(seed), http.StatusOK)
+
+		empty := Replay(env.Request(http.MethodPatch, "/profile", nil), login)
+		empty.Header.Set(auth.CSRFHeaderName, csrf)
+		rec := env.Do(empty)
+		AssertStatus(t, rec, http.StatusOK)
+		AssertKeys(t, Body(t, rec), "success")
+
+		// A no-op, not a clear: every field was omitted, so every field survives.
+		me := meBody(t, env, login)
+		if me["firstName"] != "Mario" || me["lastName"] != "Rossi" {
+			t.Fatalf("a bodyless patch changed the profile: %v / %v", me["firstName"], me["lastName"])
+		}
+	})
+
+	// Tolerating the *empty* body does not mean tolerating a broken one:
+	// express.json() rejects malformed JSON too, and accepting it would apply a
+	// typo'd payload as "change nothing".
+	t.Run("a malformed body is refused", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		login, csrf := loginSession(t, env, "brokenprofile@example.com")
+
+		req := Replay(rawRequest(env, http.MethodPatch, "/profile", `{"firstName":`), login)
+		req.Header.Set(auth.CSRFHeaderName, csrf)
+		AssertError(t, env.Do(req), http.StatusBadRequest, "Invalid request body", auth.CodeInvalidBody)
+	})
+
 	// [DEVIATION] The reference enforces CSRF inside its auth middleware, so an
 	// unauthenticated PATCH is refused with "No access token provided". Here the
 	// CSRF middleware wraps the auth middleware — that is what makes the cookie
@@ -402,6 +625,14 @@ func testUpdateProfile(t *testing.T, mount Mounter) {
 		rec := env.Do(env.Request(http.MethodPatch, "/profile", map[string]string{"firstName": "Nobody"}))
 		AssertError(t, rec, http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
 	})
+}
+
+// rawRequest builds a request with a body this suite controls byte for byte,
+// which env.Request cannot do because it marshals.
+func rawRequest(env *Env, method, route, body string) *http.Request {
+	req := httptest.NewRequest(method, env.Config.Prefix()+route, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
 }
 
 func testAddPhone(t *testing.T, mount Mounter) {
@@ -450,6 +681,46 @@ func testAddPhone(t *testing.T, mount Mounter) {
 		if me := meBody(t, env, login); me["phoneNumber"] != nil {
 			t.Fatalf("the rejected request still wrote the phone number: %v", me["phoneNumber"])
 		}
+	})
+
+	// The missing-header case above cannot tell a real comparison from "any header
+	// passes"; this one can.
+	t.Run("cookie mode with a mismatched X-CSRF-Token", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		login, _ := loginSession(t, env, "phonemismatch@example.com")
+
+		req := Replay(env.Request(http.MethodPost, "/add-phone", map[string]string{"phoneNumber": "+392222222222"}), login)
+		req.Header.Set(auth.CSRFHeaderName, "0123456789abcdef0123456789abcdef")
+		AssertError(t, env.Do(req), http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
+		if me := meBody(t, env, login); me["phoneNumber"] != nil {
+			t.Fatalf("the rejected request still wrote the phone number: %v", me["phoneNumber"])
+		}
+	})
+
+	// Same express.json() reasoning as PATCH /profile: a bodyless POST reads
+	// phoneNumber off {} and answers 200 rather than 400. What the reference then
+	// stores is genuinely undefined — it hands `undefined` to a store method typed
+	// `string | null` — so only the status is pinned here, but it has to be the
+	// same status on all four adapters.
+	t.Run("a bodyless POST is accepted", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		_, tokens := env.Seed("bodylessphone@example.com")
+
+		req := env.Request(http.MethodPost, "/add-phone", nil)
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		rec := env.Do(req)
+
+		AssertStatus(t, rec, http.StatusOK)
+		AssertKeys(t, Body(t, rec), "success")
+	})
+
+	t.Run("a malformed body is refused", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		_, tokens := env.Seed("brokenphone@example.com")
+
+		req := rawRequest(env, http.MethodPost, "/add-phone", `{"phoneNumber":`)
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		AssertError(t, env.Do(req), http.StatusBadRequest, "Invalid request body", auth.CodeInvalidBody)
 	})
 }
 
@@ -505,6 +776,12 @@ func testDeleteAccount(t *testing.T, mount Mounter) {
 		}
 	})
 
+	// The one route that writes cookies to a bearer caller. §3.11 says the
+	// clearTokenCookies call runs regardless of transport ("the Set-Cookie clears
+	// are sent regardless (harmless to native clients)"), so this is the documented
+	// exception to "bearer requests set no cookies" and needs its own row —
+	// otherwise a future tightening of that rule would silently leave a browser
+	// that authenticated by header holding live cookies for a deleted account.
 	t.Run("bearer mode", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
 		_, tokens := env.Seed("deletebearer@example.com")
@@ -512,9 +789,32 @@ func testDeleteAccount(t *testing.T, mount Mounter) {
 		rec := env.Do(bearerRequest(http.MethodDelete, env.Config.Prefix()+"/account", tokens.AccessToken))
 		AssertStatus(t, rec, http.StatusOK)
 		AssertKeys(t, Body(t, rec), "success")
+		for _, name := range []string{
+			hostAccess, "__Secure-accessToken", "accessToken",
+			hostRefresh, "__Secure-refreshToken", "refreshToken",
+			hostCSRF, "__Secure-csrf-token", "csrf-token",
+		} {
+			AssertCleared(t, rec, name)
+		}
 
 		me := env.Do(bearerRequest(http.MethodGet, env.Config.Prefix()+"/me", tokens.AccessToken))
 		AssertError(t, me, http.StatusForbidden, "Invalid or expired access token", "")
+	})
+
+	// [DEVIATION] No credential at all. The reference's authMiddleware answers
+	// 403 {"error":"No access token provided"}; here the CSRF middleware wraps the
+	// auth middleware, so an unsafe method with no double-submit is judged first —
+	// the same precedence PATCH /profile pins above. Both are 403. What matters for
+	// the route is the second half: nothing was deleted.
+	t.Run("without a credential", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		login, _ := loginSession(t, env, "deletenocred@example.com")
+
+		rec := env.Do(httptest.NewRequest(http.MethodDelete, env.Config.Prefix()+"/account", nil))
+		AssertError(t, rec, http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
+		if me := meBody(t, env, login); me["email"] != "deletenocred@example.com" {
+			t.Fatalf("an unauthenticated DELETE removed the account: %v", me["email"])
+		}
 	})
 }
 

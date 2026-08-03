@@ -89,7 +89,22 @@ func TestCSRFMiddlewareEnforcementMatrix(t *testing.T) {
 		{name: "missing cookie is rejected", method: http.MethodDelete, path: "/auth/account", header: "tok", want: http.StatusForbidden},
 		{name: "safe methods are exempt", method: http.MethodGet, path: "/auth/profile", cookie: "tok", want: http.StatusOK},
 		{name: "bearer credentials are exempt", method: http.MethodDelete, path: "/auth/account", authHeader: "Bearer abc", want: http.StatusOK},
-		{name: "bearer strategy is exempt", method: http.MethodDelete, path: "/auth/account", strategy: AuthStrategyBearer, want: http.StatusOK},
+		// The reference exempts a request because its token *came from* the
+		// Authorization header (usingBearer, auth.middleware.ts:22-26), not because
+		// the client said so. X-Auth-Strategy is set by the caller on any request
+		// the caller can make at all, so honouring it here would let an attacker
+		// switch the control off with one header.
+		{name: "the bearer strategy header alone is not exempt", method: http.MethodDelete, path: "/auth/account", strategy: AuthStrategyBearer, want: http.StatusForbidden},
+		{name: "the bearer strategy header does not exempt a cookie-authenticated request", method: http.MethodPatch, path: "/auth/profile", cookie: "tok", strategy: AuthStrategyBearer, want: http.StatusForbidden},
+		// It stays exempt when the credential is really there, whatever it declares.
+		{name: "the bearer strategy header with real bearer credentials is exempt", method: http.MethodPatch, path: "/auth/profile", authHeader: "Bearer abc", strategy: AuthStrategyBearer, want: http.StatusOK},
+		// A double-submit that matches still passes with the strategy header set:
+		// narrowing the exemption must not break a bearer-declaring cookie client.
+		{name: "the bearer strategy header with a matching double-submit passes", method: http.MethodPatch, path: "/auth/profile", cookie: "tok", header: "tok", strategy: AuthStrategyBearer, want: http.StatusOK},
+		// Keyed on method as well as path: DELETE <prefix>/sessions/cleanup is
+		// DELETE /sessions/{handle} with the handle "cleanup", which the reference
+		// puts behind authMiddleware. Only POST /sessions/cleanup is unauthenticated.
+		{name: "cleanup is exempt only for POST", method: http.MethodDelete, path: "/auth/sessions/cleanup", cookie: "tok", want: http.StatusForbidden},
 		{name: "login is exempt", method: http.MethodPost, path: "/auth/login", cookie: "tok", want: http.StatusOK},
 		{name: "refresh is exempt", method: http.MethodPost, path: "/auth/refresh", cookie: "tok", want: http.StatusOK},
 		// The reference deliberately mounts logout without its auth middleware,
@@ -134,59 +149,91 @@ func TestCSRFMiddlewareEnforcementMatrix(t *testing.T) {
 // TestCSRFExemptionsMatchTheReference pins the exemption table route by route
 // against wire-contract.md. Every route in the reference auth router that this
 // port will eventually mount is listed, so a route added later cannot inherit a
-// wrong default: the table itself is the thing under test, not the five routes
-// that happen to be mounted today (all of which are exempt, which is why the
-// per-adapter suites cannot catch a mistake here).
+// wrong default: the table itself is the thing under test, not the routes that
+// happen to be mounted today.
+//
+// Each row carries the reference's method, because the exemptions are Express
+// routes and not paths: an exempt path reached with a method the reference did
+// not mount unauthenticated must still be checked.
 func TestCSRFExemptionsMatchTheReference(t *testing.T) {
 	// Enforced: the reference puts these behind authMiddleware, where the
-	// double-submit check lives — plus /link-request, which has no auth
+	// double-submit check lives — plus POST /link-request, which has no auth
 	// middleware but does its own manual check (auth.router.ts:1489-1495).
-	enforced := []string{
-		"/profile",
-		"/add-phone",
-		"/change-password",
-		"/send-verification-email",
-		"/change-email/request",
-		"/2fa/setup",
-		"/2fa/verify-setup",
-		"/2fa/disable",
-		"/sessions/some-handle",
-		"/account",
-		"/linked-accounts/google/123",
-		"/link-request",
+	enforced := []struct{ method, route string }{
+		{http.MethodPatch, "/profile"},
+		{http.MethodPost, "/add-phone"},
+		{http.MethodPost, "/change-password"},
+		{http.MethodPost, "/send-verification-email"},
+		{http.MethodPost, "/change-email/request"},
+		{http.MethodPost, "/2fa/setup"},
+		{http.MethodPost, "/2fa/verify-setup"},
+		{http.MethodPost, "/2fa/disable"},
+		{http.MethodDelete, "/sessions/some-handle"},
+		{http.MethodDelete, "/account"},
+		{http.MethodDelete, "/linked-accounts/google/123"},
+		{http.MethodPost, "/link-request"},
+		// The method-qualified rows: the exempt path reached with the method the
+		// reference mounts behind authMiddleware. DELETE /sessions/cleanup is
+		// DELETE /sessions/{handle} with the handle "cleanup".
+		{http.MethodDelete, "/sessions/cleanup"},
+		// GET /verify-email is the table's only non-POST exemption, so a POST to it
+		// proves the key really carries the method.
+		{http.MethodPost, "/verify-email"},
 	}
-	// Exempt: mounted without authMiddleware, so never checked.
-	exempt := []string{
-		"/login",
-		"/register",
-		"/refresh",
-		"/logout",
-		"/forgot-password",
-		"/reset-password",
-		"/verify-email",
-		"/change-email/confirm",
-		"/magic-link/send",
-		"/magic-link/verify",
-		"/sms/send",
-		"/sms/verify",
-		"/2fa/verify",
-		"/link-verify",
-		"/sessions/cleanup",
+	// Exempt: mounted without authMiddleware, so never checked. Methods from
+	// src/router/auth.router.ts:541, 590, 622, 715, 736, 777, 802, 859, 969, 1040,
+	// 1078, 1126, 1176, 1244, 1544.
+	exempt := []struct{ method, route string }{
+		{http.MethodPost, "/login"},
+		{http.MethodPost, "/register"},
+		{http.MethodPost, "/refresh"},
+		{http.MethodPost, "/logout"},
+		{http.MethodPost, "/forgot-password"},
+		{http.MethodPost, "/reset-password"},
+		// A GET, so exempt as a safe method whatever the table says.
+		{http.MethodGet, "/verify-email"},
+		{http.MethodPost, "/change-email/confirm"},
+		{http.MethodPost, "/magic-link/send"},
+		{http.MethodPost, "/magic-link/verify"},
+		{http.MethodPost, "/sms/send"},
+		{http.MethodPost, "/sms/verify"},
+		{http.MethodPost, "/2fa/verify"},
+		{http.MethodPost, "/link-verify"},
+		{http.MethodPost, "/sessions/cleanup"},
 	}
 
-	for _, route := range enforced {
-		t.Run("enforced"+route, func(t *testing.T) {
-			if got := statusFor(t, http.MethodPost, "/auth"+route); got != http.StatusForbidden {
-				t.Errorf("POST %s = %d, want 403: CSRF is not enforced on a protected route", route, got)
+	for _, tc := range enforced {
+		t.Run("enforced "+tc.method+tc.route, func(t *testing.T) {
+			if got := statusFor(t, tc.method, "/auth"+tc.route); got != http.StatusForbidden {
+				t.Errorf("%s %s = %d, want 403: CSRF is not enforced on a protected route", tc.method, tc.route, got)
 			}
 		})
 	}
-	for _, route := range exempt {
-		t.Run("exempt"+route, func(t *testing.T) {
-			if got := statusFor(t, http.MethodPost, "/auth"+route); got != http.StatusOK {
-				t.Errorf("POST %s = %d, want 200: an unauthenticated route must not be CSRF-checked", route, got)
+	for _, tc := range exempt {
+		t.Run("exempt "+tc.method+tc.route, func(t *testing.T) {
+			if got := statusFor(t, tc.method, "/auth"+tc.route); got != http.StatusOK {
+				t.Errorf("%s %s = %d, want 200: an unauthenticated route must not be CSRF-checked", tc.method, tc.route, got)
 			}
 		})
+	}
+}
+
+// TestCSRFCookieDistributionStillHonoursTheStrategyHeader guards the other half
+// of the narrowed exemption: X-Auth-Strategy no longer switches enforcement off,
+// but it must still keep cookies off a bearer client's response — "bearer
+// requests set no cookies" is asserted of whole responses across the adapter
+// suites.
+func TestCSRFCookieDistributionStillHonoursTheStrategyHeader(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	req.Header.Set(AuthStrategyHeader, AuthStrategyBearer)
+	rec := httptest.NewRecorder()
+	csrfHandler(insecureHTTPConfig()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a safe method", rec.Code)
+	}
+	if c := findCookie(rec, "csrf-token"); c != nil {
+		t.Fatalf("a bearer-strategy caller must not be sent a csrf cookie: %s", c.String())
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -539,6 +541,33 @@ func (s *Service) LogoutAccessToken(ctx context.Context, accessToken string) err
 		return ErrSessionNotFound
 	}
 	return s.RevokeSessionByID(ctx, claims.Sid)
+}
+
+// DecodeOptionalJSONBody decodes r's JSON body into dst, treating an absent or
+// zero-length body as the empty object rather than as an error.
+//
+// The reference runs behind express.json(), which leaves req.body = {} when the
+// request carried no body at all; PATCH /profile and POST /add-phone then read
+// optional fields off it, so a bodyless call is a 200 no-op there and not a 400
+// (§3.5, §3.6). Without a shared decoder the four adapters disagree about
+// exactly this: echo's Bind returns nil for a zero-length body, while
+// encoding/json and gin's ShouldBindJSON both surface io.EOF as a decode error.
+//
+// A body that is present but is not valid JSON is still an error: express.json()
+// rejects that too, and tolerating it would let a typo'd payload be silently
+// applied as "change nothing".
+func DecodeOptionalJSONBody(r *http.Request, dst any) error {
+	if r == nil || r.Body == nil || r.Body == http.NoBody {
+		return nil
+	}
+	defer r.Body.Close()
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return fmt.Errorf("auth: decode json body: %w", err)
+	}
+	return nil
 }
 
 // RefreshTokenFromRequest applies the reference's acceptance order for

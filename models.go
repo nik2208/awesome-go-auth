@@ -195,11 +195,21 @@ type ConfirmEmailChangeInput struct {
 	Token string
 }
 
+// UpdateProfileInput is the payload behind PATCH /profile. FirstName and
+// LastName are pointers because the route is a *partial* update: the reference
+// types the body { firstName?: string | null, lastName?: string | null } and
+// passes it through verbatim, so a key the caller omitted arrives at the store as
+// undefined and leaves the stored column alone (wire-contract §3.5,
+// user-store.interface.ts:136).
+//
+// nil therefore means "not submitted, leave as it is" and a pointer to "" means
+// "clear it" — the distinction a plain string cannot carry, and without which
+// sending only firstName silently erases the stored lastName.
 type UpdateProfileInput struct {
 	UserID    string
 	TenantID  string
-	FirstName string
-	LastName  string
+	FirstName *string
+	LastName  *string
 }
 
 type DeleteAccountInput struct {
