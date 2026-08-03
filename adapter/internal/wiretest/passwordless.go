@@ -709,23 +709,28 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 	})
 
 	// 403 with no code, as everywhere else behind the access-token middleware.
+	// No CSRF pair is needed to get here: enforcement is scoped to requests that
+	// carry an access-token cookie, so a credential-less request is passed through
+	// to the auth gate exactly as in the reference.
 	t.Run("setup without a credential", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
-		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/setup", nil), ""))
+		rec := env.Do(env.Request(http.MethodPost, "/2fa/setup", nil))
 		AssertError(t, rec, http.StatusForbidden, "No access token provided", "")
 	})
 
-	// Inherited ordering difference, pinned so it stays a decision. The
-	// reference checks the access token first and the CSRF header second
-	// (auth.middleware.ts:29-32 then :33-42), so a cookie client with neither
-	// hears "No access token provided". This port runs CSRF as a middleware in
-	// front of the auth middleware, so it hears CSRF_INVALID instead. Same
-	// status, and the three enrolment routes are the first unsafe authenticated
-	// routes in the port, which is why it only becomes visible here.
-	t.Run("a cookie client with no credential is answered by CSRF first", func(t *testing.T) {
+	// The ordering, stated as its own case. The reference checks the access token
+	// first and the CSRF header second (auth.middleware.ts:29-32 then :33-42), so a
+	// cookie client with neither hears "No access token provided" — not
+	// CSRF_INVALID, which is what this port answered while its CSRF middleware
+	// judged every unsafe method in front of the auth gate. The three enrolment
+	// routes are the first unsafe authenticated routes in the port, which is why the
+	// difference first became visible here.
+	t.Run("a cookie client with no credential is answered by the auth gate", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
 		rec := env.Do(env.Request(http.MethodPost, "/2fa/setup", nil))
-		AssertError(t, rec, http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
+		// The empty code argument asserts that no "code" field is present at all,
+		// which is what tells this answer apart from a CSRF refusal.
+		AssertError(t, rec, http.StatusForbidden, "No access token provided", "")
 	})
 
 	t.Run("verify-setup enables the factor", func(t *testing.T) {

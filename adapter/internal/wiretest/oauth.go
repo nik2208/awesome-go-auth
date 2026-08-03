@@ -915,17 +915,25 @@ func testLinkedAccountsDelete(t *testing.T, mount Mounter) {
 	})
 
 	// Unsafe method, cookie-authenticated: double-submit applies.
+	//
+	// The access-token cookie is what makes this case about CSRF at all.
+	// Enforcement is scoped to cookie-authenticated requests, so without it the
+	// route would defer to the auth gate and answer "No access token provided" —
+	// which is the separate case below, not this one.
 	t.Run("cookie mode without the CSRF header", func(t *testing.T) {
 		f := newOAuthFixture(t, mount, fixtureOptions{})
+		_, tokens := f.Seed("unlinkcsrf@example.com")
 		req := httptest.NewRequest(http.MethodDelete, f.Config.Prefix()+"/linked-accounts/acme/acme-1", nil)
+		req.AddCookie(&http.Cookie{Name: hostAccess, Value: tokens.AccessToken})
 		req.AddCookie(&http.Cookie{Name: hostCSRF, Value: "not-mirrored-in-the-header"})
 		AssertError(t, f.Do(req), http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
 	})
 
+	// No credential of any kind, and no CSRF pair either: this route sits behind the
+	// auth middleware, so the auth gate answers with the reference's literal.
 	t.Run("no token", func(t *testing.T) {
 		f := newOAuthFixture(t, mount, fixtureOptions{})
 		req := httptest.NewRequest(http.MethodDelete, f.Config.Prefix()+"/linked-accounts/acme/acme-1", nil)
-		req.Header.Set(auth.AuthStrategyHeader, auth.AuthStrategyBearer)
 		AssertError(t, f.Do(req), http.StatusForbidden, "No access token provided", "")
 	})
 }
@@ -1027,8 +1035,7 @@ func testLinkRequest(t *testing.T, mount Mounter) {
 	t.Run("unauthenticated with no pending link", func(t *testing.T) {
 		f := newOAuthFixture(t, mount, fixtureOptions{})
 		f.Seed("nopending@example.com")
-		req := f.Request(http.MethodPost, "/link-request", map[string]any{"email": "nopending@example.com"})
-		req.Header.Set(auth.AuthStrategyHeader, auth.AuthStrategyBearer)
+		req := csrfPair(f.Request(http.MethodPost, "/link-request", map[string]any{"email": "nopending@example.com"}))
 		AssertError(t, f.Do(req), http.StatusUnauthorized, "Authentication required or no pending link found", auth.CodeUnauthorized)
 	})
 
@@ -1041,8 +1048,7 @@ func testLinkRequest(t *testing.T, mount Mounter) {
 		}, time.Hour); err != nil {
 			t.Fatalf("stash: %v", err)
 		}
-		req := f.Request(http.MethodPost, "/link-request", map[string]any{"email": "conflict@example.com", "provider": "acme"})
-		req.Header.Set(auth.AuthStrategyHeader, auth.AuthStrategyBearer)
+		req := csrfPair(f.Request(http.MethodPost, "/link-request", map[string]any{"email": "conflict@example.com", "provider": "acme"}))
 		rec := f.Do(req)
 		AssertStatus(t, rec, http.StatusOK)
 		AssertKeys(t, Body(t, rec), "success")
@@ -1055,8 +1061,7 @@ func testLinkRequest(t *testing.T, mount Mounter) {
 		}, time.Hour); err != nil {
 			t.Fatalf("stash: %v", err)
 		}
-		req := f.Request(http.MethodPost, "/link-request", map[string]any{"email": "ghost@example.com"})
-		req.Header.Set(auth.AuthStrategyHeader, auth.AuthStrategyBearer)
+		req := csrfPair(f.Request(http.MethodPost, "/link-request", map[string]any{"email": "ghost@example.com"}))
 		AssertError(t, f.Do(req), http.StatusNotFound, "Target user not found", auth.CodeUserNotFound)
 	})
 
@@ -1074,6 +1079,55 @@ func testLinkRequest(t *testing.T, mount Mounter) {
 		f := newOAuthFixture(t, mount, fixtureOptions{})
 		req := f.Request(http.MethodPost, "/link-request", map[string]any{"email": "csrf@example.com"})
 		req.AddCookie(&http.Cookie{Name: hostCSRF, Value: "not-mirrored-in-the-header"})
+		AssertError(t, f.Do(req), http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
+	})
+
+	// The pure cross-site forgery, and the reason this route is enforced even
+	// though no request to it is ever cookie-authenticated.
+	//
+	// An auto-submitting form on an attacker's page carries no Authorization, no
+	// X-CSRF-Token, and no cookie the attacker chose — and because decodeJSON never
+	// inspects Content-Type, <form enctype="text/plain"> is enough to reach the
+	// handler. There is no auth gate behind this route to stop it: linkRequest
+	// performs no manual check of its own and accepts a stashed pending link in
+	// place of authentication for about an hour (auth.router.ts:1513-1524). So the
+	// double-submit is the only thing standing between that form and a write which
+	// overwrites the in-flight account-link token and mails the victim's address.
+	//
+	// The refusal is half the case; the other half is that nothing was written.
+	t.Run("a forged request is refused and writes nothing", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{})
+		f.Seed("forged@example.com")
+		if err := f.pending.Save(context.Background(), "pending-link:forged@example.com|acme", auth.OAuthPendingMeta{
+			Provider: "acme", Email: "forged@example.com", ProviderAccountID: "acme-7", TenantID: "t1",
+		}, time.Hour); err != nil {
+			t.Fatalf("stash: %v", err)
+		}
+		// Establish an in-flight link token the forgery would overwrite.
+		legitimate := csrfPair(f.Request(http.MethodPost, "/link-request", map[string]any{"email": "forged@example.com", "provider": "acme"}))
+		AssertStatus(t, f.Do(legitimate), http.StatusOK)
+		issued := f.lastDelivery(t).Token
+
+		// Now the forgery: nothing on the request at all.
+		forged := f.Request(http.MethodPost, "/link-request", map[string]any{"email": "forged@example.com", "provider": "acme"})
+		AssertError(t, f.Do(forged), http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
+
+		// No second mail went out, so the victim's token was not rotated.
+		if got := f.lastDelivery(t).Token; got != issued {
+			t.Fatalf("the refused request still issued a link token: %q, want the earlier %q", got, issued)
+		}
+		// And the first token still works, which is the user-visible consequence:
+		// a forgery must not be able to invalidate an in-flight link.
+		AssertStatus(t, f.Do(f.Request(http.MethodPost, "/link-verify", map[string]any{"token": issued})), http.StatusOK)
+	})
+
+	// A CSRF cookie with no header is the same forgery with one more detail the
+	// attacker cannot supply: the cookie is sent by the browser, the header is not.
+	t.Run("a forged request with an unmirrored cookie is refused", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{})
+		f.Seed("forgedcookie@example.com")
+		req := f.Request(http.MethodPost, "/link-request", map[string]any{"email": "forgedcookie@example.com"})
+		req.AddCookie(&http.Cookie{Name: hostCSRF, Value: csrfPairValue})
 		AssertError(t, f.Do(req), http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
 	})
 }

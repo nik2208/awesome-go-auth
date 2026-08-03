@@ -85,6 +85,14 @@ func (ad *Adapter) Mount(group *echo.Group) {
 	group.POST(prefix+"/logout", ad.guard(ad.logout))
 	group.GET(prefix+"/me", ad.guard(ad.Middleware()(ad.me)))
 
+	// Sessions and account management (account.go).
+	group.GET(prefix+"/sessions", ad.guard(ad.Middleware()(ad.sessions)))
+	group.DELETE(prefix+"/sessions/:handle", ad.guard(ad.Middleware()(ad.revokeSession)))
+	group.POST(prefix+"/sessions/cleanup", ad.guard(ad.cleanupSessions))
+	group.PATCH(prefix+"/profile", ad.guard(ad.Middleware()(ad.updateProfile)))
+	group.POST(prefix+"/add-phone", ad.guard(ad.Middleware()(ad.addPhone)))
+	group.DELETE(prefix+"/account", ad.guard(ad.Middleware()(ad.deleteAccount)))
+
 	// Passwordless and 2FA (passwordless.go). The four send/verify routes are
 	// unauthenticated by contract; the three enrolment routes sit behind the
 	// access-token middleware and are therefore the only ones CSRF-checked.

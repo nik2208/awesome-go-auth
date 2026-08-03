@@ -356,21 +356,38 @@ func TestStartTOTPEnrolmentUnknownUser(t *testing.T) {
 
 // The enrolment routes are the only three in this section the reference puts
 // behind its auth middleware, and CSRF enforcement lives there.
+//
+// Every request here is cookie-authenticated. Enforcement is scoped to requests
+// that carry an access-token cookie, so without one csrfEnforced is false for
+// every route and both halves of this test would be answered by the scoping
+// rather than by the exemption table it means to check — the exempt half would
+// pass vacuously and the enforced half could not pass at all.
 func TestPasswordlessRoutesAreCSRFExempt(t *testing.T) {
 	exempt := []string{"/magic-link/send", "/magic-link/verify", "/sms/send", "/sms/verify", "/2fa/verify"}
 	enforced := []string{"/2fa/setup", "/2fa/verify-setup", "/2fa/disable"}
 	prefix := DefaultAPIPrefix
 
-	for _, route := range exempt {
+	cookieAuthenticated := func(route string) *http.Request {
 		req := httptest.NewRequest(http.MethodPost, prefix+route, nil)
-		if csrfEnforced(req, prefix) {
+		req.AddCookie(&http.Cookie{Name: AccessTokenCookieName, Value: "session-value"})
+		return req
+	}
+
+	for _, route := range exempt {
+		if csrfEnforced(cookieAuthenticated(route), prefix) {
 			t.Errorf("%s must not be CSRF-checked: it has no auth gate", route)
 		}
 	}
 	for _, route := range enforced {
-		req := httptest.NewRequest(http.MethodPost, prefix+route, nil)
-		if !csrfEnforced(req, prefix) {
+		if !csrfEnforced(cookieAuthenticated(route), prefix) {
 			t.Errorf("%s must be CSRF-checked: it sits behind the auth middleware", route)
+		}
+	}
+	// And the enrolment routes defer to the auth gate when there is no session,
+	// which is the ordering the reference has (auth.middleware.ts:29-35).
+	for _, route := range enforced {
+		if csrfEnforced(httptest.NewRequest(http.MethodPost, prefix+route, nil), prefix) {
+			t.Errorf("%s with no session must be left to the auth gate", route)
 		}
 	}
 }

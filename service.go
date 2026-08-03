@@ -594,25 +594,51 @@ func (s *Service) CleanupExpiredSessions(ctx context.Context) (int, error) {
 	return store.DeleteExpiredSessions(ctx, s.now())
 }
 
+// UpdateProfile applies a partial profile update: a nil field in the input is
+// one the caller did not submit and must be left as it is stored (§3.5).
+//
+// UserAccountStore.UpdateProfile takes both names by value, so a nil field is
+// resolved against the current record before the write rather than by widening
+// the store interface — a store written against this package keeps compiling and
+// still gets partial semantics. The read-modify-write is not atomic; two
+// concurrent partial patches of *different* fields can still lose one. Making it
+// atomic needs a store-level patch primitive, which is a breaking interface
+// change and its own item; silently erasing a field on every single partial call
+// is the failure this closes.
 func (s *Service) UpdateProfile(ctx context.Context, in UpdateProfileInput) (User, error) {
 	accountStore, ok := s.users.(UserAccountStore)
 	if !ok {
 		return User{}, ErrFeatureNotSupported
 	}
-	updated, err := accountStore.UpdateProfile(ctx, in.UserID, in.TenantID, strings.TrimSpace(in.FirstName), strings.TrimSpace(in.LastName))
+	firstName, lastName := in.FirstName, in.LastName
+	if firstName == nil || lastName == nil {
+		current, err := s.users.GetUserByID(ctx, in.UserID, in.TenantID)
+		if err != nil {
+			return User{}, fmt.Errorf("auth: update profile: %w", err)
+		}
+		if firstName == nil {
+			firstName = &current.FirstName
+		}
+		if lastName == nil {
+			lastName = &current.LastName
+		}
+	}
+	updated, err := accountStore.UpdateProfile(ctx, in.UserID, in.TenantID, strings.TrimSpace(*firstName), strings.TrimSpace(*lastName))
 	if err != nil {
 		return User{}, fmt.Errorf("auth: update profile: %w", err)
 	}
 	return s.enrichUser(ctx, updated)
 }
 
+// DeleteAccount runs the reference's account cleanup in the reference's order
+// (auth.router.ts:1597-1636): sessions, then role assignments, then tenant
+// memberships, then metadata, and the user record last. The order is not
+// cosmetic — deleting the identity first and failing anywhere afterwards leaves
+// sessions that still authenticate a user who no longer exists.
 func (s *Service) DeleteAccount(ctx context.Context, in DeleteAccountInput) error {
 	accountStore, ok := s.users.(UserAccountStore)
 	if !ok {
 		return ErrFeatureNotSupported
-	}
-	if err := accountStore.DeleteUser(ctx, in.UserID, in.TenantID); err != nil {
-		return fmt.Errorf("auth: delete account: %w", err)
 	}
 	if adminStore, ok := s.sessions.(SessionAdminStore); ok {
 		sessions, err := adminStore.ListSessionsForUser(ctx, in.UserID, in.TenantID)
@@ -622,8 +648,27 @@ func (s *Service) DeleteAccount(ctx context.Context, in DeleteAccountInput) erro
 			}
 		}
 	}
+	if s.rbac != nil {
+		roles, err := s.rbac.GetRolesForUser(ctx, in.UserID, in.TenantID)
+		if err == nil {
+			for _, role := range roles {
+				_ = s.rbac.RemoveRoleFromUser(ctx, in.UserID, role, in.TenantID)
+			}
+		}
+	}
+	if s.tenants != nil {
+		tenants, err := s.tenants.GetTenantsForUser(ctx, in.UserID)
+		if err == nil {
+			for _, tenant := range tenants {
+				_ = s.tenants.DisassociateUserFromTenant(ctx, in.UserID, tenant.ID)
+			}
+		}
+	}
 	if s.metadata != nil {
 		_ = s.metadata.ClearMetadata(ctx, in.UserID)
+	}
+	if err := accountStore.DeleteUser(ctx, in.UserID, in.TenantID); err != nil {
+		return fmt.Errorf("auth: delete account: %w", err)
 	}
 	return nil
 }

@@ -30,6 +30,12 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/refresh", h.Refresh)
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/logout", h.Logout)
 	r.With(csrf, h.Middleware()).MethodFunc(http.MethodGet, prefix+"/me", h.Me)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodGet, prefix+"/sessions", h.Sessions)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodDelete, prefix+"/sessions/{handle}", h.RevokeSession)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/sessions/cleanup", h.CleanupSessions)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodPatch, prefix+"/profile", h.UpdateProfile)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodPost, prefix+"/add-phone", h.AddPhone)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodDelete, prefix+"/account", h.DeleteAccount)
 
 	// OAuth and account linking. These handlers arrive already wrapped in the
 	// CSRF middleware and, where the route needs one, the auth middleware, so

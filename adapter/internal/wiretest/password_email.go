@@ -63,20 +63,12 @@ func bearer(req *http.Request, tokens auth.AuthTokens) *http.Request {
 	return req
 }
 
-// anonymousBearer marks a credential-less request as a bearer client, which is
-// how a native client calls these routes.
-//
-// It matters for the three authenticated routes: the port enforces CSRF in a
-// middleware that sits in front of the auth gate, whereas the reference enforces
-// it inside that gate, after the token check (auth.middleware.ts:30 then :33-42).
-// A cookie-mode request with neither credential therefore gets CSRF_INVALID here
-// and "No access token provided" there. Declaring bearer skips CSRF in both
-// implementations, so this is the path on which the missing-token literal can be
-// pinned; the cookie-mode ordering difference is pinned separately below.
-func anonymousBearer(req *http.Request) *http.Request {
-	req.Header.Set(auth.AuthStrategyHeader, auth.AuthStrategyBearer)
-	return req
-}
+// A credential-less request needs no help to reach the auth gate: CSRF
+// enforcement is scoped to requests that carry an access-token cookie, so a
+// request with no cookies at all is passed through and answered with the
+// reference's "No access token provided". The three "unauthenticated gets 403"
+// cases below therefore send a bare request — giving one a CSRF pair or a bearer
+// strategy header would hide the ordering they exist to pin.
 
 // assertOneTimeToken pins the shape of the one-time tokens this group mints.
 //
@@ -373,20 +365,27 @@ func testChangePassword(t *testing.T, mount Mounter) {
 	// answers 403 and carries no code.
 	t.Run("unauthenticated gets 403", func(t *testing.T) {
 		env, _ := storeEnv(t, mount, auth.DefaultHTTPConfig())
-		req := anonymousBearer(env.Request(http.MethodPost, "/change-password", map[string]string{"currentPassword": "password1", "newPassword": "newpassword1"}))
+		req := env.Request(http.MethodPost, "/change-password", map[string]string{"currentPassword": "password1", "newPassword": "newpassword1"})
 		AssertError(t, env.Do(req), http.StatusForbidden, "No access token provided", "")
 	})
 
-	// Known divergence, pinned so it cannot drift silently: with neither an access
-	// token nor a mirrored CSRF header, the port answers CSRF_INVALID where the
-	// reference answers "No access token provided". Both are 403, and the port's
-	// order is the stricter one — it rejects a cross-site post before touching the
-	// session — but the bodies differ. Fixing it means splitting CSRF distribution
-	// from enforcement, which belongs to the shared middleware, not to this group.
-	t.Run("cookie mode with no credential at all reports CSRF first", func(t *testing.T) {
+	// The two 403s side by side, which is what fixes the order in place. Both
+	// requests omit the CSRF header; only the session cookie differs. The reference
+	// extracts the access token first, so no token means "No access token provided"
+	// and a cookie-authenticated forgery means CSRF_INVALID
+	// (auth.middleware.ts:29-32 then :33-42). This used to be a pinned divergence:
+	// the port answered CSRF_INVALID to both.
+	t.Run("the session cookie decides which gate answers", func(t *testing.T) {
 		env, _ := storeEnv(t, mount, auth.DefaultHTTPConfig())
-		rec := env.Do(env.Request(http.MethodPost, "/change-password", map[string]string{"currentPassword": "password1", "newPassword": "newpassword1"}))
-		AssertError(t, rec, http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
+		env.Seed("changepworder@example.com")
+		login := env.Do(env.Request(http.MethodPost, "/login", credentials("changepworder@example.com")))
+		body := map[string]string{"currentPassword": "password1", "newPassword": "newpassword1"}
+
+		anonymous := env.Do(env.Request(http.MethodPost, "/change-password", body))
+		AssertError(t, anonymous, http.StatusForbidden, "No access token provided", "")
+
+		authenticated := env.Do(Replay(env.Request(http.MethodPost, "/change-password", body), login))
+		AssertError(t, authenticated, http.StatusForbidden, "CSRF token validation failed", auth.CodeCSRFInvalid)
 	})
 
 	// An account with no password may not be given one silently: with neither
@@ -454,7 +453,7 @@ func testSendVerificationEmail(t *testing.T, mount Mounter) {
 
 	t.Run("unauthenticated gets 403", func(t *testing.T) {
 		env, _ := storeEnv(t, mount, auth.DefaultHTTPConfig())
-		req := anonymousBearer(httptest.NewRequest(http.MethodPost, env.Config.Prefix()+"/send-verification-email", nil))
+		req := httptest.NewRequest(http.MethodPost, env.Config.Prefix()+"/send-verification-email", nil)
 		AssertError(t, env.Do(req), http.StatusForbidden, "No access token provided", "")
 	})
 
@@ -574,7 +573,7 @@ func testChangeEmailRequest(t *testing.T, mount Mounter) {
 
 	t.Run("unauthenticated gets 403", func(t *testing.T) {
 		env, _ := storeEnv(t, mount, auth.DefaultHTTPConfig())
-		req := anonymousBearer(env.Request(http.MethodPost, "/change-email/request", map[string]string{"newEmail": "changed@example.com"}))
+		req := env.Request(http.MethodPost, "/change-email/request", map[string]string{"newEmail": "changed@example.com"})
 		AssertError(t, env.Do(req), http.StatusForbidden, "No access token provided", "")
 	})
 
