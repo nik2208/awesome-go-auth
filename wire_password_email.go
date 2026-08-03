@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 )
 
 // This file holds the wire conventions for the password-management and
@@ -123,6 +122,13 @@ func ChangePasswordHTTPError(err error) HTTPError {
 }
 
 // SendVerificationEmailHTTPError maps a Service.SendVerificationEmailToken failure.
+//
+// The 404 "User not found" branch is not reachable over HTTP in this port and is
+// kept only for a store race: the reference's auth gate trusts the JWT and never
+// reads the store (auth.middleware.ts:60), so its handler's own lookup can miss
+// and answer 404, whereas this port's gate resolves the user through Me() and
+// answers 403 "Invalid or expired access token" for a row that no longer exists.
+// The divergence belongs to the shared middleware, not to this route.
 func SendVerificationEmailHTTPError(err error) HTTPError {
 	switch {
 	case errors.Is(err, ErrFeatureNotSupported):
@@ -147,6 +153,9 @@ func VerifyEmailHTTPError(err error) HTTPError {
 }
 
 // ChangeEmailRequestHTTPError maps a Service.RequestEmailChange failure.
+//
+// As on /send-verification-email, the 404 branch is a store-race path only: this
+// port's auth gate answers 403 where the reference's handler would answer 404.
 func ChangeEmailRequestHTTPError(err error) HTTPError {
 	switch {
 	case errors.Is(err, ErrFeatureNotSupported):
@@ -205,11 +214,17 @@ func ChangeEmailInlineError(user User) (HTTPError, bool) {
 
 // VerifyEmailToken reads the token GET /verify-email carries. It is a query
 // parameter, not a body field, and the route is the only GET in this group.
+//
+// The value is used exactly as sent: the reference tests it with `if (!token)`
+// (auth.router.ts:972), so a token of one space is truthy there and fails the
+// lookup with 400 "Invalid verification token" rather than 400 "Token is
+// required". Trimming here would be friendlier but would move that request into
+// the other error, so the reference's answer wins.
 func VerifyEmailToken(r *http.Request) string {
 	if r == nil || r.URL == nil {
 		return ""
 	}
-	return strings.TrimSpace(r.URL.Query().Get("token"))
+	return r.URL.Query().Get("token")
 }
 
 // DecodeOptionalJSON decodes a JSON request body into dst, tolerating an absent
@@ -249,9 +264,52 @@ func (a *Auth) ResetPassword(ctx context.Context, in ResetPasswordInput) error {
 	return a.service.ResetPassword(ctx, in)
 }
 
-// ChangePassword delegates to Service.ChangePassword.
+// ChangePassword performs POST /change-password.
+//
+// A passwordless account — OAuth-only, or magic-link-only — skips the
+// current-password comparison entirely and may set an initial password by
+// supplying newPassword alone: in the reference the compare sits inside
+// `if (user.password)` and the `else if` only fires when *both* fields are
+// falsy, so such a caller falls through to the hash-and-store (wire-contract §2
+// "Passwordless-account path", auth.router.ts:916-928). It is the only way an
+// account with no password ever acquires one.
+//
+// Service.ChangePassword compares unconditionally (service.go:276), and
+// verifyPassword("", "") is a bcrypt error, so delegating the passwordless case
+// to it reports a password the account does not have as incorrect. The
+// passwordless half is therefore handled here rather than by widening
+// Service.ChangePassword: a library consumer calling the service directly may
+// deliberately not want a caller setting a password without presenting one, and
+// this PR's contract is the HTTP surface. The service-level divergence is filed
+// upstream.
 func (a *Auth) ChangePassword(ctx context.Context, in ChangePasswordInput) error {
-	return a.service.ChangePassword(ctx, in)
+	s := a.service
+	user, err := s.users.GetUserByID(ctx, in.UserID, in.TenantID)
+	if err != nil {
+		// The sentinel Service.ChangePassword returns for an unresolvable user;
+		// ChangePasswordHTTPError turns it into the reference's 401. Unreachable
+		// behind the auth gate, which resolves the same row a moment earlier.
+		return ErrInvalidCredentials
+	}
+	if user.PasswordHash != "" {
+		return s.ChangePassword(ctx, in)
+	}
+	if len(in.NewPassword) < s.cfg.MinPasswordLen {
+		// Port-only policy, exactly as in Service.ChangePassword; the reference
+		// applies none on this route.
+		return ErrWeakPassword
+	}
+	ps, ok := s.users.(UserPasswordStore)
+	if !ok {
+		// 500 "Internal server error", which is what the reference's unguarded
+		// call to a missing updatePassword produces too.
+		return ErrFeatureNotSupported
+	}
+	pwHash, err := hashPassword(in.NewPassword)
+	if err != nil {
+		return err
+	}
+	return ps.UpdatePassword(ctx, user.ID, user.TenantID, pwHash)
 }
 
 // SendVerificationEmailToken delegates to Service.SendVerificationEmailToken. An

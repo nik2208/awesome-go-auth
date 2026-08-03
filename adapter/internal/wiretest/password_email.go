@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,6 +124,24 @@ func assertTTL(t *testing.T, label string, expiry *time.Time, want time.Duration
 	}
 }
 
+// malformed builds a request whose body is not JSON. Every route in this group
+// accepts an *absent* body, as express.json() does, but a present-and-broken one
+// is rejected with the port's own 400 INVALID_BODY.
+func malformed(env *Env, method, route string) *http.Request {
+	req := httptest.NewRequest(method, env.Config.Prefix()+route, strings.NewReader(`{"email":`))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+// dropPassword makes a seeded account passwordless, which is what an OAuth-only
+// or magic-link-only row looks like to these routes.
+func dropPassword(t *testing.T, store *auth.MemoryUserStore, user auth.User) {
+	t.Helper()
+	if err := store.UpdatePassword(context.Background(), user.ID, user.TenantID, ""); err != nil {
+		t.Fatalf("drop the stored password: %v", err)
+	}
+}
+
 func storedUser(t *testing.T, store *auth.MemoryUserStore, user auth.User) auth.User {
 	t.Helper()
 	stored, err := store.GetUserByID(context.Background(), user.ID, user.TenantID)
@@ -176,6 +195,15 @@ func testForgotPassword(t *testing.T, mount Mounter) {
 		assertSuccessBody(t, rec)
 	})
 
+	// An absent body is valid; a present but broken one is not. This is the
+	// port's own convention, shared with /register and /login — the reference's
+	// express.json() answers its own 400 for unparseable JSON.
+	t.Run("a malformed body gets 400 INVALID_BODY", func(t *testing.T) {
+		env, _ := storeEnv(t, mount, auth.DefaultHTTPConfig())
+		rec := env.Do(malformed(env, http.MethodPost, "/forgot-password"))
+		AssertError(t, rec, http.StatusBadRequest, "Invalid request body", auth.CodeInvalidBody)
+	})
+
 	// The reference's own enumeration oracle, reproduced rather than fixed: a
 	// store that cannot persist a reset token throws only once a user has been
 	// found, so an existing address 500s where an unknown one still 200s.
@@ -195,7 +223,7 @@ func testForgotPassword(t *testing.T, mount Mounter) {
 func testResetPassword(t *testing.T, mount Mounter) {
 	t.Run("spends the token, replaces the password, and the token is single-use", func(t *testing.T) {
 		env, store := storeEnv(t, mount, auth.DefaultHTTPConfig())
-		user, _ := env.Seed("reset@example.com")
+		user, tokens := env.Seed("reset@example.com")
 
 		// Minted through the service: no route may hand a reset token back to a
 		// caller, so this is the only way a test can hold one.
@@ -217,8 +245,28 @@ func testResetPassword(t *testing.T, mount Mounter) {
 		stale := env.Do(env.Request(http.MethodPost, "/login", credentials("reset@example.com")))
 		AssertError(t, stale, http.StatusUnauthorized, "Invalid credentials", auth.CodeInvalidCredentials)
 
+		// Nothing is revoked: the session that existed before the reset still
+		// works, as in the reference, which clears no cookie and kills no session.
+		me := env.Do(bearer(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/me", nil), tokens))
+		AssertStatus(t, me, http.StatusOK)
+
 		replay := env.Do(env.Request(http.MethodPost, "/reset-password", map[string]string{"token": token, "password": "thirdpassword1"}))
 		AssertError(t, replay, http.StatusBadRequest, "Invalid reset token", "")
+	})
+
+	// Port-only: the reference applies no password policy on this route at all, so
+	// a two-character password there is hashed and stored. Pinned as a divergence
+	// rather than left to be discovered — the status, message and code are the
+	// port's own catalog entry.
+	t.Run("a too short password gets 400 WEAK_PASSWORD (port-only)", func(t *testing.T) {
+		env, _ := storeEnv(t, mount, auth.DefaultHTTPConfig())
+		env.Seed("resetweak@example.com")
+		token, err := env.Auth.Service().ForgotPassword(context.Background(), auth.ForgotPasswordInput{Email: "resetweak@example.com", TenantID: "t1"})
+		if err != nil {
+			t.Fatalf("mint reset token: %v", err)
+		}
+		rec := env.Do(env.Request(http.MethodPost, "/reset-password", map[string]string{"token": token, "password": "xy"}))
+		AssertError(t, rec, http.StatusBadRequest, "Password is too weak", auth.CodeWeakPassword)
 	})
 
 	// Also pins the CSRF exemption: an unauthenticated caller that carries a CSRF
@@ -252,6 +300,62 @@ func testChangePassword(t *testing.T, mount Mounter) {
 
 		fresh := env.Do(env.Request(http.MethodPost, "/login", map[string]string{"email": "changepw@example.com", "password": "newpassword1", "tenantId": "t1"}))
 		AssertStatus(t, fresh, http.StatusOK)
+
+		// "Revokes nothing" asserted, not just claimed: the access token that
+		// changed the password still works afterwards.
+		me := env.Do(bearer(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/me", nil), tokens))
+		AssertStatus(t, me, http.StatusOK)
+	})
+
+	// The passwordless fall-through, and the reason this route exists for an
+	// OAuth-only account: with no stored password the current-password comparison
+	// is skipped entirely and newPassword alone sets the initial password
+	// (wire-contract §2 "Passwordless-account path", auth.router.ts:916-928).
+	// Answering 401 "Current password is incorrect" here — reporting a password the
+	// account does not have as wrong — makes the flow impossible, so the 200 is
+	// pinned along with the stored effect.
+	t.Run("a passwordless account sets an initial password", func(t *testing.T) {
+		env, store := storeEnv(t, mount, auth.DefaultHTTPConfig())
+		user, tokens := env.Seed("changepwinitial@example.com")
+		dropPassword(t, store, user)
+
+		req := env.Request(http.MethodPost, "/change-password", map[string]string{"newPassword": "initialpw1"})
+		rec := env.Do(bearer(req, tokens))
+		assertSuccessBody(t, rec)
+		AssertNoCookies(t, rec)
+
+		if storedUser(t, store, user).PasswordHash == "" {
+			t.Error("the account is still passwordless")
+		}
+		fresh := env.Do(env.Request(http.MethodPost, "/login", map[string]string{"email": "changepwinitial@example.com", "password": "initialpw1", "tenantId": "t1"}))
+		AssertStatus(t, fresh, http.StatusOK)
+
+		// A currentPassword sent by a passwordless account is ignored rather than
+		// compared: the reference's guard fires only when *both* fields are falsy,
+		// so this too is a 200.
+		other, otherTokens := env.Seed("changepwinitial2@example.com")
+		dropPassword(t, store, other)
+		ignored := env.Request(http.MethodPost, "/change-password", map[string]string{"currentPassword": "not-a-password", "newPassword": "initialpw2"})
+		assertSuccessBody(t, env.Do(bearer(ignored, otherTokens)))
+	})
+
+	// Port-only, as on /reset-password: the reference has no password policy on
+	// this route, and its check order would report the current-password failure
+	// first. Pinned as the divergence it is.
+	t.Run("a too short new password gets 400 WEAK_PASSWORD (port-only)", func(t *testing.T) {
+		env, _ := storeEnv(t, mount, auth.DefaultHTTPConfig())
+		_, tokens := env.Seed("changepwweak@example.com")
+		req := env.Request(http.MethodPost, "/change-password", map[string]string{"currentPassword": "password1", "newPassword": "xy"})
+		AssertError(t, env.Do(bearer(req, tokens)), http.StatusBadRequest, "Password is too weak", auth.CodeWeakPassword)
+	})
+
+	// The malformed-body rule holds behind the auth gate too, and the gate runs
+	// first: this is a 400 only because the bearer token is valid.
+	t.Run("a malformed body gets 400 INVALID_BODY", func(t *testing.T) {
+		env, _ := storeEnv(t, mount, auth.DefaultHTTPConfig())
+		_, tokens := env.Seed("changepwbody@example.com")
+		rec := env.Do(bearer(malformed(env, http.MethodPost, "/change-password"), tokens))
+		AssertError(t, rec, http.StatusBadRequest, "Invalid request body", auth.CodeInvalidBody)
 	})
 
 	// 401 with no code, not the coded INVALID_CREDENTIALS a failed login returns.
@@ -286,13 +390,12 @@ func testChangePassword(t *testing.T, mount Mounter) {
 	})
 
 	// An account with no password may not be given one silently: with neither
-	// field supplied the reference answers 400 "New password is required".
+	// field supplied the reference answers 400 "New password is required". This is
+	// the guard the passwordless fall-through above sits behind.
 	t.Run("a passwordless account with an empty body gets 400", func(t *testing.T) {
 		env, store := storeEnv(t, mount, auth.DefaultHTTPConfig())
 		user, tokens := env.Seed("changepwnone@example.com")
-		if err := store.UpdatePassword(context.Background(), user.ID, user.TenantID, ""); err != nil {
-			t.Fatalf("drop the stored password: %v", err)
-		}
+		dropPassword(t, store, user)
 		req := httptest.NewRequest(http.MethodPost, env.Config.Prefix()+"/change-password", nil)
 		AssertError(t, env.Do(bearer(req, tokens)), http.StatusBadRequest, "New password is required", "")
 	})
@@ -402,6 +505,17 @@ func testVerifyEmail(t *testing.T, mount Mounter) {
 		AssertError(t, rec, http.StatusBadRequest, "Invalid verification token", "")
 	})
 
+	// The query value is not trimmed. `if (!token)` in the reference sees a
+	// truthy " ", so a whitespace-only token is a *lookup* failure there, not a
+	// missing one — same 400, different message. Trimming would be friendlier and
+	// no shipped client sends it, but the reference's answer wins, and the two
+	// messages are only distinguishable by a test like this one.
+	t.Run("a whitespace token is invalid, not missing", func(t *testing.T) {
+		env, _ := storeEnv(t, mount, auth.DefaultHTTPConfig())
+		rec := env.Do(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/verify-email?token=%20", nil))
+		AssertError(t, rec, http.StatusBadRequest, "Invalid verification token", "")
+	})
+
 	// The route performs no content negotiation and never redirects. A browser
 	// asking for HTML still gets JSON; the HTML experience belongs to a static
 	// page that calls this endpoint.
@@ -469,9 +583,7 @@ func testChangeEmailRequest(t *testing.T, mount Mounter) {
 	t.Run("a passwordless account gets 403 PASSWORD_REQUIRED", func(t *testing.T) {
 		env, store := storeEnv(t, mount, auth.DefaultHTTPConfig())
 		user, tokens := env.Seed("changemailnopw@example.com")
-		if err := store.UpdatePassword(context.Background(), user.ID, user.TenantID, ""); err != nil {
-			t.Fatalf("drop the stored password: %v", err)
-		}
+		dropPassword(t, store, user)
 		req := env.Request(http.MethodPost, "/change-email/request", map[string]string{"newEmail": "changed@example.com"})
 		AssertError(t, env.Do(bearer(req, tokens)), http.StatusForbidden,
 			"You must set a password before you can change your email address.", auth.CodePasswordRequired)
