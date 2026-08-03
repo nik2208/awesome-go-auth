@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -77,6 +78,9 @@ func TestStepUpErrorMapping(t *testing.T) {
 	}{
 		{"magic link invalid", MagicLinkVerifyHTTPError(ErrInvalidToken), HTTPErrInvalidMagicLink},
 		{"magic link store missing", MagicLinkVerifyHTTPError(ErrFeatureNotSupported), HTTPErrNotImplemented},
+		// A good link on the wrong account is its own failure: TOKEN_MISMATCH, not
+		// INVALID_MAGIC_LINK.
+		{"magic link owner mismatch", MagicLinkVerifyHTTPError(ErrMagicLinkOwnerMismatch), HTTPErrTokenMismatch},
 		{"sms wrong code", SMSVerifyHTTPError(ErrInvalidCode), HTTPErrInvalidSMSCode},
 		// An unknown user is a bad credential here, not a 404: the reference
 		// resolves the user inside the strategy, where a miss and a wrong code are
@@ -218,8 +222,9 @@ func TestStartTOTPEnrolmentIsStatelessAndFresh(t *testing.T) {
 	}
 	// The issuer label is Config.Issuer; the parameters are spelled out so that a
 	// client cannot enrol against a different step or digit count than
-	// validateTOTPCode checks.
-	want := "otpauth://totp/enrol@example.com?algorithm=SHA1&digits=6&issuer=awesome-go-auth&period=30&secret=" + first.Secret
+	// validateTOTPCode checks. The account label is escaped the way the
+	// reference's otplib escapes it — encodeURIComponent, so the @ is %40.
+	want := "otpauth://totp/enrol%40example.com?algorithm=SHA1&digits=6&issuer=awesome-go-auth&period=30&secret=" + first.Secret
 	if first.OTPAuthURL != want {
 		t.Fatalf("otpauth url = %q, want %q", first.OTPAuthURL, want)
 	}
@@ -238,6 +243,107 @@ func TestStartTOTPEnrolmentIsStatelessAndFresh(t *testing.T) {
 	}
 	if stored.TOTPSecret != "" || stored.IsTOTPEnabled {
 		t.Errorf("enrolment persisted state: secret=%q enabled=%v", stored.TOTPSecret, stored.IsTOTPEnabled)
+	}
+}
+
+// TestVerifyMagicLinkForUserRefusesBeforeIssuing is the service-level half of
+// the /magic-link/verify step-up contract: a link belonging to somebody else is
+// refused, nothing is issued, and the link is still consumed.
+//
+// The ordering is the point. VerifyMagicLink issues a session as part of
+// verifying, so a caller that compared the ids afterwards would answer 401 on
+// the wire and leave the link's owner holding a session they never created.
+func TestVerifyMagicLinkForUserRefusesBeforeIssuing(t *testing.T) {
+	svc := newTestSvc(t)
+	ctx := context.Background()
+	owner := seedUser(t, svc, "linkowner@example.com")
+	other := seedUser(t, svc, "stepupother@example.com")
+
+	token, err := svc.SendMagicLink(ctx, MagicLinkSendInput{Email: owner.Email, TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	user, tokens, err := svc.VerifyMagicLinkForUser(ctx, MagicLinkVerifyInput{Token: token}, other.ID)
+	if !errors.Is(err, ErrMagicLinkOwnerMismatch) {
+		t.Fatalf("mismatch = %v, want ErrMagicLinkOwnerMismatch", err)
+	}
+	if tokens != (AuthTokens{}) || user.ID != "" {
+		t.Errorf("a refused verification returned credentials: %+v %+v", user, tokens)
+	}
+	sessions, err := svc.ListSessions(ctx, owner.ID, "t1")
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("the refused verification left %d session(s) for the link's owner", len(sessions))
+	}
+
+	// Consumed anyway, as in the reference: the strategy clears the link before
+	// the router compares ids (magic-link.strategy.ts:50).
+	if _, _, err := svc.VerifyMagicLink(ctx, MagicLinkVerifyInput{Token: token}); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("the link survived the mismatch: %v", err)
+	}
+}
+
+// TestVerifyMagicLinkEmailVerificationIsLoginOnly pins the reference's
+// asymmetry: the login path treats a magic link as proof of the address
+// (auth.router.ts:1158-1164), the step-up path does not (:1134-1156).
+func TestVerifyMagicLinkEmailVerificationIsLoginOnly(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name         string
+		stepUp       bool
+		wantVerified bool
+	}{
+		{name: "login mode verifies the address", wantVerified: true},
+		{name: "step-up mode does not", stepUp: true, wantVerified: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newTestSvc(t)
+			user := seedUser(t, svc, "unverified@example.com")
+			if err := svc.users.(EmailVerificationStore).MarkEmailVerified(ctx, user.ID, "t1", false); err != nil {
+				t.Fatalf("unverify: %v", err)
+			}
+			token, err := svc.SendMagicLink(ctx, MagicLinkSendInput{Email: user.Email, TenantID: "t1"})
+			if err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			if tc.stepUp {
+				_, _, err = svc.VerifyMagicLinkForUser(ctx, MagicLinkVerifyInput{Token: token}, user.ID)
+			} else {
+				_, _, err = svc.VerifyMagicLink(ctx, MagicLinkVerifyInput{Token: token})
+			}
+			if err != nil {
+				t.Fatalf("verify: %v", err)
+			}
+			stored, err := svc.users.GetUserByID(ctx, user.ID, "t1")
+			if err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if stored.IsEmailVerified != tc.wantVerified {
+				t.Errorf("isEmailVerified = %v, want %v", stored.IsEmailVerified, tc.wantVerified)
+			}
+		})
+	}
+}
+
+// TestEscapeURIComponentMatchesJavaScript pins the escaping otplib applies to
+// the otpauth account label. The unreserved set is JavaScript's, not Go's: @, :
+// and / are escaped where url.PathEscape leaves them alone.
+func TestEscapeURIComponentMatchesJavaScript(t *testing.T) {
+	cases := map[string]string{
+		"user@example.com":    "user%40example.com",
+		"a+b@example.com":     "a%2Bb%40example.com",
+		"first.last@corp.io":  "first.last%40corp.io",
+		"sp ace@example.com":  "sp%20ace%40example.com",
+		"tenant:user@ex.com":  "tenant%3Auser%40ex.com",
+		"unreserved-_.!~*'()": "unreserved-_.!~*'()",
+	}
+	for in, want := range cases {
+		if got := escapeURIComponent(in); got != want {
+			t.Errorf("escapeURIComponent(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

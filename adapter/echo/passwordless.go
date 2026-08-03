@@ -1,6 +1,8 @@
 package echo
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -18,6 +20,23 @@ import (
 // directly; putting it in the response body would turn a second factor into no
 // factor at all.
 
+// bindStepUpJSON binds a request body and treats an absent one as a body with
+// every field omitted — the reference's behaviour, where express.json() leaves
+// req.body as {} and each route answers for the field it was missing rather than
+// for the body. Malformed JSON is still 400 INVALID_BODY.
+//
+// Echo's binder already returns nil for a zero-length body, so this helper is
+// what makes that explicit and keeps it true if the binder changes; the other
+// three adapters had to be taught the same tolerance to stop disagreeing with
+// this one.
+func bindStepUpJSON(c echo.Context, dst any) bool {
+	if err := c.Bind(dst); err != nil && !errors.Is(err, io.EOF) {
+		auth.WriteHTTPError(c.Response(), auth.HTTPErrInvalidBody)
+		return false
+	}
+	return true
+}
+
 func (ad *Adapter) magicLinkSend(c echo.Context) error {
 	var req struct {
 		Email     string `json:"email"`
@@ -25,8 +44,7 @@ func (ad *Adapter) magicLinkSend(c echo.Context) error {
 		TempToken string `json:"tempToken"`
 		TenantID  string `json:"tenantId"`
 	}
-	if err := c.Bind(&req); err != nil {
-		auth.WriteHTTPError(c.Response(), auth.HTTPErrInvalidBody)
+	if !bindStepUpJSON(c, &req) {
 		return nil
 	}
 	email, tenantID := req.Email, req.TenantID
@@ -62,27 +80,27 @@ func (ad *Adapter) magicLinkVerify(c echo.Context) error {
 		Mode      string `json:"mode"`
 		TempToken string `json:"tempToken"`
 	}
-	if err := c.Bind(&req); err != nil {
-		auth.WriteHTTPError(c.Response(), auth.HTTPErrInvalidBody)
+	if !bindStepUpJSON(c, &req) {
 		return nil
 	}
-	var subject auth.TempTokenSubject
-	stepUp := auth.TwoFactorMode(req.Mode)
-	if stepUp {
-		resolved, herr, ok := ad.auth.StepUpSubject(req.TempToken, auth.HTTPErrTempTokenRequired, auth.HTTPErrInvalidTempToken)
+	in := auth.MagicLinkVerifyInput{Token: req.Token}
+	var tokens auth.AuthTokens
+	var err error
+	if auth.TwoFactorMode(req.Mode) {
+		subject, herr, ok := ad.auth.StepUpSubject(req.TempToken, auth.HTTPErrTempTokenRequired, auth.HTTPErrInvalidTempToken)
 		if !ok {
 			auth.WriteHTTPError(c.Response(), herr)
 			return nil
 		}
-		subject = resolved
+		// The service compares the ids, so a link belonging to another user is
+		// refused before any session exists; comparing them here would answer 401
+		// and still leave the owner with a session.
+		_, tokens, err = ad.auth.VerifyMagicLinkForUser(c.Request().Context(), in, subject.UserID)
+	} else {
+		_, tokens, err = ad.auth.VerifyMagicLink(c.Request().Context(), in)
 	}
-	user, tokens, err := ad.auth.VerifyMagicLink(c.Request().Context(), auth.MagicLinkVerifyInput{Token: req.Token})
 	if err != nil {
 		auth.WriteHTTPError(c.Response(), auth.MagicLinkVerifyHTTPError(err))
-		return nil
-	}
-	if stepUp && user.ID != subject.UserID {
-		auth.WriteHTTPError(c.Response(), auth.HTTPErrTokenMismatch)
 		return nil
 	}
 	ad.cfg.WriteTokens(c.Response(), c.Request(), http.StatusOK, tokens, nil)
@@ -97,8 +115,7 @@ func (ad *Adapter) smsSend(c echo.Context) error {
 		TempToken string `json:"tempToken"`
 		TenantID  string `json:"tenantId"`
 	}
-	if err := c.Bind(&req); err != nil {
-		auth.WriteHTTPError(c.Response(), auth.HTTPErrInvalidBody)
+	if !bindStepUpJSON(c, &req) {
 		return nil
 	}
 	userID, tenantID := strings.TrimSpace(req.UserID), req.TenantID
@@ -149,8 +166,7 @@ func (ad *Adapter) smsVerify(c echo.Context) error {
 		TempToken string `json:"tempToken"`
 		TenantID  string `json:"tenantId"`
 	}
-	if err := c.Bind(&req); err != nil {
-		auth.WriteHTTPError(c.Response(), auth.HTTPErrInvalidBody)
+	if !bindStepUpJSON(c, &req) {
 		return nil
 	}
 	userID, tenantID := strings.TrimSpace(req.UserID), req.TenantID
@@ -201,8 +217,7 @@ func (ad *Adapter) twoFactorVerifySetup(c echo.Context) error {
 		Token  string `json:"token"`
 		Secret string `json:"secret"`
 	}
-	if err := c.Bind(&req); err != nil {
-		auth.WriteHTTPError(c.Response(), auth.HTTPErrInvalidBody)
+	if !bindStepUpJSON(c, &req) {
 		return nil
 	}
 	if err := ad.auth.VerifyTOTPSetup(c.Request().Context(), user.ID, user.TenantID, req.Secret, req.Token); err != nil {
@@ -218,8 +233,7 @@ func (ad *Adapter) twoFactorVerify(c echo.Context) error {
 		TempToken string `json:"tempToken"`
 		TOTPCode  string `json:"totpCode"`
 	}
-	if err := c.Bind(&req); err != nil {
-		auth.WriteHTTPError(c.Response(), auth.HTTPErrInvalidBody)
+	if !bindStepUpJSON(c, &req) {
 		return nil
 	}
 	// Both arguments are the same envelope: this route has no missing-tempToken
@@ -246,13 +260,11 @@ func (ad *Adapter) twoFactorDisable(c echo.Context) error {
 		return nil
 	}
 	// Re-read the user rather than trust the access token: a require2FA flag set
-	// after the token was issued still has to be honoured.
+	// after the token was issued still has to be honoured. A failed re-read falls
+	// through rather than 404ing, matching the reference's optional chaining
+	// (`currentUser?.require2FA`, auth.router.ts:884-885).
 	fresh, err := ad.auth.FindUser(c.Request().Context(), user.ID, "", user.TenantID)
-	if err != nil {
-		auth.WriteHTTPError(c.Response(), auth.HTTPErrUserNotFound)
-		return nil
-	}
-	if fresh.Require2FA {
+	if err == nil && fresh.Require2FA {
 		auth.WriteHTTPError(c.Response(), auth.HTTPErrTwoFactorRequiredForUser)
 		return nil
 	}

@@ -6,10 +6,12 @@ import (
 	"crypto/sha1"
 	"encoding/base32"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,6 +69,43 @@ func (s require2FAUserStore) GetUserByID(ctx context.Context, id, tenantID strin
 		user.Require2FA = true
 	}
 	return user, err
+}
+
+// losableUserStore serves the first `gate` id lookups from the backing store and
+// fails every one after that. It is the only way to reach the /2fa/disable
+// re-read failure over HTTP: the access-token middleware reads the same user by
+// the same id, so a store that simply never had the user refuses the request
+// before the handler runs.
+type losableUserStore struct {
+	*auth.MemoryUserStore
+	mu    sync.Mutex
+	count int
+	gate  int
+	armed bool
+}
+
+// arm resets the counter and starts failing id lookups after gate of them.
+func (s *losableUserStore) arm(gate int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.count, s.gate, s.armed = 0, gate, gate > 0
+}
+
+func (s *losableUserStore) lookups() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count
+}
+
+func (s *losableUserStore) GetUserByID(ctx context.Context, id, tenantID string) (auth.User, error) {
+	s.mu.Lock()
+	s.count++
+	lost := s.armed && s.count > s.gate
+	s.mu.Unlock()
+	if lost {
+		return auth.User{}, errors.New("user not found")
+	}
+	return s.MemoryUserStore.GetUserByID(ctx, id, tenantID)
 }
 
 // totpCode is an independent RFC 6238 implementation. Generating the code with
@@ -301,6 +340,99 @@ func testMagicLink(t *testing.T, mount Mounter) {
 		AssertNoCookie(t, rec, hostAccess)
 		AssertNoCookie(t, rec, hostRefresh)
 	})
+
+	// "Issues nothing" has to mean nothing in the store either. A refusal that
+	// still creates a session hands the link's owner a login they never
+	// performed — visible in their session list and revocable only by them —
+	// which is worse than the 401 suggests. The reference reaches issueTokens
+	// only after the id comparison (auth.router.ts:1150-1154).
+	t.Run("verify in 2fa mode creates no session on a mismatch", func(t *testing.T) {
+		sessions := auth.NewMemorySessionStore()
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithSessionStore(sessions))
+		subject, _ := env.Seed("nosessionsubject@example.com")
+		stranger, _ := env.Seed("nosessionstranger@example.com")
+		before := sessionCount(t, sessions, stranger)
+		token := magicLinkToken(t, env, stranger)
+
+		rec := env.Do(env.Request(http.MethodPost, "/magic-link/verify", map[string]any{
+			"mode":      auth.StepUpMode,
+			"tempToken": tempTokenFor(t, env, subject),
+			"token":     token,
+		}))
+
+		AssertError(t, rec, http.StatusUnauthorized, "Token mismatch", auth.CodeTokenMismatch)
+		if after := sessionCount(t, sessions, stranger); after != before {
+			t.Errorf("the refused request left the link's owner with %d sessions, was %d", after, before)
+		}
+		// The link is still burned, as in the reference: the strategy clears it
+		// before the router compares ids (magic-link.strategy.ts:50).
+		replay := env.Do(env.Request(http.MethodPost, "/magic-link/verify", map[string]any{"token": token}))
+		AssertError(t, replay, http.StatusUnauthorized, "Invalid magic link token", auth.CodeInvalidMagicLink)
+	})
+
+	// The email-verification side effect belongs to the login branch only
+	// (auth.router.ts:1158-1164; the 2fa branch at :1134-1156 has no such call).
+	// A second factor is not a proof of address ownership in the reference's
+	// model, and an emailVerificationMode gate elsewhere reads the flag.
+	t.Run("verify in login mode marks the email verified", func(t *testing.T) {
+		store := auth.NewMemoryUserStore()
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithUserStore(store))
+		user := seedUnverified(t, store, "unverifiedlogin@example.com")
+
+		rec := env.Do(env.Request(http.MethodPost, "/magic-link/verify", map[string]any{
+			"token": magicLinkToken(t, env, user),
+		}))
+
+		AssertStatus(t, rec, http.StatusOK)
+		if !storedUser(t, store, user.ID).IsEmailVerified {
+			t.Error("a login-mode magic link did not verify the address")
+		}
+	})
+
+	t.Run("verify in 2fa mode leaves the email unverified", func(t *testing.T) {
+		store := auth.NewMemoryUserStore()
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithUserStore(store))
+		user := seedUnverified(t, store, "unverifiedstepup@example.com")
+
+		rec := env.Do(env.Request(http.MethodPost, "/magic-link/verify", map[string]any{
+			"mode":      auth.StepUpMode,
+			"tempToken": tempTokenFor(t, env, user),
+			"token":     magicLinkToken(t, env, user),
+		}))
+
+		AssertStatus(t, rec, http.StatusOK)
+		if storedUser(t, store, user.ID).IsEmailVerified {
+			t.Error("the step-up branch verified the address: that side effect is login-mode only")
+		}
+	})
+}
+
+// sessionCount reports how many sessions a user holds. It is the store-side half
+// of "the refusal issued nothing": the wire half (no cookies, no tokens in the
+// body) can pass while a session row exists.
+func sessionCount(t *testing.T, sessions *auth.MemorySessionStore, user auth.User) int {
+	t.Helper()
+	list, err := sessions.ListSessionsForUser(context.Background(), user.ID, user.TenantID)
+	if err != nil {
+		t.Fatalf("list sessions for %s: %v", user.ID, err)
+	}
+	return len(list)
+}
+
+// seedUnverified puts an unverified user straight into the store. Register
+// cannot produce one: the default EmailVerificationMode is "none", which marks
+// every new account verified, and there is no exported option to change it.
+func seedUnverified(t *testing.T, store *auth.MemoryUserStore, email string) auth.User {
+	t.Helper()
+	user, err := store.CreateUser(context.Background(), auth.User{
+		ID: "usr_" + strings.ReplaceAll(strings.Split(email, "@")[0], ".", ""),
+		// No password hash: nothing in these cases logs in.
+		Email: email, TenantID: testTenant, IsEmailVerified: false, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("seed unverified %s: %v", email, err)
+	}
+	return user
 }
 
 // magicLinkToken mints a link through the service. The send route drops the
@@ -558,7 +690,9 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 		if _, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret); err != nil || secret == "" {
 			t.Fatalf("secret = %q, want base32", secret)
 		}
-		want := "otpauth://totp/setup2fa@example.com?algorithm=SHA1&digits=6&issuer=awesome-go-auth&period=30&secret=" + secret
+		// The label is percent-escaped as encodeURIComponent does it, which is what
+		// the reference's otplib emits: the @ is %40.
+		want := "otpauth://totp/setup2fa%40example.com?algorithm=SHA1&digits=6&issuer=awesome-go-auth&period=30&secret=" + secret
 		if body["otpauthUrl"] != want {
 			t.Fatalf("otpauthUrl = %v, want %q", body["otpauthUrl"], want)
 		}
@@ -714,6 +848,29 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 		AssertError(t, rec, http.StatusForbidden, "Cannot disable 2FA: required for your account", auth.CodeTwoFactorRequired)
 	})
 
+	// The reference reads the per-user flag with optional chaining
+	// (`currentUser?.require2FA`, auth.router.ts:884-885), so a user the store no
+	// longer returns is not a 404 — the handler falls through to the disable. Only
+	// reachable if the user disappears between the middleware's lookup and the
+	// handler's re-read, which is what the store double below arranges: the
+	// calibration request measures how many id lookups an authenticated request
+	// costs before the handler runs, so the failure lands on exactly the re-read.
+	t.Run("disable falls through when the re-read loses the user", func(t *testing.T) {
+		store := &losableUserStore{MemoryUserStore: auth.NewMemoryUserStore()}
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithUserStore(store))
+		_, tokens := env.Seed("vanishing@example.com")
+
+		store.arm(0)
+		me := env.Do(bearer(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/me", nil), tokens.AccessToken))
+		AssertStatus(t, me, http.StatusOK)
+		gate := store.lookups()
+
+		store.arm(gate)
+		rec := env.Do(bearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
+		AssertStatus(t, rec, http.StatusOK)
+		AssertKeys(t, Body(t, rec), "success")
+	})
+
 	t.Run("disable refuses under a system-wide policy", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithRequire2FA(true))
 		_, tokens := env.Seed("policy@example.com")
@@ -773,6 +930,68 @@ func enrolTOTP(t *testing.T, env *Env, accessToken string) string {
 // while the step-up branch stops at the missing tempToken. A handler that
 // mistook any of these values for "2fa" answers 400 TEMP_TOKEN_REQUIRED and
 // fails here.
+// testStepUpEmptyBody pins that a request with no body at all is answered as a
+// request whose fields are simply absent, route by route.
+//
+// The reference has no body validation of its own: express.json() leaves
+// req.body as {} when there is nothing to parse, so each route reaches its own
+// per-field check and answers `email is required`, `userId is required`,
+// INVALID_MAGIC_LINK, INVALID_ACCESS_TOKEN. Answering `400 Invalid request body`
+// instead collapses four distinct, actionable failures into one a client cannot
+// route on — and the four adapters did not even agree, because echo's binder
+// tolerates a zero-length body where the other three refused it.
+//
+// Malformed JSON is a different case and is still 400 INVALID_BODY (pinned for
+// /register in testRegister); only emptiness is tolerated. The bodies asserted
+// here are exactly the ones the same route gives for a JSON body that omits the
+// same fields, which is what makes "an empty body means every field omitted"
+// checkable rather than a claim about each route in isolation.
+func testStepUpEmptyBody(t *testing.T, mount Mounter) {
+	cases := []struct {
+		route   string
+		status  int
+		message string
+		code    string
+	}{
+		{route: "/magic-link/send", status: http.StatusBadRequest, message: "email is required"},
+		{route: "/magic-link/verify", status: http.StatusUnauthorized, message: "Invalid magic link token", code: auth.CodeInvalidMagicLink},
+		{route: "/sms/send", status: http.StatusBadRequest, message: "userId or email is required"},
+		{route: "/sms/verify", status: http.StatusBadRequest, message: "userId is required"},
+		// No missing-tempToken branch on this one, by contract: an absent token
+		// fails verification and lands on INVALID_ACCESS_TOKEN.
+		{route: "/2fa/verify", status: http.StatusUnauthorized, message: "Invalid or expired access token", code: auth.CodeInvalidAccessToken},
+	}
+	for _, tc := range cases {
+		t.Run(tc.route, func(t *testing.T) {
+			env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+			// Content-Type is set and the body is empty, which is what a client
+			// sending no payload actually puts on the wire.
+			AssertError(t, env.Do(env.Request(http.MethodPost, tc.route, nil)), tc.status, tc.message, tc.code)
+		})
+	}
+
+	// The one body-reading route behind the access-token middleware. Its answer to
+	// an omitted code is a 400 and an empty body has to reach the same place.
+	t.Run("/2fa/verify-setup", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		_, tokens := env.Seed("emptybodyenrol@example.com")
+		rec := env.Do(bearer(env.Request(http.MethodPost, "/2fa/verify-setup", nil), tokens.AccessToken))
+		AssertError(t, rec, http.StatusBadRequest, "Invalid TOTP code", "")
+	})
+
+	// Malformed JSON is still refused as malformed, on every one of them.
+	t.Run("malformed bodies are still refused", func(t *testing.T) {
+		for _, route := range []string{"/magic-link/send", "/magic-link/verify", "/sms/send", "/sms/verify", "/2fa/verify"} {
+			t.Run(route, func(t *testing.T) {
+				env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+				req := httptest.NewRequest(http.MethodPost, env.Config.Prefix()+route, stringReader("{not json"))
+				req.Header.Set("Content-Type", "application/json")
+				AssertError(t, env.Do(req), http.StatusBadRequest, "Invalid request body", auth.CodeInvalidBody)
+			})
+		}
+	})
+}
+
 func testStepUpModeDefault(t *testing.T, mount Mounter) {
 	loginModes := []struct {
 		name string

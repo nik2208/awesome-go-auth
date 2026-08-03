@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -87,6 +88,32 @@ var (
 	HTTPErrTwoFactorRequiredForUser  = HTTPError{Status: http.StatusForbidden, Message: "Cannot disable 2FA: required for your account", Code: CodeTwoFactorRequired}
 	HTTPErrTwoFactorRequiredByPolicy = HTTPError{Status: http.StatusForbidden, Message: "Cannot disable 2FA: required by system policy", Code: CodeTwoFactorRequired}
 )
+
+// ErrMagicLinkOwnerMismatch is a valid magic link presented as a second factor
+// for somebody else: the link verified, but it does not belong to the user the
+// step-up token names. It is a distinct sentinel rather than ErrInvalidToken
+// because the wire answer differs (TOKEN_MISMATCH, not INVALID_MAGIC_LINK) and
+// because the two failures mean different things — one is a bad link, the other
+// is a good link on the wrong account.
+var ErrMagicLinkOwnerMismatch = errors.New("auth: magic link belongs to another user")
+
+// VerifyMagicLinkForUser consumes a magic link that must belong to userID, the
+// step-up case: the caller has already identified the user through a step-up
+// token and the link is only the second factor.
+//
+// It exists because the identity check has to happen before a session is
+// created. Service.VerifyMagicLink issues one as part of verifying, so a caller
+// that compared the ids afterwards would refuse the request on the wire and
+// still leave a live session for the link's owner — a session that shows up in
+// GET /sessions and that only the owner can revoke. A mismatch here returns
+// ErrMagicLinkOwnerMismatch and issues nothing.
+//
+// The link is consumed even on a mismatch, matching the reference, which burns
+// it in the strategy before the router compares ids
+// (magic-link.strategy.ts:50 versus auth.router.ts:1150-1152).
+func (s *Service) VerifyMagicLinkForUser(ctx context.Context, in MagicLinkVerifyInput, userID string) (User, AuthTokens, error) {
+	return s.verifyMagicLink(ctx, in, userID)
+}
 
 // tokenTypeTemp marks the step-up token.
 //
@@ -177,16 +204,46 @@ func totpProvisioningURI(secret, account, issuer string) string {
 	params.Set("issuer", issuer)
 	params.Set("period", "30")
 	params.Set("secret", secret)
-	return "otpauth://totp/" + url.PathEscape(account) + "?" + params.Encode()
+	return "otpauth://totp/" + escapeURIComponent(account) + "?" + params.Encode()
 }
 
-// MagicLinkVerifyHTTPError maps a Service.VerifyMagicLink failure. See
-// HTTPErrInvalidMagicLink for why the expiry code does not appear.
-func MagicLinkVerifyHTTPError(err error) HTTPError {
-	if errors.Is(err, ErrInvalidToken) {
-		return HTTPErrInvalidMagicLink
+// escapeURIComponent escapes a label the way the reference's otplib does, which
+// is JavaScript's encodeURIComponent: everything but the unreserved set and
+// !'()*~ is percent-encoded, so an account label of an email address carries
+// %40 rather than a bare @.
+//
+// url.PathEscape is the near-miss it replaces: it leaves @ (and :) alone
+// because both are legal in a path segment. Authenticator apps accept either
+// spelling, so this only matters for a client comparing the URI byte for byte —
+// but the reference's spelling is the one three clients have seen.
+func escapeURIComponent(s string) string {
+	const unreserved = "-_.!~*'()"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			strings.IndexByte(unreserved, c) >= 0:
+			b.WriteByte(c)
+		default:
+			b.WriteString(fmt.Sprintf("%%%02X", c))
+		}
 	}
-	return HTTPErrorFor(err)
+	return b.String()
+}
+
+// MagicLinkVerifyHTTPError maps a Service.VerifyMagicLink or
+// Service.VerifyMagicLinkForUser failure. See HTTPErrInvalidMagicLink for why
+// the expiry code does not appear.
+func MagicLinkVerifyHTTPError(err error) HTTPError {
+	switch {
+	case errors.Is(err, ErrMagicLinkOwnerMismatch):
+		return HTTPErrTokenMismatch
+	case errors.Is(err, ErrInvalidToken):
+		return HTTPErrInvalidMagicLink
+	default:
+		return HTTPErrorFor(err)
+	}
 }
 
 // SMSVerifyHTTPError maps a Service.VerifySMSCode failure.
@@ -277,6 +334,13 @@ func (a *Auth) SendMagicLink(ctx context.Context, in MagicLinkSendInput) (string
 // VerifyMagicLink delegates to Service.VerifyMagicLink.
 func (a *Auth) VerifyMagicLink(ctx context.Context, in MagicLinkVerifyInput) (User, AuthTokens, error) {
 	return a.service.VerifyMagicLink(ctx, in)
+}
+
+// VerifyMagicLinkForUser delegates to Service.VerifyMagicLinkForUser. The
+// step-up branch of POST /magic-link/verify uses it so that a link belonging to
+// another user is refused before a session exists.
+func (a *Auth) VerifyMagicLinkForUser(ctx context.Context, in MagicLinkVerifyInput, userID string) (User, AuthTokens, error) {
+	return a.service.VerifyMagicLinkForUser(ctx, in, userID)
 }
 
 // SendSMSCode delegates to Service.SendSMSCode.

@@ -1,6 +1,9 @@
 package nethttp
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -18,6 +21,30 @@ import (
 // transport is out of scope here and must not be improvised: a handler that
 // returned the credential in the response body would turn a second factor into
 // no factor at all.
+
+// decodeStepUpJSON decodes a request body and treats an absent one as a body
+// with every field omitted, which is what the reference does: express.json()
+// leaves req.body as {} when there is nothing to parse, and each route then
+// answers for the field it was missing — `email is required` on
+// /magic-link/send, INVALID_MAGIC_LINK on /magic-link/verify,
+// INVALID_ACCESS_TOKEN on /2fa/verify. Answering INVALID_BODY instead replaces
+// all of those with one status a client cannot act on.
+//
+// Malformed JSON is still 400 INVALID_BODY; only emptiness is tolerated.
+func decodeStepUpJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if r.Body == nil {
+		return true
+	}
+	defer r.Body.Close()
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return true
+		}
+		auth.WriteHTTPError(w, auth.HTTPErrInvalidBody)
+		return false
+	}
+	return true
+}
 
 type magicLinkSendRequest struct {
 	Email     string `json:"email"`
@@ -67,7 +94,7 @@ type twoFactorVerifyRequest struct {
 // MagicLinkSend handles POST <prefix>/magic-link/send.
 func (a *Adapter) MagicLinkSend(w http.ResponseWriter, r *http.Request) {
 	var req magicLinkSendRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeStepUpJSON(w, r, &req) {
 		return
 	}
 	email, tenantID := req.Email, req.TenantID
@@ -102,29 +129,29 @@ func (a *Adapter) MagicLinkSend(w http.ResponseWriter, r *http.Request) {
 // MagicLinkVerify handles POST <prefix>/magic-link/verify.
 func (a *Adapter) MagicLinkVerify(w http.ResponseWriter, r *http.Request) {
 	var req magicLinkVerifyRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeStepUpJSON(w, r, &req) {
 		return
 	}
-	var subject auth.TempTokenSubject
-	stepUp := auth.TwoFactorMode(req.Mode)
-	if stepUp {
-		resolved, herr, ok := a.auth.StepUpSubject(req.TempToken, auth.HTTPErrTempTokenRequired, auth.HTTPErrInvalidTempToken)
+	in := auth.MagicLinkVerifyInput{Token: req.Token}
+	var tokens auth.AuthTokens
+	var err error
+	if auth.TwoFactorMode(req.Mode) {
+		subject, herr, ok := a.auth.StepUpSubject(req.TempToken, auth.HTTPErrTempTokenRequired, auth.HTTPErrInvalidTempToken)
 		if !ok {
 			auth.WriteHTTPError(w, herr)
 			return
 		}
-		subject = resolved
+		// The identity check is the service's, not the handler's, so that a link
+		// belonging to somebody else is refused before a session exists. Comparing
+		// ids here — after VerifyMagicLink returned — would answer 401 on the wire
+		// and still leave the link's owner with a session they never asked for. The
+		// link is consumed either way, as in the reference.
+		_, tokens, err = a.auth.VerifyMagicLinkForUser(r.Context(), in, subject.UserID)
+	} else {
+		_, tokens, err = a.auth.VerifyMagicLink(r.Context(), in)
 	}
-	user, tokens, err := a.auth.VerifyMagicLink(r.Context(), auth.MagicLinkVerifyInput{Token: req.Token})
 	if err != nil {
 		auth.WriteHTTPError(w, auth.MagicLinkVerifyHTTPError(err))
-		return
-	}
-	if stepUp && user.ID != subject.UserID {
-		// The link was valid but belongs to somebody else. The reference burns
-		// the magic-link token before it makes this comparison, and so does the
-		// service call above, so a mismatch costs the link either way.
-		auth.WriteHTTPError(w, auth.HTTPErrTokenMismatch)
 		return
 	}
 	a.cfg.WriteTokens(w, r, http.StatusOK, tokens, nil)
@@ -133,7 +160,7 @@ func (a *Adapter) MagicLinkVerify(w http.ResponseWriter, r *http.Request) {
 // SMSSend handles POST <prefix>/sms/send.
 func (a *Adapter) SMSSend(w http.ResponseWriter, r *http.Request) {
 	var req smsSendRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeStepUpJSON(w, r, &req) {
 		return
 	}
 	userID, tenantID := strings.TrimSpace(req.UserID), req.TenantID
@@ -179,7 +206,7 @@ func (a *Adapter) SMSSend(w http.ResponseWriter, r *http.Request) {
 // SMSVerify handles POST <prefix>/sms/verify.
 func (a *Adapter) SMSVerify(w http.ResponseWriter, r *http.Request) {
 	var req smsVerifyRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeStepUpJSON(w, r, &req) {
 		return
 	}
 	userID, tenantID := strings.TrimSpace(req.UserID), req.TenantID
@@ -227,7 +254,7 @@ func (a *Adapter) TwoFactorVerifySetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req twoFactorSetupRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeStepUpJSON(w, r, &req) {
 		return
 	}
 	if err := a.auth.VerifyTOTPSetup(r.Context(), user.ID, user.TenantID, req.Secret, req.Token); err != nil {
@@ -241,7 +268,7 @@ func (a *Adapter) TwoFactorVerifySetup(w http.ResponseWriter, r *http.Request) {
 // a tempToken into a session.
 func (a *Adapter) TwoFactorVerify(w http.ResponseWriter, r *http.Request) {
 	var req twoFactorVerifyRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeStepUpJSON(w, r, &req) {
 		return
 	}
 	// Both arguments are the same envelope: this route has no missing-tempToken
@@ -269,12 +296,15 @@ func (a *Adapter) TwoFactorDisable(w http.ResponseWriter, r *http.Request) {
 	}
 	// Re-read the user rather than trust the access token: a require2FA flag
 	// set after the token was issued still has to be honoured.
+	//
+	// A failed re-read is not an error here. The reference reads the user with
+	// optional chaining (`currentUser?.require2FA`, auth.router.ts:884-885), so a
+	// token whose user the store no longer has falls through to the disable
+	// instead of 404ing — and the disable itself then reports whatever the store
+	// says. Reachable only if the user vanishes between the middleware's lookup
+	// and this one, but a 404 here would be the port inventing a status.
 	fresh, err := a.auth.FindUser(r.Context(), user.ID, "", user.TenantID)
-	if err != nil {
-		auth.WriteHTTPError(w, auth.HTTPErrUserNotFound)
-		return
-	}
-	if fresh.Require2FA {
+	if err == nil && fresh.Require2FA {
 		auth.WriteHTTPError(w, auth.HTTPErrTwoFactorRequiredForUser)
 		return
 	}
