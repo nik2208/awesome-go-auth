@@ -78,7 +78,10 @@ func TestStepUpErrorMapping(t *testing.T) {
 		{"magic link invalid", MagicLinkVerifyHTTPError(ErrInvalidToken), HTTPErrInvalidMagicLink},
 		{"magic link store missing", MagicLinkVerifyHTTPError(ErrFeatureNotSupported), HTTPErrNotImplemented},
 		{"sms wrong code", SMSVerifyHTTPError(ErrInvalidCode), HTTPErrInvalidSMSCode},
-		{"sms unknown user", SMSVerifyHTTPError(ErrInvalidCredentials), HTTPErrUserNotFound},
+		// An unknown user is a bad credential here, not a 404: the reference
+		// resolves the user inside the strategy, where a miss and a wrong code are
+		// the same `return false` (sms.strategy.ts:24-25 -> auth.router.ts:1277).
+		{"sms unknown user", SMSVerifyHTTPError(ErrInvalidCredentials), HTTPErrInvalidSMSCode},
 		{"totp wrong code", TOTPVerifyHTTPError(ErrInvalidCode), HTTPErrInvalidTOTPCode},
 		{"totp not enrolled", TOTPVerifyHTTPError(ErrInvalidCredentials), HTTPErrTOTPNotSetUp},
 		{"totp setup wrong code", TOTPSetupHTTPError(ErrInvalidCode), HTTPErrInvalidTOTPSetupCode},

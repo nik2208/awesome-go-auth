@@ -464,6 +464,29 @@ func testSMSOTP(t *testing.T, mount Mounter) {
 		AssertError(t, rec, http.StatusUnauthorized, "Invalid or expired SMS code", "")
 	})
 
+	// An id nobody has is a credential failure, not a 404. The reference resolves
+	// the user inside the strategy, where an unknown id and a wrong code are the
+	// same `return false` (sms.strategy.ts:24-25 -> auth.router.ts:1277); its 404
+	// sits after that check and only fires if the user vanished mid-request. A 404
+	// here would also make this unauthenticated route a user-existence oracle.
+	t.Run("verify with an unknown id", func(t *testing.T) {
+		env, _ := newPhoneEnv(t, mount)
+		rec := env.Do(env.Request(http.MethodPost, "/sms/verify", map[string]any{
+			"userId": "usr_nobody", "code": "123456", "tenantId": testTenant,
+		}))
+		AssertError(t, rec, http.StatusUnauthorized, "Invalid or expired SMS code", "")
+	})
+
+	// Same in the step-up branch: the tempToken names a user the store lost.
+	t.Run("verify in 2fa mode for a user the store lost", func(t *testing.T) {
+		env, _ := newPhoneEnv(t, mount)
+		token := tempTokenFor(t, env, auth.User{ID: "usr_nobody", TenantID: testTenant, Email: "gone@example.com"})
+		rec := env.Do(env.Request(http.MethodPost, "/sms/verify", map[string]any{
+			"mode": auth.StepUpMode, "tempToken": token, "code": "123456",
+		}))
+		AssertError(t, rec, http.StatusUnauthorized, "Invalid or expired SMS code", "")
+	})
+
 	t.Run("verify without an id", func(t *testing.T) {
 		env, _ := newPhoneEnv(t, mount)
 		rec := env.Do(env.Request(http.MethodPost, "/sms/verify", map[string]any{"code": "123456"}))

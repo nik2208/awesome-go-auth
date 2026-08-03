@@ -189,15 +189,24 @@ func MagicLinkVerifyHTTPError(err error) HTTPError {
 	return HTTPErrorFor(err)
 }
 
-// SMSVerifyHTTPError maps a Service.VerifySMSCode failure. ErrInvalidCredentials
-// means the userId or tempToken named a user the store does not have, which the
-// reference reports as a 404 rather than as a credential failure.
+// SMSVerifyHTTPError maps a Service.VerifySMSCode failure.
+//
+// ErrInvalidCredentials means the userId or tempToken named a user the store
+// does not have, and that is 401 "Invalid or expired SMS code", not 404.
+// The reference looks the user up inside the strategy, where a miss is
+// indistinguishable from a bad code: sms.strategy.ts:24-25 returns false for an
+// unknown id, and the router turns false into
+// 401 {"error":"Invalid or expired SMS code"} (auth.router.ts:1275-1279). Its
+// 404 (:1281-1284) sits *after* that check and only fires if the user vanished
+// between the verify and the follow-up findById — a race this port cannot
+// reproduce, because Service.VerifySMSCode does both in one call. Answering 404
+// here would both change the status a client sees for a stale userId and turn an
+// unauthenticated route into a user-existence oracle the reference does not
+// have.
 func SMSVerifyHTTPError(err error) HTTPError {
 	switch {
-	case errors.Is(err, ErrInvalidCode):
+	case errors.Is(err, ErrInvalidCode), errors.Is(err, ErrInvalidCredentials):
 		return HTTPErrInvalidSMSCode
-	case errors.Is(err, ErrInvalidCredentials):
-		return HTTPErrUserNotFound
 	default:
 		return HTTPErrorFor(err)
 	}
