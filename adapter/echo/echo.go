@@ -83,6 +83,7 @@ func (ad *Adapter) Mount(group *echo.Group) {
 	group.POST(prefix+"/refresh", ad.guard(ad.refresh))
 	group.POST(prefix+"/logout", ad.guard(ad.logout))
 	group.GET(prefix+"/me", ad.guard(ad.Middleware()(ad.me)))
+	ad.mountPasswordEmail(group, prefix)
 }
 
 // guard runs the shared CSRF middleware in front of an Echo handler. Reusing

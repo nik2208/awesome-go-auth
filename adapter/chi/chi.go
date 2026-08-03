@@ -30,4 +30,13 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/refresh", h.Refresh)
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/logout", h.Logout)
 	r.With(csrf, h.Middleware()).MethodFunc(http.MethodGet, prefix+"/me", h.Me)
+
+	// Password management and email verification (wire-contract §2).
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/forgot-password", h.ForgotPassword)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/reset-password", h.ResetPassword)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodPost, prefix+"/change-password", h.ChangePassword)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodPost, prefix+"/send-verification-email", h.SendVerificationEmail)
+	r.With(csrf).MethodFunc(http.MethodGet, prefix+"/verify-email", h.VerifyEmail)
+	r.With(csrf, h.Middleware()).MethodFunc(http.MethodPost, prefix+"/change-email/request", h.ChangeEmailRequest)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/change-email/confirm", h.ChangeEmailConfirm)
 }
