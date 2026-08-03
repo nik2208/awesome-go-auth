@@ -78,6 +78,13 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 	mux.Handle("POST "+prefix+"/refresh", a.guard(http.HandlerFunc(a.Refresh)))
 	mux.Handle("POST "+prefix+"/logout", a.guard(http.HandlerFunc(a.Logout)))
 	mux.Handle("GET "+prefix+"/me", a.guard(a.Middleware()(http.HandlerFunc(a.Me))))
+	// OAuth and account linking; handlers in oauth.go.
+	mux.Handle("GET "+prefix+"/oauth/{provider}", a.OAuthAuthorizeHandler())
+	mux.Handle("GET "+prefix+"/oauth/{provider}/callback", a.OAuthCallbackHandler())
+	mux.Handle("GET "+prefix+"/linked-accounts", a.LinkedAccountsHandler())
+	mux.Handle("DELETE "+prefix+"/linked-accounts/{provider}/{providerAccountId}", a.UnlinkAccountHandler())
+	mux.Handle("POST "+prefix+"/link-request", a.LinkRequestHandler())
+	mux.Handle("POST "+prefix+"/link-verify", a.LinkVerifyHandler())
 }
 
 // guard wraps a mounted route in the CSRF middleware, which also distributes
