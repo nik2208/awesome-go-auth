@@ -336,9 +336,18 @@ func resolveSiteURL(origin, referer string, allowed []string, siteURL string) st
 // state's origin when the allowlist permits it (an empty allowlist permits
 // everything), append the return path with base-path de-duplication, and fall
 // back to the configured site URL.
+//
+// The return path is honoured ONLY in the accepted-origin branch. The reference
+// appends `p` inside `if (fromState && allowed)` and returns
+// getDefaultSiteUrl(config) bare otherwise (auth.router.ts:325-351), so a state
+// whose origin was rejected contributes nothing at all to the redirect — not the
+// origin and not the path. `p` comes straight from the caller's `return_path`
+// query param, so appending it to the fallback would let an initiator inject a
+// path into a redirect the allowlist had already refused to trust.
 func resolveOAuthRedirect(state oauthState, allowed []string, siteURL string) string {
 	origin := strings.TrimSpace(state.O)
-	if origin == "" || !originAllowed(origin, allowed) {
+	accepted := origin != "" && originAllowed(origin, allowed)
+	if !accepted {
 		origin = siteURL
 	}
 	if origin == "" {
@@ -346,7 +355,7 @@ func resolveOAuthRedirect(state oauthState, allowed []string, siteURL string) st
 	}
 	origin = strings.TrimSuffix(origin, "/")
 	path := strings.TrimSpace(state.P)
-	if path == "" {
+	if path == "" || !accepted {
 		return origin
 	}
 	path = "/" + strings.TrimPrefix(path, "/")

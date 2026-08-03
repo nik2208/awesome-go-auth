@@ -334,6 +334,26 @@ func testOAuthCallback(t *testing.T, mount Mounter) {
 		}
 	})
 
+	// The reference appends the state's `p` only inside the accepted-origin
+	// branch and returns getDefaultSiteUrl(config) bare otherwise
+	// (auth.router.ts:325-351). `p` is the caller's own return_path query param,
+	// so a rejected origin must contribute nothing to the redirect. Here SiteURL
+	// is deliberately outside the allowlist, which is the configuration the
+	// reference cannot express because it derives its allowlist from
+	// config.email.siteUrl.
+	t.Run("a rejected state origin drops the return path too", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{"https://other.example"}})
+		location := f.begin(t, "?return_path=/dashboard", nil)
+		if payload := decodeStatePayload(t, location.Query().Get("state")); payload["p"] != "/dashboard" {
+			t.Fatalf("state return path = %v, want %q", payload["p"], "/dashboard")
+		}
+		rec := f.callback(t, "c", location.Query().Get("state"))
+		AssertStatus(t, rec, http.StatusFound)
+		if got := rec.Header().Get("Location"); got != fixtureSiteURL {
+			t.Fatalf("Location = %q, want the bare site url %q", got, fixtureSiteURL)
+		}
+	})
+
 	t.Run("the callback links the provider account to the resolved user", func(t *testing.T) {
 		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}})
 		location := f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
