@@ -82,6 +82,13 @@ func TestCSRFEnforcementMatrixExhaustive(t *testing.T) {
 				for _, st := range strategies {
 					for _, m := range methods {
 						cookieAuthenticated := ac.cookie != ""
+						// `az.header == ""` applies to the manual-check route too, which is
+						// a deliberate deviation from the reference rather than a property
+						// of it: auth.router.ts:1489 has no usingBearer term, so the
+						// reference would refuse a bearer POST /link-request with no pair.
+						// Stated on its own in
+						// TestCSRFManualCheckRouteExemptsARealBearerCredential, because a
+						// term hidden inside a cross-product is not a documented decision.
 						enforced := m.unsafe && rt.mounted && !rt.exempt && az.header == "" &&
 							(cookieAuthenticated || rt.manual)
 						want := http.StatusOK
@@ -189,6 +196,142 @@ func TestCSRFManualCheckRouteIsEnforcedWithoutAnyCredential(t *testing.T) {
 				t.Errorf("POST %s with a matching pair = %d, want 200: %s", path, ok.Code, ok.Body.String())
 			}
 		})
+	}
+}
+
+// TestCSRFManualCheckRouteExemptsARealBearerCredential pins the one condition the
+// manual-check carve-out does NOT make unconditional, and the fact that it is a
+// deviation rather than a transcription.
+//
+// The reference gates its hand-written check on `config.csrf.enabled` alone
+// (auth.router.ts:1489), with no `usingBearer` term, so it would answer 403
+// CSRF_INVALID here. This port exempts a real bearer credential on /link-request as
+// it does on every other route. That is safe — Authorization is not CORS-safelisted,
+// so a cross-site page cannot set it and has no token to set it to — and it is the
+// direction the family contract asks for: wire-contract.md records the reference's
+// behaviour as a MISMATCH that breaks native bearer clients, and as [UNTESTED]
+// upstream.
+//
+// Both halves are asserted, because the exemption is only defensible while it is
+// keyed on a credential the attacker cannot supply: a *declared* strategy must not
+// buy it. That is the #26 property this route must not quietly lose.
+func TestCSRFManualCheckRouteExemptsARealBearerCredential(t *testing.T) {
+	for _, path := range []string{"/auth/link-request", "/api/auth/link-request"} {
+		t.Run(path, func(t *testing.T) {
+			// A real bearer credential and no double-submit pair: exempt here,
+			// refused by the reference. Deliberate — see the doc comment.
+			bearer := httptest.NewRequest(http.MethodPost, path, nil)
+			bearer.Header.Set("Authorization", "Bearer abc")
+			rec := httptest.NewRecorder()
+			csrfHandler(insecureHTTPConfig()).ServeHTTP(rec, bearer)
+			if rec.Code != http.StatusOK {
+				t.Errorf("POST %s with a real bearer credential = %d, want 200 (deliberate deviation): %s",
+					path, rec.Code, rec.Body.String())
+			}
+
+			// The declared strategy header is not a credential and must buy nothing,
+			// with or without an unmirrored CSRF cookie. If this ever passed, the
+			// exemption above would be reachable by a plain cross-site form post.
+			for _, withCookie := range []bool{false, true} {
+				declared := httptest.NewRequest(http.MethodPost, path, nil)
+				declared.Header.Set(AuthStrategyHeader, AuthStrategyBearer)
+				if withCookie {
+					declared.AddCookie(&http.Cookie{Name: "csrf-token", Value: "tok"})
+				}
+				got := httptest.NewRecorder()
+				csrfHandler(insecureHTTPConfig()).ServeHTTP(got, declared)
+				if got.Code != http.StatusForbidden {
+					t.Errorf("POST %s with a declared bearer strategy (csrf cookie=%v) = %d, want 403",
+						path, withCookie, got.Code)
+				}
+			}
+
+			// An empty Authorization header is not a credential either.
+			empty := httptest.NewRequest(http.MethodPost, path, nil)
+			empty.Header.Set("Authorization", "Bearer ")
+			blank := httptest.NewRecorder()
+			csrfHandler(insecureHTTPConfig()).ServeHTTP(blank, empty)
+			if blank.Code != http.StatusForbidden {
+				t.Errorf("POST %s with an empty bearer token = %d, want 403", path, blank.Code)
+			}
+		})
+	}
+}
+
+// TestCSRFManualCheckSurvivesAPrefixCollidingBasePath is the regression test for a
+// hole the cookie-scoping opened and this file's earlier revisions did not reach.
+//
+// The middleware is told the mount prefix, never the base path a host mounted it
+// under, so it finds the prefix by searching the served path. When the base ends in
+// the same segment as the prefix — a group based at /auth with the default /auth
+// prefix, which is the most obvious way to write it — the served path is
+// /auth/auth/<route> and the leftmost occurrence resolves to "/auth/<route>". That
+// string is in neither table, so before this fix POST /auth/auth/link-request fell
+// through to the cookie test, carried no cookie, and was not enforced: a pure
+// cross-site forgery reached the handler and performed the write. Pinned end to end
+// in the wiretest suite as well.
+//
+// The pre-narrowing code enforced this path by accident — an unrecognised route was
+// simply "not exempt", so it was checked. Scoping to cookie authentication turned
+// that accident into a hole, which is why the check now reads every resolution.
+func TestCSRFManualCheckSurvivesAPrefixCollidingBasePath(t *testing.T) {
+	// Every candidate resolution is offered, leftmost first.
+	rels, mounted := csrfRelativePaths("/auth/auth/link-request", "/auth")
+	if !mounted || len(rels) != 2 || rels[0] != "/auth/link-request" || rels[1] != "/link-request" {
+		t.Fatalf("csrfRelativePaths = %q,%v; want [/auth/link-request /link-request],true", rels, mounted)
+	}
+
+	// The forgery is refused under a colliding base, a non-colliding base and no
+	// base at all.
+	for _, path := range []string{
+		"/auth/link-request",
+		"/api/auth/link-request",
+		"/auth/auth/link-request",
+		"/auth/auth/auth/link-request",
+	} {
+		t.Run(path, func(t *testing.T) {
+			bare := httptest.NewRequest(http.MethodPost, path, nil)
+			rec := httptest.NewRecorder()
+			csrfHandler(insecureHTTPConfig()).ServeHTTP(rec, bare)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("POST %s with zero credentials = %d, want 403", path, rec.Code)
+			}
+			// And it still passes for a caller that can read the cookie, so the fix
+			// widened enforcement without breaking the legitimate client.
+			ok := httptest.NewRequest(http.MethodPost, path, nil)
+			ok.AddCookie(&http.Cookie{Name: "csrf-token", Value: "tok"})
+			ok.Header.Set(CSRFHeaderName, "tok")
+			good := httptest.NewRecorder()
+			csrfHandler(insecureHTTPConfig()).ServeHTTP(good, ok)
+			if good.Code != http.StatusOK {
+				t.Errorf("POST %s with a matching pair = %d, want 200: %s", path, good.Code, good.Body.String())
+			}
+		})
+	}
+}
+
+// TestCSRFExemptionIsNotReadFromALaterPrefixOccurrence is the other half of the fix
+// above, and the reason enforcement and exemption read the candidate list from
+// opposite ends.
+//
+// Path parameters are part of the path, so an attacker picks some of its segments.
+// DELETE <prefix>/linked-accounts/auth/login resolves at its second occurrence to
+// "/login", which is exempt. Honouring a later occurrence for *exemptions* would
+// therefore let any cookie-authenticated protected route be unprotected by naming
+// a provider "auth". Only the mount the middleware was configured with may exempt.
+func TestCSRFExemptionIsNotReadFromALaterPrefixOccurrence(t *testing.T) {
+	rels, mounted := csrfRelativePaths("/auth/linked-accounts/auth/login", "/auth")
+	if !mounted || len(rels) != 2 || rels[1] != "/login" {
+		t.Fatalf("csrfRelativePaths = %q,%v; want a second resolution of /login", rels, mounted)
+	}
+	// A cookie-authenticated DELETE with no mirrored header must still be refused,
+	// even though one resolution of its path names an exempt route.
+	if got := csrfDrive(t, http.MethodDelete, "/auth/linked-accounts/auth/login", hostCookiePrefix+AccessTokenCookieName); got != http.StatusForbidden {
+		t.Errorf("DELETE /auth/linked-accounts/auth/login = %d, want 403: an exempt entry was read from a later prefix occurrence", got)
+	}
+	// The genuinely exempt route, at the configured mount, is still exempt.
+	if got := csrfDrive(t, http.MethodPost, "/auth/login", hostCookiePrefix+AccessTokenCookieName); got != http.StatusOK {
+		t.Errorf("POST /auth/login = %d, want 200: the real exemption was lost", got)
 	}
 }
 

@@ -83,6 +83,34 @@ every later route builds on.
   reference's hand-written check (`auth.router.ts:1489-1495`). Without that carve-out
   a pure cross-site form post — no cookies, no `Authorization`, no headers —
   would reach the handler and overwrite an in-flight account-link token.
+  One term of that route's reference check is **deliberately not reproduced**: the
+  reference gates its manual check on `config.csrf.enabled` alone
+  (`auth.router.ts:1489`), with no bearer exemption, so it refuses a
+  bearer-authenticated `POST /auth/link-request` that carries no double-submit
+  pair; this port exempts a real `Authorization: Bearer` credential there as it
+  does everywhere else. `Authorization` is not CORS-safelisted, so no cross-site
+  page can set it — the exemption costs no CSRF protection — and the family
+  contract records the reference's behaviour as a mismatch that breaks native
+  bearer clients. A client that sends the pair is accepted by both.
+
+  The carve-out is matched against **every** reading of where the mount prefix
+  sits in the request path, not just the leftmost. The middleware is told the
+  prefix but never the base a host mounted it under, so it has to search for it —
+  and the search is ambiguous when the base ends in the same segment as the prefix.
+  A host that groups its API under `/auth` and keeps the default `/auth` prefix
+  serves `/auth/auth/link-request`, which resolves at the leftmost occurrence to
+  `/auth/link-request`: in neither route table, so it fell through to the
+  cookie test, and a forgery carries no cookie. That combination left
+  `POST /link-request` unenforced under a supported mount shape — a cross-site form
+  post reached the handler, wrote the account-link token and mailed the address.
+  Exemptions are still read from the leftmost occurrence only: path parameters are
+  part of the path, so honouring a later one would let
+  `DELETE /auth/linked-accounts/auth/login` borrow `/login`'s exemption. The
+  remaining cost of a colliding base is over-enforcement, not under-enforcement —
+  such a deployment also fails to recognise its own exempt routes, so a browser that
+  still holds an access cookie is CSRF-checked on `POST /login`. That is
+  pre-existing and fail-closed; giving the middleware the base path is the real fix
+  and is an API change.
 - **BREAKING — gin and echo now agree with net/http on cookie attributes.** Gin
   used to give the refresh cookie an arbitrary lifetime of ten times the access
   token's; both now write through the same serialiser, so the four adapters emit

@@ -126,6 +126,33 @@ var csrfExemptRoutes = map[csrfExemption]bool{
 // manual check of its own, and decodeJSON never inspects Content-Type, so an
 // auto-submitting <form enctype="text/plain"> is enough. That overwrites any
 // in-flight account-link token and mails the victim's address.
+//
+// [DEVIATION] One term of the reference's manual check is deliberately not
+// reproduced: the bearer exemption. auth.router.ts:1489 gates the hand-written
+// check on `config.csrf.enabled` alone, with no `usingBearer` term — unlike
+// auth.middleware.ts:35 — so the reference answers 403 CSRF_INVALID to a
+// bearer-authenticated POST /link-request that carries no double-submit pair.
+// This port exempts a real bearer credential here as it does everywhere else, so
+// that request succeeds. The divergence is:
+//
+//   - not a CSRF weakening. A cross-site page cannot set Authorization: the
+//     header is not CORS-safelisted, so it costs a preflight the target must
+//     approve, and the attacker has no token to put in it. Every request this
+//     exempts is one the attacker could not have forged.
+//   - the client-friendly direction, and the reference's own defect. The family
+//     contract records it as a MISMATCH against the reference and notes it is
+//     [UNTESTED] there: a native bearer client with no cookie jar "will fail this
+//     check whenever CSRF is enabled server-side"
+//     (docs/spec/wire-contract.md §4, POST /link-request, and mismatch summary
+//     item 2). Reproducing it would break exactly those clients.
+//   - invisible to a conforming client. A caller that sends the pair, as the
+//     reference requires, is accepted by both.
+//
+// It predates csrfManualCheckRoutes — CSRFMiddleware has always short-circuited on
+// usingBearerCredential — but this table is what makes the route's enforcement
+// unconditional in every *other* respect, so the one remaining condition belongs
+// here in writing. Pinned by TestCSRFManualCheckRouteExemptsARealBearerCredential;
+// flipping it is a one-line change in CSRFMiddleware, not a table edit.
 var csrfManualCheckRoutes = map[csrfExemption]bool{
 	{http.MethodPost, "/link-request"}: true,
 }
@@ -229,21 +256,47 @@ func usingBearerCredential(r *http.Request) bool {
 // That scoping is safe only because the auth gate is the second line of defence
 // for every route below. It is not, for the one route that has no auth gate at
 // all, which is why csrfManualCheckRoutes is consulted before the cookie test —
-// see the comment on that table.
+// see the comment on that table — and why it is consulted against every reading of
+// the mount prefix rather than only the leftmost. Where the mount sits is ambiguous
+// when a host's base path ends in the same segment as the prefix, and the cookie
+// test turns a missed resolution into an unenforced route rather than a noisy
+// failure.
 func csrfEnforced(r *http.Request, prefix string) bool {
 	if !isMutatingMethod(r.Method) {
 		return false
 	}
-	rel, mounted := csrfRelativePath(r.URL.Path, prefix)
+	rels, mounted := csrfRelativePaths(r.URL.Path, prefix)
 	if !mounted {
 		return false
 	}
-	route := csrfExemption{method: r.Method, path: rel}
-	if csrfExemptRoutes[route] {
-		return false
+	// A manual-check route is enforced under *any* reading of where the mount
+	// prefix sits, because the prefix can legitimately occur more than once in a
+	// served path and only the host knows which occurrence is the real mount. A
+	// host that groups its API under /auth and keeps the default /auth prefix
+	// serves /auth/auth/link-request; resolving that at the first occurrence gives
+	// "/auth/link-request", which is in neither table, so the route would fall
+	// through to the cookie test below and — carrying no cookie, as a forgery does
+	// not — go unenforced. That is the demonstrated hole, reopened by a mount
+	// shape this package advertises as supported.
+	//
+	// Widening enforcement is always safe here: the worst case is checking a
+	// request the reference would not have, which costs a legitimate client a
+	// retry with the header it should already be sending.
+	for _, rel := range rels {
+		if csrfManualCheckRoutes[csrfExemption{method: r.Method, path: rel}] {
+			return true
+		}
 	}
-	if csrfManualCheckRoutes[route] {
-		return true
+	// Exemption, by contrast, is decided by the first (leftmost) resolution alone,
+	// and deliberately not by any later one. A later occurrence can be attacker
+	// chosen: path parameters are part of the path, so
+	// DELETE <prefix>/linked-accounts/auth/login resolves at its second occurrence
+	// to "/login" — an exempt entry — and honouring that would let any
+	// cookie-authenticated protected route be unprotected by naming a provider
+	// "auth". Exemptions may only ever be read from the mount the middleware was
+	// configured with.
+	if csrfExemptRoutes[csrfExemption{method: r.Method, path: rels[0]}] {
+		return false
 	}
 	// CookieValue resolves the __Host- → __Secure- → bare precedence, so this
 	// asks the same question of the same cookie as the auth gate behind it
@@ -262,8 +315,8 @@ func isMutatingMethod(method string) bool {
 	}
 }
 
-// csrfRelativePath locates the mount prefix inside a request path and returns
-// the route below it.
+// csrfRelativePaths locates the mount prefix inside a request path and returns the
+// route below every occurrence of it, leftmost first, plus whether it occurs at all.
 //
 // The prefix has to land on a segment boundary — "/authenticate/login" is not
 // "/auth" plus "enticate/login" — and it may sit after a base path, because a
@@ -271,20 +324,34 @@ func isMutatingMethod(method string) bool {
 // <base><prefix>/<route> while the middleware only ever knows <prefix>. Matching
 // on the head of the path alone would leave every group-mounted deployment with
 // enforcement silently switched off.
-func csrfRelativePath(path, prefix string) (string, bool) {
+//
+// Searching for the prefix is therefore unavoidable, and it is ambiguous whenever
+// the base ends in the same segment as the prefix: a group based at /auth with the
+// default /auth prefix serves /auth/auth/<route>, which resolves both to
+// "/auth/<route>" (leftmost) and to "/<route>" (rightmost). Nothing in the request
+// says which is the real mount, so every candidate is returned and the caller
+// decides — asymmetrically, because the two ends carry different trust. See
+// csrfEnforced: enforcement may be widened by any candidate, while an exemption may
+// only ever be read from the first, since later segments can be attacker-chosen
+// path parameters.
+func csrfRelativePaths(path, prefix string) ([]string, bool) {
 	if prefix == "" || prefix == "/" {
-		return strings.TrimSuffix(path, "/"), true
+		return []string{strings.TrimSuffix(path, "/")}, true
 	}
+	var rels []string
 	for i := 0; i+len(prefix) <= len(path); i++ {
 		offset := strings.Index(path[i:], prefix)
 		if offset < 0 {
-			return "", false
+			break
 		}
 		i += offset
 		rest := path[i+len(prefix):]
 		if rest == "" || strings.HasPrefix(rest, "/") {
-			return strings.TrimSuffix(rest, "/"), true
+			rels = append(rels, strings.TrimSuffix(rest, "/"))
 		}
 	}
-	return "", false
+	if len(rels) == 0 {
+		return nil, false
+	}
+	return rels, true
 }
