@@ -62,6 +62,10 @@ var (
 	// siblings.
 	HTTPErrInvalidStepUpToken = HTTPError{Status: http.StatusUnauthorized, Message: "Invalid or expired access token", Code: CodeInvalidAccessToken}
 
+	// Uncoded on purpose. The reference emits this same message WITHOUT a code on
+	// /magic-link/send (auth.router.ts:1111) but WITH code EMAIL_REQUIRED on
+	// /link-request (auth.router.ts:1498), so this and HTTPErrLinkEmailRequired are
+	// not interchangeable. Do not merge them into one entry.
 	HTTPErrPasswordlessEmailRequired = HTTPError{Status: http.StatusBadRequest, Message: "email is required"}
 	HTTPErrUserIDOrEmailRequired     = HTTPError{Status: http.StatusBadRequest, Message: "userId or email is required"}
 	HTTPErrUserIDRequired            = HTTPError{Status: http.StatusBadRequest, Message: "userId is required"}
