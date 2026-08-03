@@ -46,19 +46,26 @@ type fakeOAuthProvider struct {
 
 	mu            sync.Mutex
 	tokenForm     url.Values
+	tokenStatus   int
 	profileStatus int
 }
 
 func newFakeOAuthProvider(t *testing.T) *fakeOAuthProvider {
 	t.Helper()
-	p := &fakeOAuthProvider{profileStatus: http.StatusOK}
+	p := &fakeOAuthProvider{tokenStatus: http.StatusOK, profileStatus: http.StatusOK}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		p.mu.Lock()
 		p.tokenForm = r.PostForm
+		status := p.tokenStatus
 		p.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"access_token":"provider-access-token","token_type":"bearer"}`))
 	})
 	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, _ *http.Request) {
@@ -90,6 +97,30 @@ func (p *fakeOAuthProvider) failProfile() {
 	p.profileStatus = http.StatusUnauthorized
 }
 
+func (p *fakeOAuthProvider) failToken() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.tokenStatus = http.StatusUnauthorized
+}
+
+// expiringPendingLinks is a PendingLinkStore that keeps every entry forever and
+// backdates the deadline the caller recorded on it.
+//
+// It is the only configuration in which LINK_TOKEN_EXPIRED is reachable, and that
+// is the point: MemoryPendingLinks honours the ttl it is handed, so an aged
+// account-link token disappears from the store and /link-verify answers
+// INVALID_LINK_TOKEN instead. A store that ignores the ttl — a SQL table without
+// a sweeper, say — hands the aged entry back, and LinkVerify has to enforce the
+// deadline carried inside it rather than trusting the store.
+type expiringPendingLinks struct{ *auth.MemoryPendingLinks }
+
+func (s expiringPendingLinks) Save(ctx context.Context, key string, meta auth.OAuthPendingMeta, _ time.Duration) error {
+	if strings.HasPrefix(key, "link-token:") {
+		meta.ExpiresAt = time.Now().Add(-time.Minute)
+	}
+	return s.MemoryPendingLinks.Save(ctx, key, meta, 0)
+}
+
 // oauthFixture is an Env with the OAuth wiring attached.
 type oauthFixture struct {
 	*Env
@@ -108,7 +139,16 @@ type fixtureOptions struct {
 	// omitPending drops only the stash, which is what turns the state nonce from
 	// single-use back into merely signed.
 	omitPending bool
-	allowed     []string
+	// expiringPending swaps in a stash that ignores the ttl and backdates the
+	// deadline it was handed, so an account-link token comes back already expired.
+	expiringPending bool
+	allowed         []string
+	// siteURL overrides the fallback redirect target. The reference's redirect
+	// resolution has quirks that only show up when the site url carries a base
+	// path or a trailing slash.
+	siteURL string
+	// stateTTL bounds the signed state. Zero means the 10-minute default.
+	stateTTL time.Duration
 }
 
 const fixtureSiteURL = "https://app.example.com"
@@ -120,6 +160,10 @@ func newOAuthFixture(t *testing.T, mount Mounter, opts fixtureOptions) *oauthFix
 		provider: provider,
 		links:    auth.NewMemoryLinkedAccounts(),
 		pending:  auth.NewMemoryPendingLinks(),
+	}
+	siteURL := fixtureSiteURL
+	if opts.siteURL != "" {
+		siteURL = opts.siteURL
 	}
 	wiring := auth.OAuthWiring{
 		Service: auth.NewOAuthService(auth.OAuthProvider{
@@ -135,8 +179,9 @@ func newOAuthFixture(t *testing.T, mount Mounter, opts fixtureOptions) *oauthFix
 		LinkedAccounts: fixture.links,
 		PendingLinks:   fixture.pending,
 		AllowedOrigins: opts.allowed,
-		SiteURL:        fixtureSiteURL,
+		SiteURL:        siteURL,
 		TenantID:       "t1",
+		StateTTL:       opts.stateTTL,
 		DeliverLinkToken: func(_ context.Context, delivery auth.LinkTokenDelivery) error {
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
@@ -150,6 +195,9 @@ func newOAuthFixture(t *testing.T, mount Mounter, opts fixtureOptions) *oauthFix
 	}
 	if opts.omitPending {
 		wiring.PendingLinks = nil
+	}
+	if opts.expiringPending {
+		wiring.PendingLinks = expiringPendingLinks{MemoryPendingLinks: fixture.pending}
 	}
 	fixture.Env = NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithOAuth(wiring))
 	return fixture
@@ -188,6 +236,35 @@ func (f *oauthFixture) callback(t *testing.T, code, state string) *httptest.Resp
 		target += "&state=" + url.QueryEscape(state)
 	}
 	return f.Do(httptest.NewRequest(http.MethodGet, target, nil))
+}
+
+// sessionUser resolves whose session a response's access-token cookie carries.
+// Which identity the callback hands out is the whole point of the OAuth login
+// route, so it is asserted directly rather than through the token's shape.
+func (f *oauthFixture) sessionUser(t *testing.T, rec *httptest.ResponseRecorder) auth.User {
+	t.Helper()
+	cookie := Cookie(t, rec, hostAccess)
+	user, err := f.Auth.Me(context.Background(), cookie.Value)
+	if err != nil {
+		t.Fatalf("resolve the issued session: %v", err)
+	}
+	return user
+}
+
+// linkedAccountEntries drives GET /linked-accounts as the holder of token.
+func (f *oauthFixture) linkedAccountEntries(t *testing.T, token string) []any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, f.Config.Prefix()+"/linked-accounts", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := f.Do(req)
+	AssertStatus(t, rec, http.StatusOK)
+	body := Body(t, rec)
+	AssertKeys(t, body, "linkedAccounts")
+	entries, ok := body["linkedAccounts"].([]any)
+	if !ok {
+		t.Fatalf("linkedAccounts = %v, want an array", body["linkedAccounts"])
+	}
+	return entries
 }
 
 // decodeStatePayload splits the signed state and decodes the payload half.
@@ -265,7 +342,8 @@ func testOAuthAuthorize(t *testing.T, mount Mounter) {
 	// The reference registers a JSON stub only for google and github and lets
 	// every other unregistered name fall through to Express's HTML 404. One
 	// dynamic route cannot do that, so every unregistered name gets the stub —
-	// with the reference's per-provider wording for the two it names.
+	// with the reference's per-provider wording for the two it names. Both the
+	// authorize and the callback route answer it.
 	t.Run("unregistered provider", func(t *testing.T) {
 		f := newOAuthFixture(t, mount, fixtureOptions{})
 		for name, want := range map[string]string{
@@ -275,6 +353,76 @@ func testOAuthAuthorize(t *testing.T, mount Mounter) {
 		} {
 			rec := f.Do(httptest.NewRequest(http.MethodGet, f.Config.Prefix()+"/oauth/"+name, nil))
 			AssertError(t, rec, http.StatusNotFound, want, "")
+
+			rec = f.Do(httptest.NewRequest(http.MethodGet, f.Config.Prefix()+"/oauth/"+name+"/callback?code=c&state=s", nil))
+			AssertError(t, rec, http.StatusNotFound, want, "")
+		}
+	})
+
+	// The route reads no credential off the initiating request, and nothing on
+	// that request may steer which account the provider identity lands on.
+	//
+	// The reference's /oauth/{provider} has no auth gate (wire-contract.md §4:
+	// "Auth gate: none") and does not carry a link intent in the state; the
+	// callback resolves the identity purely through the provider account. Treating
+	// "somebody is signed in" as "link to that account" is an account-takeover
+	// shape, so it is pinned from the outside: whoever holds a session when the
+	// flow starts must not change the outcome by one byte.
+	t.Run("a signed-in initiator does not capture the provider identity", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}})
+		// The fake provider's profile is sub=acme-1 / oauth@example.com, and that
+		// account already belongs to the victim.
+		victim, _ := f.Seed("victim@example.com")
+		if err := f.links.Save(context.Background(), auth.OAuthLinkedAccount{
+			ID: "lnk_victim", UserID: victim.ID, Provider: testProvider, ProviderID: "acme-1",
+			Email: "oauth@example.com", CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("seed the victim's link: %v", err)
+		}
+		_, intruderTokens := f.Seed("intruder@example.com")
+
+		// The intruder starts the flow with their own session attached. The
+		// callback that follows carries no credential of theirs at all.
+		location := f.begin(t, "", map[string]string{
+			"Origin":        fixtureSiteURL,
+			"Authorization": "Bearer " + intruderTokens.AccessToken,
+		})
+		rec := f.callback(t, "c", location.Query().Get("state"))
+		AssertStatus(t, rec, http.StatusFound)
+
+		if got := f.sessionUser(t, rec).Email; got != "victim@example.com" {
+			t.Fatalf("the callback issued a session for %q, want the provider account's owner %q", got, "victim@example.com")
+		}
+		link, err := f.links.FindByProvider(context.Background(), testProvider, "acme-1")
+		if err != nil {
+			t.Fatalf("the victim's link disappeared: %v", err)
+		}
+		if link.UserID != victim.ID {
+			t.Fatalf("(acme, acme-1) was re-pointed from the victim to %q", link.UserID)
+		}
+		if entries := f.linkedAccountEntries(t, intruderTokens.AccessToken); len(entries) != 0 {
+			t.Fatalf("the initiator gained a link row: %v", entries)
+		}
+	})
+
+	// The same rule where the provider account is unknown: the callback creates
+	// the account the profile describes instead of adopting the initiator's.
+	t.Run("a signed-in initiator does not adopt an unknown provider account", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}})
+		_, tokens := f.Seed("initiator@example.com")
+
+		location := f.begin(t, "", map[string]string{
+			"Origin":        fixtureSiteURL,
+			"Authorization": "Bearer " + tokens.AccessToken,
+		})
+		rec := f.callback(t, "c", location.Query().Get("state"))
+		AssertStatus(t, rec, http.StatusFound)
+
+		if got := f.sessionUser(t, rec).Email; got != "oauth@example.com" {
+			t.Fatalf("the callback issued a session for %q, want the provider profile's address %q", got, "oauth@example.com")
+		}
+		if entries := f.linkedAccountEntries(t, tokens.AccessToken); len(entries) != 0 {
+			t.Fatalf("the initiator gained a link row: %v", entries)
 		}
 	})
 }
@@ -366,6 +514,59 @@ func testOAuthCallback(t *testing.T, mount Mounter) {
 		if link.Provider != testProvider || link.ProviderID != "acme-1" {
 			t.Fatalf("link = %+v", link)
 		}
+		// The reference's linkAccount always carries the callback profile's email
+		// (auth.router.ts:1336-1343), and GET /linked-accounts renders it. A link
+		// row that cannot carry an address makes the family admin UI fall all the
+		// way through to the raw provider id.
+		if link.Email != "oauth@example.com" {
+			t.Fatalf("link email = %q, want the callback profile's %q", link.Email, "oauth@example.com")
+		}
+	})
+
+	// The reference's own resolveOAuthRedirect quirks, reproduced rather than
+	// improved on: three shipped clients are built against this Location header.
+	t.Run("the redirect reproduces the reference's base-path handling", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			siteURL string
+			path    string
+			want    string
+		}{
+			// basePath "/ex", cleanPath "/example": the reference's test is a loose
+			// startsWith with no segment boundary, so it fires and the origin's base
+			// path is dropped in favour of the return path. A segment-boundary test
+			// would answer https://ex.example.com/ex/example instead.
+			{"loose prefix drops the base path", "https://ex.example.com/ex", "/example", "https://ex.example.com/example"},
+			// The de-duplication the quirk exists for: the base path is not doubled.
+			{"a repeated base path is not doubled", "https://ex.example.com/app", "/app/dash", "https://ex.example.com/app/dash"},
+			// basePath becomes "" after the trailing slash is stripped, which is
+			// falsy in the reference, so it concatenates and the slash doubles.
+			{"a trailing-slash origin doubles the slash", "https://ex.example.com/", "/dash", "https://ex.example.com//dash"},
+			// No base path at all: plain concatenation.
+			{"no base path", "https://ex.example.com", "/dash", "https://ex.example.com/dash"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				// An empty allowlist accepts the state's own origin, which is the
+				// configuration in which the state's `o` reaches the append branch.
+				f := newOAuthFixture(t, mount, fixtureOptions{siteURL: tc.siteURL})
+				location := f.begin(t, "?return_path="+url.QueryEscape(tc.path), nil)
+				rec := f.callback(t, "c", location.Query().Get("state"))
+				AssertStatus(t, rec, http.StatusFound)
+				if got := rec.Header().Get("Location"); got != tc.want {
+					t.Fatalf("Location = %q, want %q", got, tc.want)
+				}
+			})
+		}
+	})
+
+	// The other half of the exchange: the token endpoint refusing the code. Only
+	// the profile failure was covered before.
+	t.Run("token exchange failure", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}})
+		location := f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
+		f.provider.failToken()
+		rec := f.callback(t, "c", location.Query().Get("state"))
+		AssertError(t, rec, http.StatusUnauthorized, "OAuth token exchange failed", auth.CodeOAuthTokenExchangeFail)
 	})
 
 	// A provider that answers the userinfo call with an error must not produce a
@@ -446,6 +647,23 @@ func testOAuthStateVerification(t *testing.T, mount Mounter) {
 		AssertError(t, f.callback(t, "c", state), http.StatusUnauthorized, "Invalid or expired OAuth state", auth.CodeOAuthStateInvalid)
 	})
 
+	// The TTL is the other half of "signed and time-bounded". The stash is omitted
+	// on purpose so that only the deadline in the `t` claim can reject this: with
+	// a stash configured the nonce entry would expire on the same clock and the
+	// lookup would be what failed.
+	t.Run("a state past its TTL is rejected", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{
+			omitPending: true,
+			allowed:     []string{fixtureSiteURL},
+			stateTTL:    time.Nanosecond,
+		})
+		state := newState(t, f)
+		// The `t` claim has one-second resolution, so the elapsed time has to be
+		// unambiguously past a one-nanosecond deadline.
+		time.Sleep(5 * time.Millisecond)
+		AssertError(t, f.callback(t, "c", state), http.StatusUnauthorized, "Invalid or expired OAuth state", auth.CodeOAuthStateInvalid)
+	})
+
 	// Without a stash the state stays signed and time-bounded but replayable —
 	// pinned so the degradation is a documented property, not a surprise.
 	t.Run("without a pending-link store the state is signed but replayable", func(t *testing.T) {
@@ -476,7 +694,9 @@ func testLinkedAccountsList(t *testing.T, mount Mounter) {
 		f := newOAuthFixture(t, mount, fixtureOptions{})
 		user, tokens := f.Seed("linked@example.com")
 		if err := f.links.Save(context.Background(), auth.OAuthLinkedAccount{
-			ID: "lnk_1", UserID: user.ID, Provider: "acme", ProviderID: "acme-1", CreatedAt: linkedAt,
+			ID: "lnk_1", UserID: user.ID, Provider: "acme", ProviderID: "acme-1",
+			Email: "linked@provider.example", Name: "Linked User", Picture: "https://provider.example/a.png",
+			CreatedAt: linkedAt,
 		}); err != nil {
 			t.Fatalf("seed link: %v", err)
 		}
@@ -493,15 +713,67 @@ func testLinkedAccountsList(t *testing.T, mount Mounter) {
 			t.Fatalf("linkedAccounts = %v, want one entry", body["linkedAccounts"])
 		}
 		entry, _ := accounts[0].(map[string]any)
-		AssertKeys(t, entry, "provider", "providerAccountId", "linkedAt")
-		if entry["provider"] != "acme" {
-			t.Errorf("provider = %v, want %q", entry["provider"], "acme")
-		}
-		if entry["providerAccountId"] != "acme-1" {
-			t.Errorf("providerAccountId = %v, want %q", entry["providerAccountId"], "acme-1")
+		// The reference's LinkedAccount, in full: email, name and picture are
+		// optional there and here, and a store that has them must be able to
+		// surface them. The family admin UI renders
+		// `a.name || a.email || a.providerAccountId`.
+		AssertKeys(t, entry, "provider", "providerAccountId", "email", "name", "picture", "linkedAt")
+		for key, want := range map[string]string{
+			"provider":          "acme",
+			"providerAccountId": "acme-1",
+			"email":             "linked@provider.example",
+			"name":              "Linked User",
+			"picture":           "https://provider.example/a.png",
+		} {
+			if entry[key] != want {
+				t.Errorf("%s = %v, want %q", key, entry[key], want)
+			}
 		}
 		if entry["linkedAt"] != linkedAt.Format(time.RFC3339Nano) {
 			t.Errorf("linkedAt = %v, want %q", entry["linkedAt"], linkedAt.Format(time.RFC3339Nano))
+		}
+	})
+
+	// The complaint the optional fields exist for: it is the LINK paths that have
+	// to store the address, not just the wire type that has to be able to carry it.
+	// The reference's linkAccount always passes the callback profile's email
+	// (auth.router.ts:1336-1343) and /link-verify passes the verified address
+	// (:1578-1583). Name and picture stay absent, because the reference's own
+	// linkAccount calls never set them either.
+	t.Run("the callback's auto-link carries the profile email", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}})
+		location := f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
+		rec := f.callback(t, "c", location.Query().Get("state"))
+		AssertStatus(t, rec, http.StatusFound)
+
+		entries := f.linkedAccountEntries(t, Cookie(t, rec, hostAccess).Value)
+		if len(entries) != 1 {
+			t.Fatalf("linkedAccounts = %v, want one entry", entries)
+		}
+		entry, _ := entries[0].(map[string]any)
+		AssertKeys(t, entry, "provider", "providerAccountId", "email", "linkedAt")
+		if entry["email"] != "oauth@example.com" {
+			t.Fatalf("email = %v, want the callback profile's %q", entry["email"], "oauth@example.com")
+		}
+	})
+
+	t.Run("link-verify carries the verified address", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{})
+		_, tokens := f.Seed("verified@example.com")
+		req := f.Request(http.MethodPost, "/link-request", map[string]any{"email": "verified@example.com", "provider": "acme"})
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		AssertStatus(t, f.Do(req), http.StatusOK)
+		token := f.lastDelivery(t).Token
+		AssertStatus(t, f.Do(f.Request(http.MethodPost, "/link-verify", map[string]any{"token": token})), http.StatusOK)
+
+		entries := f.linkedAccountEntries(t, tokens.AccessToken)
+		if len(entries) != 1 {
+			t.Fatalf("linkedAccounts = %v, want one entry", entries)
+		}
+		entry, _ := entries[0].(map[string]any)
+		AssertKeys(t, entry, "provider", "providerAccountId", "email", "linkedAt")
+		if entry["email"] != "verified@example.com" {
+			t.Fatalf("email = %v, want %q", entry["email"], "verified@example.com")
 		}
 	})
 
@@ -576,6 +848,49 @@ func testLinkedAccountsDelete(t *testing.T, mount Mounter) {
 		}
 	})
 
+	// An adapter-interchangeability case, which is the class of bug this suite
+	// exists for. Express matches its route against the still-encoded path and
+	// decodeURIComponent's each captured parameter, so a providerAccountId
+	// containing %2F reaches the handler as one parameter holding a slash. The
+	// shared handler reads its parameters off r.URL.EscapedPath() for the same
+	// reason. Gin, though, routes on the UNESCAPED path, so under a two-parameter
+	// pattern this request arrives as three segments and 404s where the other three
+	// adapters answer 200 — hence the catch-all registration on that adapter.
+	t.Run("a providerAccountId containing an encoded slash", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{})
+		user, tokens := f.Seed("encoded@example.com")
+		if err := f.links.Save(context.Background(), auth.OAuthLinkedAccount{
+			ID: "lnk_encoded", UserID: user.ID, Provider: "acme", ProviderID: "a/b", CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
+
+		rec := del(f, tokens.AccessToken, "acme", "a%2Fb")
+		AssertStatus(t, rec, http.StatusOK)
+		AssertKeys(t, Body(t, rec), "success")
+		if _, err := f.links.FindByProvider(context.Background(), "acme", "a/b"); err == nil {
+			t.Fatal("the link survived: the %2F never arrived as one parameter")
+		}
+	})
+
+	// The flip side of the catch-all: widening what reaches the handler must not
+	// widen what the route answers. A path that is not exactly
+	// <provider>/<providerAccountId> is not this route on any adapter, so all four
+	// answer 404 — not the 403 an auth middleware would emit, and not a CSRF
+	// failure. Only the status is asserted: the body of an unrouted path belongs to
+	// each router and already differs between them.
+	t.Run("a path that is not provider and account id is not this route", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{})
+		_, tokens := f.Seed("shape@example.com")
+		for _, suffix := range []string{"/acme", "/acme/a/b/c"} {
+			req := httptest.NewRequest(http.MethodDelete, f.Config.Prefix()+"/linked-accounts"+suffix, nil)
+			req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+			if rec := f.Do(req); rec.Code != http.StatusNotFound {
+				t.Errorf("DELETE %s = %d, want 404 (body %q)", suffix, rec.Code, rec.Body.String())
+			}
+		}
+	})
+
 	// No existence check in the reference: an unknown pair still answers success.
 	t.Run("an unknown pair still succeeds", func(t *testing.T) {
 		f := newOAuthFixture(t, mount, fixtureOptions{})
@@ -642,6 +957,60 @@ func testLinkRequest(t *testing.T, mount Mounter) {
 		// The credential must never appear in the HTTP response.
 		if strings.Contains(rec.Body.String(), delivery.Token) {
 			t.Errorf("response leaked the account-link token: %s", rec.Body.String())
+		}
+	})
+
+	// The reference's body is { email, provider?, emailLang? } and emailLang is
+	// forwarded to sendVerificationEmail as its fourth argument
+	// (auth.router.ts:1496, :1530-1535). Dropping it leaves the host's mail
+	// transport unable to localise, which no error surfaces.
+	t.Run("emailLang reaches the delivery hook", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{})
+		_, tokens := f.Seed("lang@example.com")
+		req := f.Request(http.MethodPost, "/link-request", map[string]any{
+			"email": "lang@example.com", "provider": "acme", "emailLang": "it",
+		})
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		AssertStatus(t, f.Do(req), http.StatusOK)
+		if got := f.lastDelivery(t).EmailLang; got != "it" {
+			t.Fatalf("emailLang = %q, want %q", got, "it")
+		}
+	})
+
+	// The reference resolves the link's origin per request through
+	// resolveSiteUrl(req, config, allowedOrigins) (auth.router.ts:1528), so a
+	// deployment serving several front-ends mails a link back to the one that
+	// asked rather than always to the default site url.
+	t.Run("the verification link uses the request origin", func(t *testing.T) {
+		const other = "https://admin.example.com"
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL, other}})
+		_, tokens := f.Seed("origin@example.com")
+		req := f.Request(http.MethodPost, "/link-request", map[string]any{"email": "origin@example.com", "provider": "acme"})
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set("Origin", other)
+		AssertStatus(t, f.Do(req), http.StatusOK)
+
+		delivery := f.lastDelivery(t)
+		want := other + f.Config.Prefix() + "/link-verify?token=" + delivery.Token
+		if delivery.URL != want {
+			t.Fatalf("link = %q, want %q", delivery.URL, want)
+		}
+	})
+
+	// An origin the allowlist refuses falls back to the configured site url, the
+	// same resolution the authorize route performs.
+	t.Run("an off-allowlist origin falls back to the site url", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}})
+		_, tokens := f.Seed("badorigin@example.com")
+		req := f.Request(http.MethodPost, "/link-request", map[string]any{"email": "badorigin@example.com", "provider": "acme"})
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set("Origin", "https://evil.example.net")
+		AssertStatus(t, f.Do(req), http.StatusOK)
+
+		delivery := f.lastDelivery(t)
+		want := fixtureSiteURL + f.Config.Prefix() + "/link-verify?token=" + delivery.Token
+		if delivery.URL != want {
+			t.Fatalf("link = %q, want %q", delivery.URL, want)
 		}
 	})
 
@@ -763,6 +1132,23 @@ func testLinkVerify(t *testing.T, mount Mounter) {
 	t.Run("unknown token", func(t *testing.T) {
 		f := newOAuthFixture(t, mount, fixtureOptions{})
 		rec := f.Do(f.Request(http.MethodPost, "/link-verify", map[string]any{"token": "nope"}))
+		AssertError(t, rec, http.StatusBadRequest, "Invalid account-link token", auth.CodeInvalidLinkToken)
+	})
+
+	// LINK_TOKEN_EXPIRED, the one code in this route group's error table that
+	// nothing exercised. It needs a stash that ignores the ttl it was handed —
+	// MemoryPendingLinks honours it, drops the aged entry, and the route answers
+	// INVALID_LINK_TOKEN instead — which is exactly why LinkVerify enforces the
+	// deadline recorded inside the entry rather than trusting the store to have
+	// swept it. An expired token is also consumed, so it cannot be retried.
+	t.Run("an expired token", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{expiringPending: true})
+		_, token := issueToken(t, f, "expired@example.com")
+
+		rec := f.Do(f.Request(http.MethodPost, "/link-verify", map[string]any{"token": token}))
+		AssertError(t, rec, http.StatusBadRequest, "Account-link token has expired", auth.CodeLinkTokenExpired)
+
+		rec = f.Do(f.Request(http.MethodPost, "/link-verify", map[string]any{"token": token}))
 		AssertError(t, rec, http.StatusBadRequest, "Invalid account-link token", auth.CodeInvalidLinkToken)
 	})
 

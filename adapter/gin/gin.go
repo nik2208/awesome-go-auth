@@ -93,7 +93,19 @@ func (ad *Adapter) Mount(group gin.IRoutes) {
 	group.GET(prefix+"/oauth/:provider", serveHTTP(oauth.OAuthAuthorizeHandler()))
 	group.GET(prefix+"/oauth/:provider/callback", serveHTTP(oauth.OAuthCallbackHandler()))
 	group.GET(prefix+"/linked-accounts", serveHTTP(oauth.LinkedAccountsHandler()))
-	group.DELETE(prefix+"/linked-accounts/:provider/:providerAccountId", serveHTTP(oauth.UnlinkAccountHandler()))
+	// The unlink route is registered as a catch-all, not as two path parameters.
+	// Gin matches on the UNESCAPED path, so a providerAccountId containing %2F —
+	// which net/http, chi and echo all deliver to the handler intact, as Express
+	// does — arrives here as three segments and would miss a two-parameter
+	// pattern entirely, giving gin a 404 where every other adapter answers 200.
+	// The shared handler reads its parameters off r.URL.EscapedPath() and rejects
+	// any shape that is not exactly <provider>/<providerAccountId> with the same
+	// bare 404 the other routers emit, so the catch-all widens what reaches the
+	// handler without widening what the route answers. The bare :provider entry
+	// is there to keep gin from answering a one-segment path with a 307 to the
+	// catch-all's trailing slash.
+	group.DELETE(prefix+"/linked-accounts/:provider", serveHTTP(oauth.UnlinkAccountHandler()))
+	group.DELETE(prefix+"/linked-accounts/:provider/*providerAccountId", serveHTTP(oauth.UnlinkAccountHandler()))
 	group.POST(prefix+"/link-request", serveHTTP(oauth.LinkRequestHandler()))
 	group.POST(prefix+"/link-verify", serveHTTP(oauth.LinkVerifyHandler()))
 }

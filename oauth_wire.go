@@ -192,12 +192,17 @@ type OAuthWiring struct {
 	DeliverLinkToken func(ctx context.Context, delivery LinkTokenDelivery) error
 }
 
-// LinkTokenDelivery is the payload handed to OAuthWiring.DeliverLinkToken.
+// LinkTokenDelivery is the payload handed to OAuthWiring.DeliverLinkToken. The
+// four members are the reference's sendVerificationEmail(email, token, link,
+// emailLang) arguments, plus the provider the link records.
 type LinkTokenDelivery struct {
 	Email    string
 	Provider string
 	Token    string
 	URL      string
+	// EmailLang is the /link-request body's emailLang, passed through untouched so
+	// the host's mail transport can localise. Empty when the caller omitted it.
+	EmailLang string
 }
 
 func (w *OAuthWiring) stateTTL() time.Duration {
@@ -332,47 +337,59 @@ func resolveSiteURL(origin, referer string, allowed []string, siteURL string) st
 	return siteURL
 }
 
-// resolveOAuthRedirect is the reference's resolveOAuthRedirect: honour the
-// state's origin when the allowlist permits it (an empty allowlist permits
-// everything), append the return path with base-path de-duplication, and fall
-// back to the configured site URL.
+// resolveOAuthRedirect is a line-by-line transcription of the reference's
+// resolveOAuthRedirect (auth.router.ts:325-351): honour the state's origin when
+// the allowlist permits it (an empty allowlist permits everything), append the
+// return path, and fall back to the configured site URL.
 //
-// The return path is honoured ONLY in the accepted-origin branch. The reference
-// appends `p` inside `if (fromState && allowed)` and returns
-// getDefaultSiteUrl(config) bare otherwise (auth.router.ts:325-351), so a state
-// whose origin was rejected contributes nothing at all to the redirect — not the
-// origin and not the path. `p` comes straight from the caller's `return_path`
-// query param, so appending it to the fallback would let an initiator inject a
-// path into a redirect the allowlist had already refused to trust.
+// Three properties of the reference look wrong and are reproduced anyway,
+// because three shipped clients are built against this function's output:
+//
+//   - The return path is honoured ONLY in the accepted-origin branch. The
+//     reference appends `p` inside `if (fromState && allowed)` and returns
+//     getDefaultSiteUrl(config) bare otherwise, so a state whose origin was
+//     rejected contributes nothing at all — not the origin and not the path.
+//     `p` comes straight from the caller's `return_path` query param, so
+//     appending it to the fallback would let an initiator inject a path into a
+//     redirect the allowlist had already refused to trust.
+//   - The base-path de-duplication triggers on a LOOSE prefix test
+//     (`cleanPath.startsWith(basePath)`, no segment boundary) and, when it
+//     triggers, drops the origin's base path entirely in favour of the return
+//     path: origin https://ex.com/ex with p=/example resolves to
+//     https://ex.com/example, not https://ex.com/ex/example. A segment-boundary
+//     test would be tidier and would disagree with the reference on exactly
+//     that input.
+//   - An origin with a trailing slash is concatenated as-is, so
+//     https://ex.com/ + /dash resolves to https://ex.com//dash. The reference
+//     only strips the trailing slash inside the de-duplication branch, which
+//     that input does not reach (basePath becomes "" and is falsy).
 func resolveOAuthRedirect(state oauthState, allowed []string, siteURL string) string {
-	origin := strings.TrimSpace(state.O)
-	accepted := origin != "" && originAllowed(origin, allowed)
-	if !accepted {
-		origin = siteURL
+	fromState := state.O
+	if fromState == "" || !originAllowed(fromState, allowed) {
+		// getDefaultSiteUrl(config), bare.
+		return siteURL
 	}
-	if origin == "" {
-		return ""
+	if state.P == "" {
+		return fromState
 	}
-	origin = strings.TrimSuffix(origin, "/")
-	path := strings.TrimSpace(state.P)
-	if path == "" || !accepted {
-		return origin
+	cleanPath := state.P
+	if !strings.HasPrefix(cleanPath, "/") {
+		cleanPath = "/" + cleanPath
 	}
-	path = "/" + strings.TrimPrefix(path, "/")
-	// The reference de-duplicates when the origin itself carries a base path and
-	// the return path repeats it, so https://ex.com/app + /app/dash stays
-	// https://ex.com/app/dash rather than doubling the segment.
-	if u, err := url.Parse(origin); err == nil {
-		if base := strings.TrimSuffix(u.Path, "/"); base != "" {
-			if path == base || strings.HasPrefix(path, base+"/") {
-				path = strings.TrimPrefix(path, base)
-			}
+	// `new URL(fromState)` in a try/catch: url.Parse accepts almost anything, so
+	// the scheme and host checks stand in for the throw.
+	if u, err := url.Parse(fromState); err == nil && u.Scheme != "" && u.Host != "" {
+		basePath := strings.TrimSuffix(u.Path, "/")
+		if basePath != "" && basePath != "/" && strings.HasPrefix(cleanPath, basePath) {
+			return u.Scheme + "://" + u.Host + cleanPath
 		}
 	}
-	return origin + path
+	return fromState + cleanPath
 }
 
-// originAllowed mirrors the reference: an empty allowlist allows everything.
+// originAllowed mirrors the reference: an empty allowlist allows everything, and
+// a non-empty one is an exact `allowedOrigins.includes(origin)` — no trailing
+// slash normalisation, no case folding.
 func originAllowed(origin string, allowed []string) bool {
 	if origin == "" {
 		return false
@@ -381,7 +398,7 @@ func originAllowed(origin string, allowed []string) bool {
 		return true
 	}
 	for _, candidate := range allowed {
-		if strings.TrimSuffix(candidate, "/") == strings.TrimSuffix(origin, "/") {
+		if candidate == origin {
 			return true
 		}
 	}
@@ -407,15 +424,21 @@ func pendingLinkKey(email, provider string) string {
 // ── begin ────────────────────────────────────────────────────────────────────
 
 // OAuthBeginInput is GET <prefix>/oauth/{provider}.
+//
+// There is deliberately no "link to the caller's account" field. The reference's
+// /oauth/{provider} has no auth gate and reads no credential (wire-contract.md
+// §4: "Auth gate: none"); the intent is not carried in the state either, and the
+// callback resolves the identity purely through the provider account. Reading the
+// initiating request's access token and linking the provider identity to it is an
+// account-takeover shape: whoever happened to be signed in when the flow started
+// would get the session, and the (provider, providerAccountId) binding would be
+// re-pointed at them. Linking an existing account to a provider goes through
+// /link-request and /link-verify, where an emailed token proves the address.
 type OAuthBeginInput struct {
 	Provider   string
 	ReturnPath string
 	Origin     string
 	Referer    string
-	// LinkUserID links the provider to an existing account instead of resolving
-	// or creating one. The route fills it when the initiating request already
-	// carries a usable access token.
-	LinkUserID string
 }
 
 // OAuthBeginResult is what the route redirects to.
@@ -459,7 +482,6 @@ func (a *Auth) OAuthBegin(ctx context.Context, in OAuthBeginInput) (OAuthBeginRe
 			Provider:    in.Provider,
 			RedirectURL: origin,
 			TenantID:    wiring.TenantID,
-			UserID:      in.LinkUserID,
 			ExpiresAt:   time.Now().Add(wiring.stateTTL()),
 		}, wiring.stateTTL()); err != nil {
 			return OAuthBeginResult{}, err
@@ -524,7 +546,11 @@ func (a *Auth) OAuthComplete(ctx context.Context, in OAuthCompleteInput) (OAuthC
 	if err != nil {
 		return OAuthCompleteResult{RedirectTo: redirectTo}, err
 	}
-	user, tokens, err := wiring.Service.HandleCallback(ctx, a.service, wiring.LinkedAccounts, info, meta.TenantID, meta.UserID)
+	// linkToUserID is deliberately empty: the callback resolves the identity
+	// through the provider account, exactly as the reference does. Nothing on the
+	// initiating request may influence which account the provider identity lands
+	// on — see OAuthBeginInput.
+	user, tokens, err := wiring.Service.HandleCallback(ctx, a.service, wiring.LinkedAccounts, info, meta.TenantID, "")
 	if err != nil {
 		return OAuthCompleteResult{RedirectTo: redirectTo}, err
 	}
@@ -534,12 +560,23 @@ func (a *Auth) OAuthComplete(ctx context.Context, in OAuthCompleteInput) (OAuthC
 // ── linked accounts ──────────────────────────────────────────────────────────
 
 // PublicLinkedAccount is the wire projection of a linked account. The field
-// names are the reference's LinkedAccount interface, which is what the Angular
-// client and the served auth.js read.
+// names and their optionality are the reference's LinkedAccount interface
+// (linked-accounts-store.interface.ts:4-17), which is what the Angular client,
+// the served auth.js and the family admin UI read.
+//
+// Email is populated by every link the library writes, because the reference's
+// linkAccount calls always pass `email: user.email` from the callback profile
+// (auth.router.ts:1336-1343, :1578-1583). Name and Picture are optional in the
+// reference's interface and its own linkAccount calls never set them, so they
+// only ever appear when a host-supplied LinkedAccountStore fills them in; the
+// admin UI's `a.name || a.email || a.providerAccountId` therefore falls through
+// to the email, as it does against the reference.
 type PublicLinkedAccount struct {
 	Provider          string    `json:"provider"`
 	ProviderAccountID string    `json:"providerAccountId"`
 	Email             string    `json:"email,omitempty"`
+	Name              string    `json:"name,omitempty"`
+	Picture           string    `json:"picture,omitempty"`
 	LinkedAt          time.Time `json:"linkedAt"`
 }
 
@@ -558,6 +595,9 @@ func (a *Auth) ListLinkedAccounts(ctx context.Context, userID string) ([]PublicL
 		out = append(out, PublicLinkedAccount{
 			Provider:          link.Provider,
 			ProviderAccountID: link.ProviderID,
+			Email:             link.Email,
+			Name:              link.Name,
+			Picture:           link.Picture,
 			LinkedAt:          link.CreatedAt,
 		})
 	}
@@ -585,9 +625,20 @@ func (a *Auth) UnlinkAccount(ctx context.Context, userID, provider, providerAcco
 
 // LinkRequestInput is POST <prefix>/link-request.
 type LinkRequestInput struct {
-	Email       string
-	Provider    string
+	Email    string
+	Provider string
+	// EmailLang is the reference's third body field. It selects the language of
+	// the verification mail and is forwarded verbatim to DeliverLinkToken, the way
+	// the reference passes it as sendVerificationEmail's fourth argument
+	// (auth.router.ts:1530-1535).
+	EmailLang   string
 	AccessToken string
+	// Origin and Referer resolve which origin the verification link points at, as
+	// the reference's resolveSiteUrl(req, config, allowedOrigins) does
+	// (auth.router.ts:1528). A multi-origin deployment must email a link back to
+	// the origin the request came from, not always to the default one.
+	Origin  string
+	Referer string
 	// APIPrefix is the mount prefix, needed to build the verification link.
 	APIPrefix string
 }
@@ -663,17 +714,22 @@ func (a *Auth) LinkRequest(ctx context.Context, in LinkRequestInput) (LinkReques
 		return LinkRequestResult{}, err
 	}
 
+	// The reference resolves the link's origin per request rather than always
+	// using the default site url, so a deployment serving several front-ends mails
+	// a link back to the one that asked (auth.router.ts:1528).
+	siteURL := resolveSiteURL(in.Origin, in.Referer, wiring.AllowedOrigins, wiring.SiteURL)
 	prefix := strings.TrimSuffix(strings.TrimSpace(in.APIPrefix), "/")
-	link := wiring.SiteURL + prefix + "/link-verify?token=" + url.QueryEscape(token)
+	link := siteURL + prefix + "/link-verify?token=" + url.QueryEscape(token)
 	result := LinkRequestResult{Token: token, URL: link}
 	if wiring.DeliverLinkToken != nil {
 		// Delivery failures do not fail the route: the reference answers success
 		// even when no mail transport is configured at all.
 		if err := wiring.DeliverLinkToken(ctx, LinkTokenDelivery{
-			Email:    email,
-			Provider: provider,
-			Token:    token,
-			URL:      link,
+			Email:     email,
+			Provider:  provider,
+			Token:     token,
+			URL:       link,
+			EmailLang: in.EmailLang,
 		}); err != nil {
 			a.service.logf("auth: link token delivery failed for %q: %v", email, err)
 		}
@@ -726,11 +782,15 @@ func (a *Auth) LinkVerify(ctx context.Context, in LinkVerifyInput) (LinkVerifyRe
 	if err != nil {
 		return LinkVerifyResult{}, err
 	}
+	// Email is stored, not derived on read: the reference's linkAccount here passes
+	// `email` alongside the provider account id (auth.router.ts:1578-1583), and
+	// GET /linked-accounts is what renders it.
 	if err := wiring.LinkedAccounts.Save(ctx, OAuthLinkedAccount{
 		ID:         linkID,
 		UserID:     meta.UserID,
 		Provider:   meta.Provider,
 		ProviderID: providerAccountID,
+		Email:      meta.Email,
 		CreatedAt:  time.Now(),
 	}); err != nil {
 		return LinkVerifyResult{}, err

@@ -58,11 +58,21 @@ type OAuthPendingMeta struct {
 }
 
 // OAuthLinkedAccount stores a linked provider<->user association.
+//
+// Email, Name and Picture are the reference's optional LinkedAccount profile
+// columns (linked-accounts-store.interface.ts:9-14). GET /linked-accounts
+// projects all three, and clients render them: the family admin UI falls back
+// through `a.name || a.email || a.providerAccountId`. The library fills Email at
+// every link it writes, as the reference's linkAccount calls do; Name and Picture
+// are left for a host store that wants to keep them, again as in the reference.
 type OAuthLinkedAccount struct {
 	ID         string
 	UserID     string
 	Provider   string
 	ProviderID string
+	Email      string
+	Name       string
+	Picture    string
 	CreatedAt  time.Time
 }
 
@@ -277,6 +287,7 @@ func (s *OAuthService) HandleCallback(
 			UserID:     linkToUserID,
 			Provider:   info.Provider,
 			ProviderID: info.ProviderID,
+			Email:      info.Email,
 			CreatedAt:  time.Now(),
 		}
 		if err := linkedAccounts.Save(ctx, link); err != nil {
@@ -306,9 +317,13 @@ func (s *OAuthService) HandleCallback(
 		user, err := authSvc.users.GetUserByEmail(ctx, info.Email, tenantID)
 		if err == nil {
 			linkID, _ := newID("lnk")
+			// The reference's linkAccount always carries the callback profile's
+			// email (auth.router.ts:1336-1343), which is what GET /linked-accounts
+			// renders.
 			_ = linkedAccounts.Save(ctx, OAuthLinkedAccount{
 				ID: linkID, UserID: user.ID,
 				Provider: info.Provider, ProviderID: info.ProviderID,
+				Email:     info.Email,
 				CreatedAt: time.Now(),
 			})
 			tokens, err := authSvc.newSessionTokens(ctx, user)
@@ -337,6 +352,7 @@ func (s *OAuthService) HandleCallback(
 	_ = linkedAccounts.Save(ctx, OAuthLinkedAccount{
 		ID: linkID, UserID: newUser.ID,
 		Provider: info.Provider, ProviderID: info.ProviderID,
+		Email:     info.Email,
 		CreatedAt: now,
 	})
 	tokens, err := authSvc.newSessionTokens(ctx, newUser)

@@ -34,8 +34,28 @@ func (a *Adapter) LinkedAccountsHandler() http.Handler {
 }
 
 // UnlinkAccountHandler serves DELETE <prefix>/linked-accounts/{provider}/{providerAccountId}.
+//
+// The path-shape gate is outside both the CSRF and the auth middleware, and it
+// answers the same bare 404 an unrouted path gets. That is what lets gin mount
+// this route as a catch-all: gin routes on the unescaped path, so a
+// providerAccountId containing %2F only reaches a two-parameter pattern as three
+// segments. With the catch-all, path shapes that the other three routers reject
+// at the router now arrive here instead, and they must not turn into a 403 or a
+// CSRF failure that no other adapter emits.
 func (a *Adapter) UnlinkAccountHandler() http.Handler {
-	return a.guard(a.Middleware()(http.HandlerFunc(a.unlinkAccount)))
+	return a.unlinkPathGate(a.guard(a.Middleware()(http.HandlerFunc(a.unlinkAccount))))
+}
+
+// unlinkPathGate rejects anything that is not exactly
+// <prefix>/linked-accounts/<provider>/<providerAccountId>.
+func (a *Adapter) unlinkPathGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(pathSegmentsAfter(r, a.cfg.Prefix(), "linked-accounts")) != 2 {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // LinkRequestHandler serves POST <prefix>/link-request. It is deliberately not
@@ -58,21 +78,20 @@ func (a *Adapter) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 		auth.WriteHTTPError(w, auth.OAuthHTTPError(auth.OAuthNotConfiguredError(provider)))
 		return
 	}
-	in := auth.OAuthBeginInput{
+	// No credential is read off this request, deliberately. The reference's
+	// /oauth/{provider} has no auth gate and reads no token (wire-contract.md §4:
+	// "Auth gate: none"), and the callback resolves the identity purely through the
+	// provider account. Treating "somebody is signed in" as "link to that account"
+	// would hand the provider identity — and the resulting session — to whoever
+	// happened to hold a session when the flow started. Linking to an existing
+	// account is /link-request plus /link-verify, where an emailed token proves the
+	// address.
+	result, err := a.auth.OAuthBegin(r.Context(), auth.OAuthBeginInput{
 		Provider:   provider,
 		ReturnPath: r.URL.Query().Get("return_path"),
 		Origin:     r.Header.Get("Origin"),
 		Referer:    r.Header.Get("Referer"),
-	}
-	// A caller who is already signed in is adding a provider to that account,
-	// not starting a new login. Carrying the id through the stash is what makes
-	// PendingLinkStore's UserID field mean something.
-	if token := auth.AccessTokenFromRequest(r); token != "" {
-		if user, err := a.auth.Me(r.Context(), token); err == nil {
-			in.LinkUserID = user.ID
-		}
-	}
-	result, err := a.auth.OAuthBegin(r.Context(), in)
+	})
 	if err != nil {
 		auth.WriteHTTPError(w, auth.OAuthHTTPError(err))
 		return
@@ -145,13 +164,8 @@ func (a *Adapter) unlinkAccount(w http.ResponseWriter, r *http.Request) {
 		auth.WriteHTTPError(w, auth.HTTPErrNoAccessToken)
 		return
 	}
-	// Unreachable through the mounted patterns, all of which bind exactly two
-	// segments; it only guards a hand-wired mount.
+	// unlinkPathGate has already established that there are exactly two.
 	segments := pathSegmentsAfter(r, a.cfg.Prefix(), "linked-accounts")
-	if len(segments) != 2 {
-		auth.WriteHTTPError(w, auth.HTTPErrUserNotFound)
-		return
-	}
 	if err := a.auth.UnlinkAccount(r.Context(), user.ID, segments[0], segments[1]); err != nil {
 		auth.WriteHTTPError(w, auth.OAuthHTTPError(err))
 		return
@@ -159,9 +173,12 @@ func (a *Adapter) unlinkAccount(w http.ResponseWriter, r *http.Request) {
 	auth.WriteSuccess(w, http.StatusOK, nil)
 }
 
+// linkRequestBody is the reference's { email, provider?, emailLang? }
+// (auth.router.ts:1496).
 type linkRequestBody struct {
-	Email    string `json:"email"`
-	Provider string `json:"provider"`
+	Email     string `json:"email"`
+	Provider  string `json:"provider"`
+	EmailLang string `json:"emailLang"`
 }
 
 func (a *Adapter) linkRequest(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +189,10 @@ func (a *Adapter) linkRequest(w http.ResponseWriter, r *http.Request) {
 	if _, err := a.auth.LinkRequest(r.Context(), auth.LinkRequestInput{
 		Email:       req.Email,
 		Provider:    req.Provider,
+		EmailLang:   req.EmailLang,
 		AccessToken: auth.AccessTokenFromRequest(r),
+		Origin:      r.Header.Get("Origin"),
+		Referer:     r.Header.Get("Referer"),
 		APIPrefix:   a.cfg.Prefix(),
 	}); err != nil {
 		auth.WriteHTTPError(w, auth.OAuthHTTPError(err))
