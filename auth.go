@@ -108,7 +108,11 @@ func WithTokenTTLs(access, refresh time.Duration) Option {
 func WithBcryptCost(cost int) Option {
 	return func(b *authBuilder) error {
 		if cost < bcrypt.MinCost || cost > bcrypt.MaxCost {
-			return fmt.Errorf("auth: bcrypt cost must be between %d and %d", bcrypt.MinCost, bcrypt.MaxCost)
+			// The remedy has to be in the message. An operator who reaches this
+			// with an unparsed or unset value sees only a rejected range, and
+			// the cheapest way out of a rejected range is to pass MinCost —
+			// which is the one outcome this whole change exists to prevent.
+			return fmt.Errorf("auth: bcrypt cost must be between %d and %d; omit WithBcryptCost to get the default (%d)", bcrypt.MinCost, bcrypt.MaxCost, bcrypt.DefaultCost)
 		}
 		b.cfg.BcryptCost = cost
 		return nil

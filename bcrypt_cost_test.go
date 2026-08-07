@@ -283,8 +283,18 @@ func TestWithBcryptCostRejectsOutOfRange(t *testing.T) {
 	// reached with an unset value is a caller mistake, not a request for the
 	// default.
 	for _, cost := range []int{0, -1, bcrypt.MinCost - 1, bcrypt.MaxCost + 1} {
-		if _, err := New(WithBcryptCost(cost)); err == nil {
+		_, err := New(WithBcryptCost(cost))
+		if err == nil {
 			t.Fatalf("WithBcryptCost(%d): expected an error", cost)
+		}
+		// The message must carry the remedy, not just the range. An operator
+		// who lands here with an unset value and is told only "must be between
+		// 4 and 31" has 4 as the nearest legal answer, which is precisely the
+		// weak cost this change exists to keep out of production.
+		for _, want := range []string{"bcrypt cost", "4", "31", "omit WithBcryptCost", "10"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("WithBcryptCost(%d) error %q does not mention %q", cost, err, want)
+			}
 		}
 	}
 	for _, cost := range []int{bcrypt.MinCost, bcrypt.DefaultCost, bcrypt.MaxCost} {
