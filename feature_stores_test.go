@@ -465,7 +465,7 @@ func TestMemoryTenantStore_DeleteTenant_RemovesUserAssociations(t *testing.T) {
 
 func TestService_CreateRole_And_AssignRole(t *testing.T) {
 	rbac := NewMemoryRolesPermissionsStore()
-	cfg := DefaultConfig("rbactest1234567890123456789012345")
+	cfg := testConfig("rbactest1234567890123456789012345")
 	svc, _ := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore(), WithRolesPermissionsStore(rbac))
 	ctx := context.Background()
 	if err := svc.CreateRole(ctx, "moderator", []string{"posts:delete"}); err != nil {
@@ -486,7 +486,7 @@ func TestService_CreateRole_And_AssignRole(t *testing.T) {
 
 func TestService_CreateTenant_And_AddUserToTenant(t *testing.T) {
 	tenantStore := NewMemoryTenantStore()
-	cfg := DefaultConfig("tenanttest1234567890123456789012")
+	cfg := testConfig("tenanttest1234567890123456789012")
 	svc, _ := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore(), WithTenantStore(tenantStore))
 	ctx := context.Background()
 	tenant, err := svc.CreateTenant(ctx, "Acme Corp", nil)
@@ -505,7 +505,7 @@ func TestService_CreateTenant_And_AddUserToTenant(t *testing.T) {
 
 func TestService_UpdateMetadata_And_GetMetadata(t *testing.T) {
 	meta := NewMemoryMetadataStore()
-	cfg := DefaultConfig("metatest1234567890123456789012345")
+	cfg := testConfig("metatest1234567890123456789012345")
 	svc, _ := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore(), WithMetadataStore(meta))
 	ctx := context.Background()
 	user, _, _ := svc.Register(ctx, RegisterInput{Email: "meta@example.com", Password: "password1", TenantID: "t1"})
@@ -522,7 +522,7 @@ func TestService_UpdateMetadata_And_GetMetadata(t *testing.T) {
 }
 
 func TestService_GetMetadata_FeatureNotSupported(t *testing.T) {
-	cfg := DefaultConfig("metanosupport1234567890123456789")
+	cfg := testConfig("metanosupport1234567890123456789")
 	svc, _ := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore())
 	ctx := context.Background()
 	_, err := svc.GetMetadata(ctx, "u1")
@@ -532,7 +532,7 @@ func TestService_GetMetadata_FeatureNotSupported(t *testing.T) {
 }
 
 func TestService_CreateRole_FeatureNotSupported(t *testing.T) {
-	cfg := DefaultConfig("rbacnosupport1234567890123456789")
+	cfg := testConfig("rbacnosupport1234567890123456789")
 	svc, _ := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore())
 	ctx := context.Background()
 	err := svc.CreateRole(ctx, "admin", nil)
@@ -542,7 +542,7 @@ func TestService_CreateRole_FeatureNotSupported(t *testing.T) {
 }
 
 func TestService_CreateTenant_FeatureNotSupported(t *testing.T) {
-	cfg := DefaultConfig("tenantnosupport123456789012345678")
+	cfg := testConfig("tenantnosupport123456789012345678")
 	svc, _ := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore())
 	ctx := context.Background()
 	_, err := svc.CreateTenant(ctx, "X", nil)

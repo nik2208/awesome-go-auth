@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	auth "github.com/nik2208/awesome-go-auth"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Mounter builds a handler serving a's auth routes under cfg.
@@ -34,11 +35,22 @@ type Env struct {
 }
 
 // NewEnv builds an auth instance and mounts it.
+//
+// Every Env in the suite is built here, so this is the one place the bcrypt cost
+// needs pinning. The suite runs hundreds of Envs and seeds most of them, and at
+// the production default each seed is tens of milliseconds of key derivation
+// that none of the wire assertions look at — they check statuses, bodies and
+// Set-Cookie headers. bcrypt.MinCost keeps the hashes real (verification is
+// exercised for the whole login path) while taking the cost out of the runtime.
+//
+// It is prepended rather than appended so a caller that deliberately wants a
+// different cost can still override it.
 func NewEnv(t *testing.T, mount Mounter, cfg auth.HTTPConfig, opts ...auth.Option) *Env {
 	t.Helper()
 	opts = append([]auth.Option{
 		auth.WithUserStore(auth.NewMemoryUserStore()),
 		auth.WithSessionStore(auth.NewMemorySessionStore()),
+		auth.WithBcryptCost(bcrypt.MinCost),
 	}, opts...)
 	a, err := auth.New(opts...)
 	if err != nil {

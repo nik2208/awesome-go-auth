@@ -9,7 +9,7 @@ import (
 // helper to build a ready service for error-path tests
 func newTestSvc(t *testing.T) *Service {
 	t.Helper()
-	cfg := DefaultConfig("errtest12345678901234567890123456")
+	cfg := testConfig("errtest12345678901234567890123456")
 	svc, err := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore())
 	if err != nil {
 		t.Fatalf("newTestSvc: %v", err)
@@ -112,7 +112,7 @@ func TestLogin_WrongTenant(t *testing.T) {
 }
 
 func TestLogin_Require2FA_Config(t *testing.T) {
-	cfg := DefaultConfig("require2fa1234567890123456789012")
+	cfg := testConfig("require2fa1234567890123456789012")
 	cfg.Require2FA = true
 	svc, _ := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore())
 	ctx := context.Background()
@@ -128,7 +128,7 @@ func TestLogin_Require2FA_UserLevel(t *testing.T) {
 	ctx := context.Background()
 	// Manually create a user with Require2FA = true in the store
 	users := svc.users.(*MemoryUserStore)
-	hash, _ := hashPassword("password1")
+	hash, _ := hashPassword("password1", svc.cfg.BcryptCost)
 	id, _ := newID("usr")
 	_, _ = users.CreateUser(ctx, User{
 		ID:              id,
@@ -431,7 +431,7 @@ func TestVerifySMSCode_WrongCode(t *testing.T) {
 	svc := newTestSvc(t)
 	ctx := context.Background()
 	users := svc.users.(*MemoryUserStore)
-	hash, _ := hashPassword("password1")
+	hash, _ := hashPassword("password1", svc.cfg.BcryptCost)
 	id, _ := newID("usr")
 	_, _ = users.CreateUser(ctx, User{
 		ID:              id,

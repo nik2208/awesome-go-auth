@@ -181,7 +181,7 @@ func TestTempTokenIsNotASessionCredential(t *testing.T) {
 }
 
 func TestStepUpSubjectReportsTheRouteEnvelope(t *testing.T) {
-	a, err := New(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
+	a, err := newTestAuth(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}

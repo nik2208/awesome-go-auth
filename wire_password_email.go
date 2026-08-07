@@ -305,7 +305,7 @@ func (a *Auth) ChangePassword(ctx context.Context, in ChangePasswordInput) error
 		// call to a missing updatePassword produces too.
 		return ErrFeatureNotSupported
 	}
-	pwHash, err := hashPassword(in.NewPassword)
+	pwHash, err := hashPassword(in.NewPassword, s.cfg.BcryptCost)
 	if err != nil {
 		return err
 	}

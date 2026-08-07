@@ -3,8 +3,11 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -33,13 +36,23 @@ const (
 
 // Config contains security and token settings for the auth service.
 type Config struct {
-	Secret                string
-	Issuer                string
-	AccessTokenTTL        time.Duration
-	RefreshTokenTTL       time.Duration
-	SessionCheckOn        string
-	ClockSkew             time.Duration
-	MinPasswordLen        int
+	Secret          string
+	Issuer          string
+	AccessTokenTTL  time.Duration
+	RefreshTokenTTL time.Duration
+	SessionCheckOn  string
+	ClockSkew       time.Duration
+	MinPasswordLen  int
+	// BcryptCost is the bcrypt cost used for every password hash the library
+	// writes. It is this port's spelling of the reference's
+	// AuthConfig.bcryptSaltRounds; "cost" is what x/crypto/bcrypt calls the
+	// parameter, and what bcrypt.DefaultCost, MinCost and MaxCost name.
+	//
+	// Zero means unset, and unset means bcrypt.DefaultCost — never
+	// bcrypt.MinCost. A Config that was never told a cost must not silently get
+	// the weakest one. Any other value must lie in
+	// [bcrypt.MinCost, bcrypt.MaxCost]; validate rejects the rest.
+	BcryptCost            int
 	ResetTokenTTL         time.Duration
 	MagicLinkTTL          time.Duration
 	SMSCodeTTL            time.Duration
@@ -62,6 +75,7 @@ func DefaultConfig(secret string) Config {
 		SessionCheckOn:        SessionCheckOnRefresh,
 		ClockSkew:             30 * time.Second,
 		MinPasswordLen:        8,
+		BcryptCost:            bcrypt.DefaultCost,
 		ResetTokenTTL:         1 * time.Hour,
 		MagicLinkTTL:          15 * time.Minute,
 		SMSCodeTTL:            10 * time.Minute,
@@ -94,6 +108,9 @@ func (c Config) validate() error {
 	}
 	if c.MinPasswordLen < 8 {
 		return errors.New("auth: min password len must be >= 8")
+	}
+	if c.BcryptCost != 0 && (c.BcryptCost < bcrypt.MinCost || c.BcryptCost > bcrypt.MaxCost) {
+		return fmt.Errorf("auth: bcrypt cost must be between %d and %d, or 0 for the default (%d)", bcrypt.MinCost, bcrypt.MaxCost, bcrypt.DefaultCost)
 	}
 	if c.ResetTokenTTL <= 0 || c.MagicLinkTTL <= 0 || c.SMSCodeTTL <= 0 {
 		return errors.New("auth: reset token, magic link, and sms code ttl must be > 0")

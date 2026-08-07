@@ -3,7 +3,10 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Auth is the top-level entrypoint configured with functional options.
@@ -24,9 +27,25 @@ type authBuilder struct {
 	oauth    *OAuthWiring
 }
 
-// New creates a configured Auth instance.
+// New creates a configured Auth instance from the package defaults.
 func New(opts ...Option) (*Auth, error) {
-	b := &authBuilder{cfg: DefaultConfig("01234567890123456789012345678901")}
+	return NewWithConfig(DefaultConfig("01234567890123456789012345678901"), opts...)
+}
+
+// NewWithConfig creates a configured Auth instance from a pre-populated Config,
+// with any Options applied in order on top of it.
+//
+// New builds its Config internally and the exported Option set has always been
+// narrower than Config, so fields with no matching Option — the individual TTLs,
+// EmailVerificationMode, and until now BcryptCost — were unreachable from
+// outside the package (#25). Accepting the struct closes that whole class of gap
+// at once and cannot drift as Config grows, which one-Option-per-field would.
+// The Options remain as sugar and still compose with a supplied Config.
+//
+// cfg is validated by NewService exactly as New's is; a hand-built Config that
+// omits, say, the TTLs is rejected rather than silently defaulted.
+func NewWithConfig(cfg Config, opts ...Option) (*Auth, error) {
+	b := &authBuilder{cfg: cfg}
 	for _, opt := range opts {
 		if opt == nil {
 			continue
@@ -75,6 +94,23 @@ func WithTokenTTLs(access, refresh time.Duration) Option {
 		}
 		b.cfg.AccessTokenTTL = access
 		b.cfg.RefreshTokenTTL = refresh
+		return nil
+	}
+}
+
+// WithBcryptCost sets the bcrypt cost used for every password hash the library
+// writes. See Config.BcryptCost.
+//
+// Unlike the zero value of Config.BcryptCost, which means "unset" and resolves
+// to bcrypt.DefaultCost, calling this Option with 0 is an error: an explicit
+// setter reached with an unset value is a caller mistake, not a request for the
+// default. Omit the Option to get the default.
+func WithBcryptCost(cost int) Option {
+	return func(b *authBuilder) error {
+		if cost < bcrypt.MinCost || cost > bcrypt.MaxCost {
+			return fmt.Errorf("auth: bcrypt cost must be between %d and %d", bcrypt.MinCost, bcrypt.MaxCost)
+		}
+		b.cfg.BcryptCost = cost
 		return nil
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Service is the main entry point for authentication operations.
@@ -52,6 +54,14 @@ func NewService(cfg Config, users UserStore, sessions SessionStore, opts ...Serv
 			opt(svc)
 		}
 	}
+	// A cost below the library default is legal — the test suites rely on it —
+	// but it is never what a deployment wants, and the symptom (hashes that are
+	// cheap to attack) is invisible from outside. validate stays a pure
+	// value-in/error-out check in the style of its neighbours, so the one-shot
+	// notice goes here, where construction already has the Logger.
+	if cfg.BcryptCost != 0 && cfg.BcryptCost < bcrypt.DefaultCost {
+		svc.logf("auth: bcrypt cost %d is below the default %d; password hashes will be cheaper to crack", cfg.BcryptCost, bcrypt.DefaultCost)
+	}
 	return svc, nil
 }
 
@@ -70,7 +80,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (User, AuthTok
 		return User{}, zeroTokens, ErrUserExists
 	}
 
-	pwHash, err := hashPassword(in.Password)
+	pwHash, err := hashPassword(in.Password, s.cfg.BcryptCost)
 	if err != nil {
 		return User{}, zeroTokens, err
 	}
@@ -255,7 +265,7 @@ func (s *Service) ResetPassword(ctx context.Context, in ResetPasswordInput) erro
 	if err != nil || user.ResetTokenExpiresAt == nil || s.now().After(user.ResetTokenExpiresAt.Add(s.cfg.ClockSkew)) {
 		return ErrInvalidToken
 	}
-	pwHash, err := hashPassword(in.NewPassword)
+	pwHash, err := hashPassword(in.NewPassword, s.cfg.BcryptCost)
 	if err != nil {
 		return err
 	}
@@ -280,7 +290,7 @@ func (s *Service) ChangePassword(ctx context.Context, in ChangePasswordInput) er
 	if !ok {
 		return ErrFeatureNotSupported
 	}
-	pwHash, err := hashPassword(in.NewPassword)
+	pwHash, err := hashPassword(in.NewPassword, s.cfg.BcryptCost)
 	if err != nil {
 		return err
 	}

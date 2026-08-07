@@ -6,7 +6,7 @@ import (
 )
 
 func TestHashPassword_And_VerifyPassword(t *testing.T) {
-	hash, err := hashPassword("mypassword")
+	hash, err := hashPassword("mypassword", testBcryptCost)
 	if err != nil {
 		t.Fatalf("hashPassword: %v", err)
 	}
@@ -19,7 +19,7 @@ func TestHashPassword_And_VerifyPassword(t *testing.T) {
 }
 
 func TestVerifyPassword_WrongPassword(t *testing.T) {
-	hash, err := hashPassword("correctpassword")
+	hash, err := hashPassword("correctpassword", testBcryptCost)
 	if err != nil {
 		t.Fatalf("hashPassword: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestVerifyPassword_WrongPassword(t *testing.T) {
 }
 
 func TestVerifyPassword_EmptyPassword(t *testing.T) {
-	hash, err := hashPassword("password123")
+	hash, err := hashPassword("password123", testBcryptCost)
 	if err != nil {
 		t.Fatalf("hashPassword: %v", err)
 	}

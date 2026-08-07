@@ -25,8 +25,28 @@ func newID(prefix string) (string, error) {
 	return prefix + "_" + hex.EncodeToString(b), nil
 }
 
-func hashPassword(password string) (string, error) {
-	h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+// hashPassword hashes password at the given bcrypt cost.
+//
+// A zero cost means "unset" and resolves to bcrypt.DefaultCost. This is the one
+// place that resolution happens, so every caller may pass Config.BcryptCost
+// straight through without repeating the check.
+//
+// GenerateFromPassword documents the same substitution for any cost below
+// MinCost, so the branch below is not what makes the behaviour correct. It is
+// what makes it ours: the rule that an unconfigured deployment gets DefaultCost
+// and never MinCost is a password policy, and it should be stated and tested
+// here rather than inherited from a dependency that is free to change it.
+//
+// Costs outside [bcrypt.MinCost, bcrypt.MaxCost] cannot reach here through a
+// validated Config. If one does, bcrypt's own handling applies: anything below
+// MinCost is raised to DefaultCost, and anything above MaxCost is an
+// InvalidCostError, wrapped like any other failure. Neither case can produce a
+// hash weaker than DefaultCost.
+func hashPassword(password string, cost int) (string, error) {
+	if cost == 0 {
+		cost = bcrypt.DefaultCost
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(password), cost)
 	if err != nil {
 		return "", fmt.Errorf("auth: hash password: %w", err)
 	}

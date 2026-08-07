@@ -12,7 +12,7 @@ import (
 
 func testServiceForToken(t *testing.T) *Service {
 	t.Helper()
-	cfg := DefaultConfig("tokentest12345678901234567890123")
+	cfg := testConfig("tokentest12345678901234567890123")
 	svc, err := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore())
 	if err != nil {
 		t.Fatalf("new service: %v", err)

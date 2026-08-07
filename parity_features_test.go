@@ -13,7 +13,7 @@ func TestMeIncludesMetadataRolesTenantsAndCustomClaims(t *testing.T) {
 	metadataStore := NewMemoryMetadataStore()
 	rbacStore := NewMemoryRolesPermissionsStore()
 	tenantStore := NewMemoryTenantStore()
-	cfg := DefaultConfig("12345678901234567890123456789012")
+	cfg := testConfig("12345678901234567890123456789012")
 	cfg.BuildTokenClaims = func(_ context.Context, user User) (map[string]any, error) {
 		return map[string]any{"plan": "pro", "loginProvider": "local", "subjectEmail": user.Email}, nil
 	}
@@ -100,7 +100,7 @@ func (f failingMetadataStore) ClearMetadata(context.Context, string) error {
 func TestMeSkipsOptionalEnrichmentFailures(t *testing.T) {
 	ctx := context.Background()
 	logged := false
-	cfg := DefaultConfig("12345678901234567890123456789012")
+	cfg := testConfig("12345678901234567890123456789012")
 	cfg.Logger = func(format string, args ...any) {
 		logged = true
 	}

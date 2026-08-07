@@ -18,7 +18,7 @@ func TestNew_Defaults(t *testing.T) {
 }
 
 func TestNew_WithSecret(t *testing.T) {
-	a, err := New(WithSecret("abcdefghijklmnopqrstuvwxyz012345"))
+	a, err := newTestAuth(WithSecret("abcdefghijklmnopqrstuvwxyz012345"))
 	if err != nil {
 		t.Fatalf("New with secret: %v", err)
 	}
@@ -28,14 +28,14 @@ func TestNew_WithSecret(t *testing.T) {
 }
 
 func TestNew_WithInvalidSecret(t *testing.T) {
-	_, err := New(WithSecret("short"))
+	_, err := newTestAuth(WithSecret("short"))
 	if err == nil {
 		t.Fatal("expected error for short secret")
 	}
 }
 
 func TestNew_WithIssuer(t *testing.T) {
-	a, err := New(WithIssuer("my-issuer"))
+	a, err := newTestAuth(WithIssuer("my-issuer"))
 	if err != nil {
 		t.Fatalf("New with issuer: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestNew_WithIssuer(t *testing.T) {
 }
 
 func TestNew_WithTokenTTLs_Valid(t *testing.T) {
-	a, err := New(WithTokenTTLs(5*time.Minute, 7*24*time.Hour))
+	a, err := newTestAuth(WithTokenTTLs(5*time.Minute, 7*24*time.Hour))
 	if err != nil {
 		t.Fatalf("New with TTLs: %v", err)
 	}
@@ -58,35 +58,35 @@ func TestNew_WithTokenTTLs_Valid(t *testing.T) {
 }
 
 func TestNew_WithTokenTTLs_ZeroAccess(t *testing.T) {
-	_, err := New(WithTokenTTLs(0, 7*24*time.Hour))
+	_, err := newTestAuth(WithTokenTTLs(0, 7*24*time.Hour))
 	if err == nil {
 		t.Fatal("expected error for zero access TTL")
 	}
 }
 
 func TestNew_WithTokenTTLs_ZeroRefresh(t *testing.T) {
-	_, err := New(WithTokenTTLs(5*time.Minute, 0))
+	_, err := newTestAuth(WithTokenTTLs(5*time.Minute, 0))
 	if err == nil {
 		t.Fatal("expected error for zero refresh TTL")
 	}
 }
 
 func TestNew_WithNilUserStore(t *testing.T) {
-	_, err := New(WithUserStore(nil))
+	_, err := newTestAuth(WithUserStore(nil))
 	if err == nil {
 		t.Fatal("expected error for nil user store")
 	}
 }
 
 func TestNew_WithNilSessionStore(t *testing.T) {
-	_, err := New(WithSessionStore(nil))
+	_, err := newTestAuth(WithSessionStore(nil))
 	if err == nil {
 		t.Fatal("expected error for nil session store")
 	}
 }
 
 func TestNew_WithRequire2FA(t *testing.T) {
-	a, err := New(WithRequire2FA(true))
+	a, err := newTestAuth(WithRequire2FA(true))
 	if err != nil {
 		t.Fatalf("New with require 2FA: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestNew_WithRequire2FA(t *testing.T) {
 
 func TestNew_WithLogger(t *testing.T) {
 	logged := false
-	a, err := New(WithLogger(func(format string, args ...any) { logged = true }))
+	a, err := newTestAuth(WithLogger(func(format string, args ...any) { logged = true }))
 	if err != nil {
 		t.Fatalf("New with logger: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestNew_WithLogger(t *testing.T) {
 }
 
 func TestNew_WithTokenClaimsBuilder(t *testing.T) {
-	a, err := New(WithTokenClaimsBuilder(func(ctx context.Context, user User) (map[string]any, error) {
+	a, err := newTestAuth(WithTokenClaimsBuilder(func(ctx context.Context, user User) (map[string]any, error) {
 		return map[string]any{"x": 1}, nil
 	}))
 	if err != nil {
@@ -120,7 +120,7 @@ func TestNew_WithTokenClaimsBuilder(t *testing.T) {
 }
 
 func TestNew_NilOptionSkipped(t *testing.T) {
-	_, err := New(nil)
+	_, err := newTestAuth(nil)
 	if err != nil {
 		t.Fatalf("nil option should be skipped, got: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestNew_NilOptionSkipped(t *testing.T) {
 
 func TestNew_WithMetadataProvider(t *testing.T) {
 	ms := NewMemoryMetadataStore()
-	a, err := New(WithMetadataProvider(ms))
+	a, err := newTestAuth(WithMetadataProvider(ms))
 	if err != nil {
 		t.Fatalf("New with metadata provider: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestNew_WithMetadataProvider(t *testing.T) {
 
 func TestNew_WithRBACProvider(t *testing.T) {
 	rs := NewMemoryRolesPermissionsStore()
-	a, err := New(WithRBACProvider(rs))
+	a, err := newTestAuth(WithRBACProvider(rs))
 	if err != nil {
 		t.Fatalf("New with RBAC provider: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestNew_WithRBACProvider(t *testing.T) {
 
 func TestNew_WithTenantProvider(t *testing.T) {
 	ts := NewMemoryTenantStore()
-	a, err := New(WithTenantProvider(ts))
+	a, err := newTestAuth(WithTenantProvider(ts))
 	if err != nil {
 		t.Fatalf("New with tenant provider: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestNew_WithTenantProvider(t *testing.T) {
 
 func TestNew_WithTokenClaimsBuilder_ErrorOnRegister(t *testing.T) {
 	buildErr := errors.New("claims build error")
-	a, err := New(WithTokenClaimsBuilder(func(ctx context.Context, user User) (map[string]any, error) {
+	a, err := newTestAuth(WithTokenClaimsBuilder(func(ctx context.Context, user User) (map[string]any, error) {
 		return nil, buildErr
 	}))
 	if err != nil {
@@ -175,7 +175,7 @@ func TestNew_WithTokenClaimsBuilder_ErrorOnRegister(t *testing.T) {
 }
 
 func TestAuth_Register_Delegates(t *testing.T) {
-	a, _ := New()
+	a, _ := newTestAuth()
 	ctx := context.Background()
 	user, tokens, err := a.Register(ctx, RegisterInput{Email: "auth@example.com", Password: "password1", TenantID: "t1"})
 	if err != nil {
@@ -190,7 +190,7 @@ func TestAuth_Register_Delegates(t *testing.T) {
 }
 
 func TestAuth_Login_Delegates(t *testing.T) {
-	a, _ := New()
+	a, _ := newTestAuth()
 	ctx := context.Background()
 	_, _, _ = a.Register(ctx, RegisterInput{Email: "login@example.com", Password: "password1", TenantID: "t1"})
 	_, tokens, err := a.Login(ctx, LoginInput{Email: "login@example.com", Password: "password1", TenantID: "t1"})
@@ -203,7 +203,7 @@ func TestAuth_Login_Delegates(t *testing.T) {
 }
 
 func TestAuth_Refresh_Delegates(t *testing.T) {
-	a, _ := New()
+	a, _ := newTestAuth()
 	ctx := context.Background()
 	_, tokens, _ := a.Register(ctx, RegisterInput{Email: "refresh@example.com", Password: "password1", TenantID: "t1"})
 	newTokens, err := a.Refresh(ctx, tokens.RefreshToken)
@@ -216,7 +216,7 @@ func TestAuth_Refresh_Delegates(t *testing.T) {
 }
 
 func TestAuth_Logout_Delegates(t *testing.T) {
-	a, _ := New()
+	a, _ := newTestAuth()
 	ctx := context.Background()
 	_, tokens, _ := a.Register(ctx, RegisterInput{Email: "logout@example.com", Password: "password1", TenantID: "t1"})
 	if err := a.Logout(ctx, tokens.RefreshToken); err != nil {
@@ -228,7 +228,7 @@ func TestAuth_Logout_Delegates(t *testing.T) {
 }
 
 func TestAuth_Me_Delegates(t *testing.T) {
-	a, _ := New()
+	a, _ := newTestAuth()
 	ctx := context.Background()
 	user, tokens, _ := a.Register(ctx, RegisterInput{Email: "me@example.com", Password: "password1", TenantID: "t1"})
 	me, err := a.Me(ctx, tokens.AccessToken)
@@ -242,7 +242,7 @@ func TestAuth_Me_Delegates(t *testing.T) {
 
 func TestAuth_WithCustomUserStore(t *testing.T) {
 	users := NewMemoryUserStore()
-	a, err := New(WithUserStore(users))
+	a, err := newTestAuth(WithUserStore(users))
 	if err != nil {
 		t.Fatalf("New with user store: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestAuth_WithCustomUserStore(t *testing.T) {
 
 func TestAuth_WithCustomSessionStore(t *testing.T) {
 	sessions := NewMemorySessionStore()
-	a, err := New(WithSessionStore(sessions))
+	a, err := newTestAuth(WithSessionStore(sessions))
 	if err != nil {
 		t.Fatalf("New with session store: %v", err)
 	}
