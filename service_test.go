@@ -7,7 +7,7 @@ import (
 
 func testService(t *testing.T) *Service {
 	t.Helper()
-	cfg := DefaultConfig("01234567890123456789012345678901")
+	cfg := testConfig("01234567890123456789012345678901")
 	svc, err := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore())
 	if err != nil {
 		t.Fatalf("new service: %v", err)

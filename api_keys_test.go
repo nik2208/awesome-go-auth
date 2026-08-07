@@ -48,7 +48,7 @@ func (s *memAPIKeyStore) UpdateLastUsed(_ context.Context, id string, when time.
 }
 
 func TestAPIKeyService_Create(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	rawKey, record, err := svc.Create(ctx, store, "mykey", "svc1", []string{"read"}, nil, nil)
@@ -73,7 +73,7 @@ func TestAPIKeyService_Create(t *testing.T) {
 }
 
 func TestAPIKeyService_Create_NilStore(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	ctx := context.Background()
 	_, _, err := svc.Create(ctx, nil, "k", "s", nil, nil, nil)
 	if err == nil {
@@ -82,7 +82,7 @@ func TestAPIKeyService_Create_NilStore(t *testing.T) {
 }
 
 func TestAPIKeyService_Create_Persists(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	rawKey, record, err := svc.Create(ctx, store, "k", "s", nil, nil, nil)
@@ -100,7 +100,7 @@ func TestAPIKeyService_Create_Persists(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_Valid(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	rawKey, _, err := svc.Create(ctx, store, "k", "s", []string{"read", "write"}, nil, nil)
@@ -114,7 +114,7 @@ func TestAPIKeyService_Verify_Valid(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_InvalidPrefix(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	_, err := svc.Verify(ctx, store, "bad_key", "", nil)
@@ -124,7 +124,7 @@ func TestAPIKeyService_Verify_InvalidPrefix(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_TooShort(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	_, err := svc.Verify(ctx, store, "ak_x", "", nil)
@@ -134,7 +134,7 @@ func TestAPIKeyService_Verify_TooShort(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_WrongPassword(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	rawKey, record, err := svc.Create(ctx, store, "k", "s", nil, nil, nil)
@@ -157,7 +157,7 @@ func TestAPIKeyService_Verify_WrongPassword(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_Inactive(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	rawKey, record, err := svc.Create(ctx, store, "k", "s", nil, nil, nil)
@@ -172,7 +172,7 @@ func TestAPIKeyService_Verify_Inactive(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_Expired(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	past := time.Now().Add(-1 * time.Hour)
@@ -187,7 +187,7 @@ func TestAPIKeyService_Verify_Expired(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_NotExpired(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	future := time.Now().Add(1 * time.Hour)
@@ -202,7 +202,7 @@ func TestAPIKeyService_Verify_NotExpired(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_MissingScope(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	rawKey, _, err := svc.Create(ctx, store, "k", "s", []string{"read"}, nil, nil)
@@ -216,7 +216,7 @@ func TestAPIKeyService_Verify_MissingScope(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_NoRequiredScopes(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	rawKey, _, err := svc.Create(ctx, store, "k", "s", []string{"read"}, nil, nil)
@@ -230,7 +230,7 @@ func TestAPIKeyService_Verify_NoRequiredScopes(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_IPBlocked(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	rawKey, _, err := svc.Create(ctx, store, "k", "s", nil, []string{"10.0.0.1"}, nil)
@@ -244,7 +244,7 @@ func TestAPIKeyService_Verify_IPBlocked(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_IPAllowed(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	rawKey, _, err := svc.Create(ctx, store, "k", "s", nil, []string{"192.168.1.1"}, nil)
@@ -258,7 +258,7 @@ func TestAPIKeyService_Verify_IPAllowed(t *testing.T) {
 }
 
 func TestAPIKeyService_Verify_IPAllowed_CIDR(t *testing.T) {
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	store := newMemAPIKeyStore()
 	ctx := context.Background()
 	rawKey, _, err := svc.Create(ctx, store, "k", "s", nil, []string{"192.168.1.0/24"}, nil)
@@ -368,7 +368,7 @@ func TestExtractAPIKey_WrongAuthScheme(t *testing.T) {
 
 func TestAPIKeyMiddleware_ValidKey(t *testing.T) {
 	store := newMemAPIKeyStore()
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	ctx := context.Background()
 	rawKey, _, err := svc.Create(ctx, store, "k", "s", nil, nil, nil)
 	if err != nil {
@@ -425,7 +425,7 @@ func TestAPIKeyMiddleware_InvalidKey(t *testing.T) {
 
 func TestAPIKeyMiddleware_AllowedIP(t *testing.T) {
 	store := newMemAPIKeyStore()
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	ctx := context.Background()
 	rawKey, _, err := svc.Create(ctx, store, "k", "s", nil, []string{"127.0.0.1"}, nil)
 	if err != nil {
@@ -447,7 +447,7 @@ func TestAPIKeyMiddleware_AllowedIP(t *testing.T) {
 
 func TestAPIKeyMiddleware_BlockedIP(t *testing.T) {
 	store := newMemAPIKeyStore()
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	ctx := context.Background()
 	rawKey, _, err := svc.Create(ctx, store, "k", "s", nil, []string{"10.10.10.10"}, nil)
 	if err != nil {
@@ -469,7 +469,7 @@ func TestAPIKeyMiddleware_BlockedIP(t *testing.T) {
 
 func TestAPIKeyMiddleware_RequiredScopes_Pass(t *testing.T) {
 	store := newMemAPIKeyStore()
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	ctx := context.Background()
 	rawKey, _, err := svc.Create(ctx, store, "k", "s", []string{"read", "write"}, nil, nil)
 	if err != nil {
@@ -490,7 +490,7 @@ func TestAPIKeyMiddleware_RequiredScopes_Pass(t *testing.T) {
 
 func TestAPIKeyMiddleware_RequiredScopes_Fail(t *testing.T) {
 	store := newMemAPIKeyStore()
-	svc := NewAPIKeyService()
+	svc := NewAPIKeyService(testBcryptCost)
 	ctx := context.Background()
 	rawKey, _, err := svc.Create(ctx, store, "k", "s", []string{"read"}, nil, nil)
 	if err != nil {

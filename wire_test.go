@@ -263,7 +263,7 @@ func TestUnmappedSentinelsAreDeliberate(t *testing.T) {
 // the access cookie to <prefix>/logout; if that does not revoke, logout answers
 // 200 and leaves the session live.
 func TestLogoutAccessTokenRevokesTheSession(t *testing.T) {
-	a, err := New(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
+	a, err := newTestAuth(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestLogoutAccessTokenRevokesTheSession(t *testing.T) {
 // through the helper all four adapters call, with the cookie set a browser
 // would actually send to <prefix>/logout in the __Secure- configuration.
 func TestLogoutRequestFallsBackToTheAccessCookie(t *testing.T) {
-	a, err := New(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
+	a, err := newTestAuth(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestLogoutRequestFallsBackToTheAccessCookie(t *testing.T) {
 
 // TestLogoutRequestToleratesEveryMissingCredential — logout must never fail.
 func TestLogoutRequestToleratesEveryMissingCredential(t *testing.T) {
-	a, err := New(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
+	a, err := newTestAuth(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}

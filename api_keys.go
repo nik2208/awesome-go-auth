@@ -32,9 +32,23 @@ type APIKeyStore interface {
 	UpdateLastUsed(ctx context.Context, id string, when time.Time) error
 }
 
-type APIKeyService struct{}
+// APIKeyService issues and verifies API keys. Create stores a bcrypt hash of
+// the key, so it carries the same cost knob as Config.BcryptCost — an operator
+// who raises the password cost would otherwise still get key hashes pinned at
+// the default, with no way to reach them.
+type APIKeyService struct {
+	bcryptCost int
+}
 
-func NewAPIKeyService() *APIKeyService { return &APIKeyService{} }
+// NewAPIKeyService returns a service that hashes new keys at bcryptCost.
+//
+// As with Config.BcryptCost, zero means unset and resolves to
+// bcrypt.DefaultCost. Verify does not hash, so a service used only for
+// verification may be built with 0 regardless of the cost its keys were created
+// at: bcrypt reads the cost out of the stored hash.
+func NewAPIKeyService(bcryptCost int) *APIKeyService {
+	return &APIKeyService{bcryptCost: bcryptCost}
+}
 
 var apiKeyBodySanitizer = regexp.MustCompile(`[^a-zA-Z0-9]`)
 
@@ -67,7 +81,7 @@ func (s *APIKeyService) Create(ctx context.Context, store APIKeyStore, name, ser
 		return "", APIKeyRecord{}, err
 	}
 	prefix := rawKey[:11]
-	h, err := hashPassword(rawKey)
+	h, err := hashPassword(rawKey, s.bcryptCost)
 	if err != nil {
 		return "", APIKeyRecord{}, err
 	}
@@ -113,7 +127,9 @@ func (s *APIKeyService) Verify(ctx context.Context, store APIKeyStore, rawKey st
 }
 
 func APIKeyMiddleware(store APIKeyStore, requiredScopes []string) func(http.Handler) http.Handler {
-	svc := NewAPIKeyService()
+	// 0: this service only ever calls Verify, which reads the cost from the
+	// stored hash and never produces one.
+	svc := NewAPIKeyService(0)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw := extractAPIKey(r.Header)

@@ -43,6 +43,21 @@ a, err := auth.New(
 )
 ```
 
+### `NewWithConfig(cfg Config, opts ...Option) (*Auth, error)`
+
+Same as `New`, but starting from a `Config` you populate yourself; any options are
+applied on top. Use it to reach `Config` fields that have no `With*` option — the
+individual TTLs, `EmailVerificationMode`, `BcryptCost`. `cfg` is validated exactly
+as `New`'s is, so a partially filled struct is rejected rather than silently
+defaulted.
+
+```go
+cfg := auth.DefaultConfig("32-byte-secret")
+cfg.BcryptCost = 12
+cfg.EmailVerificationMode = auth.EmailVerificationModeStrict
+a, err := auth.NewWithConfig(cfg, auth.WithUserStore(myStore))
+```
+
 ### `(*Auth).Service() *Service`
 
 Returns the underlying `*Service` for direct method calls.
@@ -109,6 +124,7 @@ type Config struct {
     EmailChangeTTL        time.Duration                 // default: 24h
     ClockSkew             time.Duration                 // default: 5s
     MinPasswordLen        int                           // default: 8
+    BcryptCost            int                           // default: bcrypt.DefaultCost (10); 0 means unset
     Require2FA            bool
     BuildTokenClaims      func(ctx, User) (map[string]any, error)
     Logger                func(format string, args ...any)
@@ -278,6 +294,7 @@ Pass to `auth.New(...)`:
 | `WithMetadataProvider(UserMetadataStore)` | Enable metadata |
 | `WithRBACProvider(RolesPermissionsStore)` | Enable RBAC |
 | `WithTenantProvider(TenantStore)` | Enable multi-tenancy |
+| `WithBcryptCost(int)` | Password hashing cost, `bcrypt.MinCost`..`bcrypt.MaxCost` |
 | `WithRequire2FA(bool)` | Require 2FA for all users |
 | `WithTokenClaimsBuilder(func)` | Custom JWT claims |
 | `WithLogger(func)` | Logging callback |
@@ -588,7 +605,12 @@ Serves `ui/auth.js` — a ~3KB vanilla JavaScript browser SDK with no dependenci
 
 ## API Keys
 
-### `NewAPIKeyService() *APIKeyService`
+### `NewAPIKeyService(bcryptCost int) *APIKeyService`
+
+Keys are hashed with bcrypt at `bcryptCost`; zero means `bcrypt.DefaultCost`. Pass
+the same value as `Config.BcryptCost` to keep both kinds of stored secret at one
+cost. `Verify` never hashes — it reads the cost out of the stored hash — so a
+verify-only service may pass `0` whatever cost its keys were created at.
 
 ### `(*APIKeyService).Create(ctx, store, name, serviceID, scopes, allowedIPs, expiresAt) (rawKey string, record APIKeyRecord, err error)`
 
@@ -684,7 +706,7 @@ Internal helpers (unexported) available for use within the package:
 | Function | Description |
 |----------|-------------|
 | `newID(prefix) (string, error)` | Generates `prefix_<32hex>` ID |
-| `hashPassword(password) (string, error)` | bcrypt with DefaultCost |
+| `hashPassword(password, cost) (string, error)` | bcrypt at `cost`; a zero cost means `DefaultCost` |
 | `verifyPassword(password, hash) bool` | bcrypt compare |
 | `hashToken(token) string` | SHA-256 hex |
 | `randomToken(byteLen) (string, error)` | Base64URL random bytes |

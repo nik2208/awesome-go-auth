@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	auth "github.com/nik2208/awesome-go-auth"
 	ginadapter "github.com/nik2208/awesome-go-auth/adapter/gin"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // TestCSRFEnforcedUnderAPrefixCollidingGroup is the end-to-end half of
@@ -35,6 +36,9 @@ func TestCSRFEnforcedUnderAPrefixCollidingGroup(t *testing.T) {
 	a, err := auth.New(
 		auth.WithUserStore(auth.NewMemoryUserStore()),
 		auth.WithSessionStore(auth.NewMemorySessionStore()),
+		// The only Auth in the adapter suites not built by wiretest.NewEnv, so
+		// it needs the same cheap cost; this test is about CSRF, not hashing.
+		auth.WithBcryptCost(bcrypt.MinCost),
 		auth.WithOAuth(auth.OAuthWiring{
 			LinkedAccounts: auth.NewMemoryLinkedAccounts(),
 			PendingLinks:   pending,

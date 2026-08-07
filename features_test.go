@@ -87,7 +87,7 @@ func TestSMSLoginFlow(t *testing.T) {
 
 func testServiceWithEmailVerificationMode(t *testing.T, mode string) *Service {
 	t.Helper()
-	cfg := DefaultConfig("01234567890123456789012345678901")
+	cfg := testConfig("01234567890123456789012345678901")
 	cfg.EmailVerificationMode = mode
 	svc, err := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore())
 	if err != nil {
@@ -230,7 +230,7 @@ func TestEmailVerificationModeStrictRefusesLoginUntilVerified(t *testing.T) {
 // provisioning path, a data import or a custom UserStore would.
 func createUnverifiedUser(t *testing.T, svc *Service, email string) User {
 	t.Helper()
-	pw, err := hashPassword("password1")
+	pw, err := hashPassword("password1", svc.cfg.BcryptCost)
 	if err != nil {
 		t.Fatalf("hash password: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestUpdateProfileAndDeleteAccountFlow(t *testing.T) {
 
 func TestSessionCheckAllCallsRejectsRevokedSessionOnMe(t *testing.T) {
 	ctx := context.Background()
-	cfg := DefaultConfig("01234567890123456789012345678901")
+	cfg := testConfig("01234567890123456789012345678901")
 	cfg.SessionCheckOn = SessionCheckOnAllCalls
 	svc, err := NewService(cfg, NewMemoryUserStore(), NewMemorySessionStore())
 	if err != nil {

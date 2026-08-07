@@ -99,9 +99,13 @@ func TestStepUpErrorMapping(t *testing.T) {
 }
 
 // seedUser puts a user straight into the store. It deliberately avoids
-// Register: this package's test binary is already close to the default 10-minute
-// go test timeout, almost all of it bcrypt, and none of the assertions below
-// involve a password.
+// Register because none of the assertions below involve a password, so there is
+// nothing to gain from running one through the service.
+//
+// This used to be a runtime necessity rather than a preference: the package's
+// test binary sat close to the default 10-minute go test timeout, almost all of
+// it key derivation. It no longer is — the fixtures hash at testBcryptCost — so
+// do not read this as a reason to keep new fixtures away from Register.
 func seedUser(t *testing.T, svc *Service, email string) User {
 	t.Helper()
 	id, err := newID("usr")
@@ -181,7 +185,7 @@ func TestTempTokenIsNotASessionCredential(t *testing.T) {
 }
 
 func TestStepUpSubjectReportsTheRouteEnvelope(t *testing.T) {
-	a, err := New(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
+	a, err := newTestAuth(WithUserStore(NewMemoryUserStore()), WithSessionStore(NewMemorySessionStore()))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}

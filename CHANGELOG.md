@@ -121,7 +121,33 @@ every later route builds on.
   login/refresh, which would emit two conflicting `Set-Cookie` headers for the
   same name on a first login. The client-visible behaviour is unchanged.
 
+- **BREAKING — `auth.NewAPIKeyService` now takes the bcrypt cost:**
+  `NewAPIKeyService(bcryptCost int)`. `Create` stores a bcrypt hash of the key,
+  so it carried the same hardcoded cost as passwords and was equally
+  unreachable; an operator raising `Config.BcryptCost` would otherwise still get
+  key hashes pinned at 10. Pass `0` for the default — including from a
+  verify-only call site, since `Verify` reads the cost out of the stored hash
+  and never produces one. Existing keys keep verifying at whatever cost they
+  were written with. Callers update as
+  `auth.NewAPIKeyService()` → `auth.NewAPIKeyService(0)`.
+
 ### Added
+- `Config.BcryptCost` and `auth.WithBcryptCost`, closing item 2 of #25. This is
+  the port's spelling of the reference's `AuthConfig.bcryptSaltRounds`; "cost" is
+  what `x/crypto/bcrypt` calls the parameter. The default is unchanged:
+  `DefaultConfig` sets `bcrypt.DefaultCost`, and a zero value means "unset",
+  which resolves to `bcrypt.DefaultCost` and never to `bcrypt.MinCost`.
+  `Config.validate` rejects anything outside `[bcrypt.MinCost, bcrypt.MaxCost]`,
+  and a cost explicitly configured *below* `DefaultCost` is reported once
+  through `Config.Logger` at construction — legal, since the test suites need
+  it, but never silent.
+- `auth.NewWithConfig(cfg Config, opts ...Option)`, closing item 3 and the root
+  cause of #25. `New` builds its `Config` internally and the exported `Option`
+  set has always been narrower than `Config`, so the individual TTLs and
+  `EmailVerificationMode` were unreachable from outside the package. Taking the
+  struct fixes that class of gap once and cannot drift as `Config` grows.
+  Options still apply on top, so the two styles compose. (Item 1, the single
+  signing secret, is untouched and #25 stays open for it.)
 - `wire.go`: the shared conventions in the root package (stdlib only) —
   `HTTPConfig`, `CookieOptions`, `HTTPError` and the error catalog,
   `WriteJSON`/`WriteHTTPError`/`WriteSuccess`/`WriteTokens`, `CookieValue`,

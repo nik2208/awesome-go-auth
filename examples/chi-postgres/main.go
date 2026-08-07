@@ -27,10 +27,15 @@ import (
 
 func main() {
 	// ── 1. Build the auth service ──────────────────────────────────────────
+	// Cost 12 is a common production baseline, above the library default of 10.
+	// The API-key service below is given the same cost so both kinds of secret
+	// this process stores are hashed alike.
+	const bcryptCost = 12
 	a, err := auth.New(
 		auth.WithSecret(getEnv("AUTH_SECRET", "change-me-in-production-32bytes!!")),
 		auth.WithIssuer("https://api.example.com"),
 		auth.WithTokenTTLs(15*time.Minute, 7*24*time.Hour),
+		auth.WithBcryptCost(bcryptCost),
 		// Swap NewMemoryUserStore() for your PostgresUserStore implementation:
 		auth.WithUserStore(auth.NewMemoryUserStore()),
 		auth.WithSessionStore(auth.NewMemorySessionStore()),
@@ -124,7 +129,7 @@ func main() {
 	})
 
 	// API key protected route
-	apiKeySvc := auth.NewAPIKeyService()
+	apiKeySvc := auth.NewAPIKeyService(bcryptCost)
 	_ = apiKeySvc
 
 	addr := getEnv("ADDR", ":8080")
