@@ -7,9 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Work towards v0.2.0, which aligns the HTTP surface with the family wire contract
-(#22). This entry covers item 1: the shared response envelope and conventions
-every later route builds on.
+## [0.2.0] - 2026-08-07
+
+Aligns the HTTP surface with the family wire contract (#22): the full auth-router
+surface (~32 routes across all four adapters) now matches the reference in
+routes, response envelopes, cookies, error codes and CSRF, so the shipped
+Angular, Flutter and `auth.js` clients work against this port with only a
+base-URL change. This is a breaking release across the token format, the cookie
+names, the response bodies and several constructor signatures — see the BREAKING
+entries below. There are no known prior consumers other than the family's own
+clients, which this release is what makes compatible.
 
 ### Changed
 - **BREAKING — `GET /auth/me` returns the user object unwrapped.** It was
