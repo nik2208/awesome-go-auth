@@ -378,9 +378,14 @@ func testLoginTwoFactor(t *testing.T, mount Mounter) {
 	})
 }
 
-// assertNoTempToken fails when a response body mentions a step-up token at all.
-// It reads the raw body rather than a decoded member, so a token smuggled under
-// any name — or nested — still fails.
+// assertNoTempToken fails when a response body mentions a step-up token under
+// that name, at any nesting depth: it matches the raw body rather than a decoded
+// top-level member.
+//
+// It does not, on its own, rule out a token handed over under some other name —
+// a substring check cannot. What rules that out is the AssertError beside every
+// call, which pins the body to exactly the error envelope's members, so any
+// extra member fails whatever it is called.
 func assertNoTempToken(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	if strings.Contains(rec.Body.String(), "tempToken") {
