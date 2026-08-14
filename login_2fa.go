@@ -1,0 +1,232 @@
+package auth
+
+import (
+	"context"
+	"net/http"
+	"strings"
+)
+
+// This file holds the second-factor branch of POST /login: the answer that hands
+// a client the step-up token every route in wire-contract §3 asks for.
+//
+// Before it, Service.Login answered a 2FA-gated account with
+// ErrTwoFactorRequired and nothing else, which HTTPErrorFor spells
+// 403 {"error":"Two-factor authentication required","code":"2FA_REQUIRED"}. That
+// body carries no tempToken, and /2fa/verify plus /sms/{send,verify} and
+// /magic-link/{send,verify} in mode:"2fa" all need one — so the entire step-up
+// half of the contract was unreachable over HTTP even though those routes were
+// implemented and tested. The tests minted their own tempToken, which is why the
+// gap survived (issue #42).
+//
+// Why the challenge does not travel in the HTTPError envelope. Two reasons, and
+// the first settles it on its own:
+//
+//   - It is not an error. The reference answers the challenge
+//     200 {"requiresTwoFactor":true,"tempToken":"<jwt>","available2faMethods":[…]}
+//     (auth.router.ts:572-577) — no "error" member, no "code", and the identical
+//     body in bearer and cookie mode because no session exists yet. The 403 this
+//     port used to send was a deviation, and a recorded one:
+//     docs/spec/parity-gap-node-vs-go.md row 1 marks local login "diverges" and
+//     names the missing challenge. Its sibling branch is a 403 but is equally not
+//     the envelope: {"requires2FASetup":true,"tempToken":"<jwt>",
+//     "code":"2FA_SETUP_REQUIRED"} (:568) carries a code and no message.
+//   - HTTPError is shared by every route in the package. Widening it would put
+//     two more `omitempty` members on all thirty-odd catalog entries for the sake
+//     of one branch, and a []string member would make HTTPError non-comparable —
+//     wire_test.go keys a map on the value and TestErrorMapping compares entries
+//     with ==, so the catalog is comparable by design, not by accident.
+//
+// So the two bodies are written directly, by WriteTwoFactorChallenge, and
+// HTTPErrTwoFactorRequired stays in the catalog for a direct Service.Login caller
+// that surfaces the sentinel through WriteServiceError.
+
+// Second-factor method names, exactly as the reference spells them in
+// available2faMethods (auth.router.ts:557-559). A client picks its next request
+// from this list, so these strings are wire: "magic-link" is hyphenated and
+// nothing is capitalised.
+const (
+	TwoFactorMethodTOTP      = "totp"
+	TwoFactorMethodSMS       = "sms"
+	TwoFactorMethodMagicLink = "magic-link"
+)
+
+// CodeTwoFactorSetupRequired tells a client that a second factor is demanded of
+// this account and it has none to present, so enrolment has to come first. It is
+// declared here rather than in wire.go's catalog because the body it appears in
+// is not the error envelope — see WriteTwoFactorChallenge — and because
+// passwordless.go sets the precedent of a feature file owning its own codes.
+const CodeTwoFactorSetupRequired = "2FA_SETUP_REQUIRED"
+
+// TwoFactorChallenge is what POST /login answers a user who has a second factor:
+// the step-up token, and the factors they can actually present it with.
+//
+// It carries what goes on the wire and nothing else, for the reason
+// MagicLinkDelivery carries so little (delivery.go): the token is a credential,
+// and a value that also held the User would hand a password hash and a TOTP
+// secret to anything that logs a challenge.
+type TwoFactorChallenge struct {
+	// TempToken is the step-up credential the §3 routes accept. It is typed
+	// tokenTypeTemp, so unlike the reference's it is not also an access token —
+	// see the tokenTypeTemp comment for why that deliberate difference is kept.
+	TempToken string
+	// Methods is available2faMethods: the factors this user can use, in the
+	// reference's order. It is empty only when SetupRequired is set.
+	Methods []string
+	// SetupRequired selects the second of the reference's two branches: a policy
+	// demands a second factor and the account has no method at all, so the client
+	// must enrol one before it can be challenged.
+	SetupRequired bool
+}
+
+// LoginResult is the outcome of a password login: either a session, or a
+// second-factor challenge.
+type LoginResult struct {
+	// User is whose password verified. It is populated on both outcomes, because
+	// on both outcomes the password did verify and a host that audit-logs a
+	// challenge has to know whose it was.
+	User User
+	// Tokens is the issued session. It is zero when Challenge is set: a challenge
+	// is not a login, and no session exists until the second factor lands.
+	Tokens AuthTokens
+	// Challenge is nil for a login that completed.
+	Challenge *TwoFactorChallenge
+}
+
+// LoginWithChallenge is the full POST /login path: it verifies the password and
+// then either issues a session or mints the step-up challenge.
+//
+// Service.Login is the narrower form of the same call, kept for direct callers:
+// it collapses a challenge back into ErrTwoFactorRequired, which says a second
+// factor is needed and cannot say anything more.
+func (s *Service) LoginWithChallenge(ctx context.Context, in LoginInput) (LoginResult, error) {
+	var zero LoginResult
+	in.Email = normalizeEmail(in.Email)
+	user, err := s.users.GetUserByEmail(ctx, in.Email, in.TenantID)
+	if err != nil || !verifyPassword(in.Password, user.PasswordHash) {
+		return zero, ErrInvalidCredentials
+	}
+	if !user.IsEmailVerified && s.emailVerificationMode() != EmailVerificationModeLazy {
+		return zero, ErrEmailNotVerified
+	}
+	// Only here, below both gates, is a step-up token minted. Anywhere earlier —
+	// on a lookup hit, or before verifyPassword returns — and /login becomes an
+	// oracle that hands a step-up credential to whoever guesses an address, and
+	// that credential stands in for the password on every route in §3.
+	if s.requiresTwoFactor(user) {
+		challenge, err := s.twoFactorChallenge(ctx, user)
+		if err != nil {
+			return zero, err
+		}
+		return LoginResult{User: user, Challenge: challenge}, nil
+	}
+	tokens, err := s.newSessionTokens(ctx, user)
+	if err != nil {
+		return zero, err
+	}
+	return LoginResult{User: user, Tokens: tokens}, nil
+}
+
+// twoFactorChallenge mints the challenge for a user whose password has already
+// verified. It is unexported because it takes no password: the only correct
+// caller is the one above it.
+func (s *Service) twoFactorChallenge(ctx context.Context, user User) (*TwoFactorChallenge, error) {
+	methods := s.availableTwoFactorMethods(user)
+	// Both reference branches mint the same token with the same overridden
+	// expiries (auth.router.ts:564-567 and :572-575), so it is minted once here.
+	token, err := s.IssueTempToken(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+	return &TwoFactorChallenge{TempToken: token, Methods: methods, SetupRequired: len(methods) == 0}, nil
+}
+
+// availableTwoFactorMethods lists the factors this user can present, in the
+// reference's order (auth.router.ts:556-559).
+//
+// Note what each entry is conditioned on there. TOTP is per-user; SMS is
+// per-user (a stored number) and per-deployment (config.sms); magic-link is
+// per-deployment only (config.email.sendMagicLink || config.email.mailer). So a
+// deployment that can send mail offers magic-link to every challenged user, and
+// the port keeps that: it is the sender on Config that decides, exactly as
+// Auth.SMSConfigured decides for /sms/send.
+//
+// Two things this deliberately does not check:
+//
+//   - A verified address is not required for magic-link. The reference does not
+//     check one (:559), the step-up branch of /magic-link/verify does not either
+//     (Service.verifyMagicLink applies the verification side effect only on the
+//     login path), and login has already refused an unverified user above unless
+//     the deployment runs in lazy mode. Requiring one here would advertise fewer
+//     methods than the routes accept.
+//   - Config.Require2FA is not consulted. It is the trigger for a challenge, not
+//     a method, and asking it here would advertise a factor nobody enrolled.
+//
+// The store-capability assertions have no counterpart in the reference, whose
+// user store is one interface. They are this port's version of the same
+// question — is this method wired up at all — and they only ever narrow the
+// list: without them a deployment whose store cannot hold a magic-link token
+// would advertise magic-link and answer 501 NOT_IMPLEMENTED when the client took
+// it up.
+func (s *Service) availableTwoFactorMethods(user User) []string {
+	methods := make([]string, 0, 3)
+	if user.IsTOTPEnabled && strings.TrimSpace(user.TOTPSecret) != "" {
+		methods = append(methods, TwoFactorMethodTOTP)
+	}
+	if _, ok := s.users.(SMSStore); ok && s.cfg.SendSMSCode != nil && strings.TrimSpace(user.PhoneNumber) != "" {
+		methods = append(methods, TwoFactorMethodSMS)
+	}
+	if _, ok := s.users.(MagicLinkStore); ok && s.cfg.SendMagicLink != nil {
+		methods = append(methods, TwoFactorMethodMagicLink)
+	}
+	return methods
+}
+
+// LoginWithChallenge delegates to Service.LoginWithChallenge. It is what the
+// adapters call, so that a 2FA-gated account is answered with the challenge
+// rather than with the bare sentinel.
+func (a *Auth) LoginWithChallenge(ctx context.Context, in LoginInput) (LoginResult, error) {
+	return a.service.LoginWithChallenge(ctx, in)
+}
+
+// The two challenge bodies. They are structs rather than maps so the member set
+// is fixed at compile time: a client keys on requiresTwoFactor / requires2FASetup
+// to tell the branches apart, and the two share only tempToken.
+type twoFactorChallengeBody struct {
+	RequiresTwoFactor bool     `json:"requiresTwoFactor"`
+	TempToken         string   `json:"tempToken"`
+	Methods           []string `json:"available2faMethods"`
+}
+
+type twoFactorSetupBody struct {
+	Requires2FASetup bool   `json:"requires2FASetup"`
+	TempToken        string `json:"tempToken"`
+	Code             string `json:"code"`
+}
+
+// WriteTwoFactorChallenge writes the login challenge as the entire response body.
+//
+// No cookie is set on either branch, in either delivery mode: nothing has been
+// issued yet, so there is nothing to deliver. That is the reference's behaviour
+// too — the 2FA branch returns before issueTokens is ever reached
+// (auth.router.ts:571-578 precedes :580-581).
+func WriteTwoFactorChallenge(w http.ResponseWriter, challenge TwoFactorChallenge) {
+	if challenge.SetupRequired {
+		WriteJSON(w, http.StatusForbidden, twoFactorSetupBody{
+			Requires2FASetup: true,
+			TempToken:        challenge.TempToken,
+			Code:             CodeTwoFactorSetupRequired,
+		})
+		return
+	}
+	methods := challenge.Methods
+	if methods == nil {
+		// encoding/json renders a nil slice as null, and a client iterating
+		// available2faMethods must never be handed one.
+		methods = []string{}
+	}
+	WriteJSON(w, http.StatusOK, twoFactorChallengeBody{
+		RequiresTwoFactor: true,
+		TempToken:         challenge.TempToken,
+		Methods:           methods,
+	})
+}

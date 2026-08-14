@@ -185,12 +185,18 @@ func (ad *Adapter) login(c *gin.Context) {
 		auth.WriteHTTPError(c.Writer, auth.HTTPErrInvalidBody)
 		return
 	}
-	_, tokens, err := ad.auth.Login(c.Request.Context(), auth.LoginInput{Email: req.Email, Password: req.Password, TenantID: req.TenantID})
+	result, err := ad.auth.LoginWithChallenge(c.Request.Context(), auth.LoginInput{Email: req.Email, Password: req.Password, TenantID: req.TenantID})
 	if err != nil {
 		auth.WriteServiceError(c.Writer, err)
 		return
 	}
-	ad.cfg.WriteTokens(c.Writer, c.Request, http.StatusOK, tokens, nil)
+	// A second factor is not a failure: the challenge is its own body, carrying the
+	// tempToken the step-up routes need. See login_2fa.go.
+	if result.Challenge != nil {
+		auth.WriteTwoFactorChallenge(c.Writer, *result.Challenge)
+		return
+	}
+	ad.cfg.WriteTokens(c.Writer, c.Request, http.StatusOK, result.Tokens, nil)
 }
 
 func (ad *Adapter) refresh(c *gin.Context) {

@@ -152,12 +152,18 @@ func (a *Adapter) Login(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	_, tokens, err := a.auth.Login(r.Context(), auth.LoginInput{Email: req.Email, Password: req.Password, TenantID: req.TenantID})
+	result, err := a.auth.LoginWithChallenge(r.Context(), auth.LoginInput{Email: req.Email, Password: req.Password, TenantID: req.TenantID})
 	if err != nil {
 		auth.WriteServiceError(w, err)
 		return
 	}
-	a.cfg.WriteTokens(w, r, http.StatusOK, tokens, nil)
+	// A second factor is not a failure: the challenge is its own body, carrying the
+	// tempToken the step-up routes need. See login_2fa.go.
+	if result.Challenge != nil {
+		auth.WriteTwoFactorChallenge(w, *result.Challenge)
+		return
+	}
+	a.cfg.WriteTokens(w, r, http.StatusOK, result.Tokens, nil)
 }
 
 // Refresh handles POST <prefix>/refresh.

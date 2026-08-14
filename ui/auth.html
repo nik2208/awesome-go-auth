@@ -99,6 +99,7 @@
     <div class="form-group"><input type="text" id="totp-code" class="totp-input" placeholder="000000" maxlength="6" inputmode="numeric"></div>
     <button class="btn btn-primary" onclick="doTOTP()">Verify</button>
     <div class="error" id="totp-error"></div>
+    <div class="success" id="totp-success"></div>
   </div>
 </div>
 
@@ -109,9 +110,9 @@
 // fetches here are how this page drifted a major version behind the router.
 AuthSDK.configure({ baseURL: window.location.origin });
 
-// The step-up token a 2FA challenge is verified against. It stays null on this
-// page: /login answers 403 2FA_REQUIRED without issuing one (the reference does
-// issue it), so the TOTP form below is reachable only if a host sets this.
+// The step-up token a 2FA challenge is verified against. /login now hands one
+// back with the challenge, so doLogin below can fill this in and the TOTP form is
+// reachable from the login form.
 let pendingTempToken = null;
 
 function switchTab(tab) {
@@ -138,15 +139,29 @@ async function doLogin() {
   const btn = document.getElementById('login-btn');
   btn.disabled = true; btn.textContent = 'Signing in…';
   try {
-    await AuthSDK.login(email, password);
-    showSuccess('login-success', 'Signed in! Redirecting…');
+    const data = await AuthSDK.login(email, password);
+    // A 2FA-gated account is answered with a challenge, not a session: hold the
+    // tempToken and send the user to the form for a method the account can use.
+    // Only the TOTP form lives on this page, so an account without 'totp' has to
+    // be told rather than shown a form that cannot succeed.
+    if (data && data.requiresTwoFactor) {
+      pendingTempToken = data.tempToken;
+      const methods = data.available2faMethods || [];
+      if (methods.indexOf('totp') !== -1) {
+        switchTab('totp');
+      } else {
+        showError('login-error', 'This account needs a second factor this page cannot present: ' + methods.join(', '));
+      }
+    } else {
+      showSuccess('login-success', 'Signed in! Redirecting…');
+    }
   } catch (e) {
-    // A 2FA-gated account answers 403 2FA_REQUIRED. This port's /login stops
-    // there: unlike the reference it does not hand back a tempToken, and every
-    // step-up route needs one, so the challenge cannot be completed from here.
-    // Switching to the TOTP tab would just present a form that cannot succeed.
-    if (e.code === '2FA_REQUIRED') {
-      showError('login-error', 'This account needs a second factor, which this build cannot complete from the login page yet.');
+    // The other 2FA branch: a policy demands a second factor and this account has
+    // none. Its tempToken authenticates nothing in this port — /2fa/setup is
+    // behind the access-token gate — so enrolment has to happen from a signed-in
+    // session, which is why this only reports the situation.
+    if (e.code === '2FA_SETUP_REQUIRED') {
+      showError('login-error', 'This account must enrol a second factor before it can sign in.');
     } else {
       showError('login-error', e.message || 'Invalid credentials');
     }
@@ -194,7 +209,10 @@ async function doTOTP() {
   if (!pendingTempToken) { showError('totp-error', 'Sign in again to restart the challenge'); return; }
   try {
     await AuthSDK.verifyTwoFactor(pendingTempToken, code);
+    // Dropped as soon as the challenge is answered. The token itself stays valid
+    // for its five minutes, which is exactly why the page should not keep it.
     pendingTempToken = null;
+    showSuccess('totp-success', 'Signed in! Redirecting…');
   } catch (e) {
     showError('totp-error', e.message || 'Invalid code');
   }

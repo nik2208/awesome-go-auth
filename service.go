@@ -109,24 +109,23 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (User, AuthTok
 	return created, tokens, nil
 }
 
+// Login verifies a password and issues a session, reporting a 2FA-gated account
+// as ErrTwoFactorRequired.
+//
+// It is the narrow form of LoginWithChallenge, which is what the HTTP adapters
+// call: the sentinel can say that a second factor is needed and nothing more, and
+// the step-up routes need the token that comes with the challenge. Kept as it was
+// for direct callers. See login_2fa.go.
 func (s *Service) Login(ctx context.Context, in LoginInput) (User, AuthTokens, error) {
 	var zeroTokens AuthTokens
-	in.Email = normalizeEmail(in.Email)
-	user, err := s.users.GetUserByEmail(ctx, in.Email, in.TenantID)
-	if err != nil || !verifyPassword(in.Password, user.PasswordHash) {
-		return User{}, zeroTokens, ErrInvalidCredentials
-	}
-	if !user.IsEmailVerified && s.emailVerificationMode() != EmailVerificationModeLazy {
-		return User{}, zeroTokens, ErrEmailNotVerified
-	}
-	if s.requiresTwoFactor(user) {
-		return User{}, zeroTokens, ErrTwoFactorRequired
-	}
-	tokens, err := s.newSessionTokens(ctx, user)
+	result, err := s.LoginWithChallenge(ctx, in)
 	if err != nil {
 		return User{}, zeroTokens, err
 	}
-	return user, tokens, nil
+	if result.Challenge != nil {
+		return User{}, zeroTokens, ErrTwoFactorRequired
+	}
+	return result.User, result.Tokens, nil
 }
 
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthTokens, error) {
