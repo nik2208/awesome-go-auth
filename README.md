@@ -53,6 +53,7 @@ func main() {
 - Password reset (`ForgotPassword`, `ResetPassword`, `ChangePassword`).
 - Passwordless magic link (`SendMagicLink`, `VerifyMagicLink`).
 - SMS OTP login (`SendSMSCode`, `VerifySMSCode`).
+- Mail and SMS delivery for both of the above via `Config.SendMagicLink` / `Config.SendSMSCode`, with built-in senders over an HTTP mailer or SMS gateway ([Delivery](README_DETAILED.md#delivery)).
 - TOTP 2FA (`SetupTOTP`, `VerifyTOTPSetup`, `VerifyTOTP`, `DisableTOTP`).
 - Email verification (`SendVerificationEmailToken`, `VerifyEmail`) and email change (`RequestEmailChange`, `ConfirmEmailChange`).
 - Session admin helpers (`ListSessions`, `RevokeSessionByID`, `CleanupExpiredSessions`).

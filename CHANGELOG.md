@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Closes the delivery gap the 0.2.0 passwordless routes shipped with: the send
+routes minted and stored a credential that no deployment could actually send.
+
+### Changed
+- **BREAKING — `POST /auth/magic-link/send` and `POST /auth/sms/send` require a
+  configured sender.** Without one they answer
+  `500 {"error": "Email not configured", "code": "EMAIL_NOT_CONFIGURED"}` and
+  `500 {"error": "SMS is not configured", "code": "SMS_NOT_CONFIGURED"}` and store
+  nothing, matching the reference. Previously they answered
+  `200 {"success": true}` having minted and stored a credential that nothing could
+  deliver. `Config.validate()` still does not ask for a sender, so a deployment
+  that never calls these routes is unaffected. The two checks sit where the
+  reference puts them, which is not the same place: `/sms/send` refuses at the top
+  of the route, before the body is read, so an unconfigured deployment no longer
+  answers `200` to an unknown address; `/magic-link/send` refuses inside the
+  service before the address lookup, so the 500 outranks the anti-enumeration
+  silence there too, but a bad `tempToken` in `mode: "2fa"` still gets its `401`
+  first. A sender that fails leaves the stored credential in place and answers the
+  reference's generic code-less `500`.
+- **`GenerateOpenAPISpec` now describes the routes that exist.** It had drifted a
+  major version behind: it documented `/auth/totp/setup`, `/auth/sessions`,
+  `/auth/forgot-password` and `/auth/reset-password` in shapes no adapter ever
+  served (`{"user": …, "tokens": …}`, `204`s, snake_case fields), while omitting
+  most of the surface 0.2.0 actually mounts. It now covers every mounted operation
+  with the current envelope, the real error catalog entries per route, the
+  `X-Auth-Strategy` and `X-CSRF-Token` headers, and both the bearer and cookie
+  security schemes.
+- **The `examples/` programs compile again, and CI compiles them.** All three
+  carried `//go:build ignore`, so `go build ./...` never saw them and they had
+  rotted onto an adapter API that no longer exists (`adapt.Register`,
+  `chiAdapter.New`, per-route registration). They now use `Mount`, drop the routes
+  the port does not serve, and wire the delivery senders. The build constraints are
+  gone, so they cannot rot again silently.
+
+### Added
+- **`delivery.go`: the mail/SMS delivery seam for the passwordless send routes.**
+  `Config.SendMagicLink` and `Config.SendSMSCode` (with `auth.WithMagicLinkSender`
+  and `auth.WithSMSCodeSender`) receive the credential the route mints, since it
+  cannot travel in the response body. It sits on `Config` beside
+  `BuildTokenClaims` rather than behind a store-style optional interface: the
+  reference configures delivery the same way, and a missing optional store means
+  `NOT_IMPLEMENTED`, which already means something else on these routes.
+  `Service.SendMagicLink` and `Service.SendSMSCode` now store the credential and
+  then hand it to the sender, wiring up the `MailerTransport` that had been unused
+  since 0.1.0.
+- Ready-made senders: `MagicLinkMailer` / `NewMagicLinkMailer` (built-in
+  `magic_link` template over any `MailerTransport`), `SMSTransport` with
+  `HTTPSMSTransport` and `SMSTransportSender`, plus the two family literals
+  `MagicLinkURL` (`<base>/magic-link/verify?token=…`) and `SMSCodeMessage`
+  (`Your verification code is: …`). `HTTPSMSTransport` reproduces the reference
+  gateway contract — `GET` with `username`/`password`/`phone`/`message` query
+  parameters and an `X-API-Key` header — credentials-in-URL hazard included, so an
+  existing gateway keeps working; the seam is the way out for a deployment whose
+  provider accepts something safer.
+- `Auth.SMSConfigured`, which `POST /auth/sms/send` prechecks with.
+- `OpenAPIInfo.APIPrefix`, so the generated spec follows a non-default mount
+  instead of hardcoding `/auth`.
+- A conformance case that replays every documented operation against every mounted
+  adapter, so the spec cannot describe a route nobody serves.
+
+### Known limitations
+- The served `ui/auth.js` still consumes the pre-0.2.0 shapes (`{"tokens": …}`,
+  snake_case request fields). It is one of the family's pinned clients, so bringing
+  it onto the new contract is its own piece of work, tracked with the rest of #22.
+
 ## [0.2.0] - 2026-08-07
 
 Aligns the HTTP surface with the family wire contract (#22): the full auth-router

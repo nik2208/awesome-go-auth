@@ -17,15 +17,16 @@ Complete reference for every public type, interface, function, and option in the
 9. [Webhooks](#webhooks)
 10. [Telemetry](#telemetry)
 11. [Mailer](#mailer)
-12. [OIDC IDP](#oidc-idp)
-13. [MCP Server (out of parity scope)](#mcp-server-out-of-parity-scope)
-14. [OpenAPI](#openapi)
-15. [Embedded UI](#embedded-ui)
-16. [API Keys](#api-keys)
-17. [Event Bus](#event-bus)
-18. [HTTP Adapters](#http-adapters)
-19. [Security Helpers](#security-helpers)
-20. [Errors](#errors)
+12. [Delivery](#delivery)
+13. [OIDC IDP](#oidc-idp)
+14. [MCP Server (out of parity scope)](#mcp-server-out-of-parity-scope)
+15. [OpenAPI](#openapi)
+16. [Embedded UI](#embedded-ui)
+17. [API Keys](#api-keys)
+18. [Event Bus](#event-bus)
+19. [HTTP Adapters](#http-adapters)
+20. [Security Helpers](#security-helpers)
+21. [Errors](#errors)
 
 ---
 
@@ -80,9 +81,9 @@ Low-level constructor. Use `New()` for most cases.
 | `ForgotPassword(ctx, ForgotPasswordInput) (string, error)` | Generate reset token |
 | `ResetPassword(ctx, ResetPasswordInput) error` | Consume reset token |
 | `ChangePassword(ctx, ChangePasswordInput) error` | Change password for authenticated user |
-| `SendMagicLink(ctx, MagicLinkSendInput) (string, error)` | Generate magic link token |
+| `SendMagicLink(ctx, MagicLinkSendInput) (string, error)` | Generate, store and deliver a magic link — see [Delivery](#delivery) |
 | `VerifyMagicLink(ctx, MagicLinkVerifyInput) (User, AuthTokens, error)` | Consume magic link |
-| `SendSMSCode(ctx, SMSCodeSendInput) (string, error)` | Generate 6-digit SMS code |
+| `SendSMSCode(ctx, SMSCodeSendInput) (string, error)` | Generate, store and deliver a 6-digit SMS code — see [Delivery](#delivery) |
 | `VerifySMSCode(ctx, SMSCodeVerifyInput) (User, AuthTokens, error)` | Verify SMS code |
 | `SetupTOTP(ctx, userID, tenantID) (string, error)` | Generate TOTP secret |
 | `VerifyTOTPSetup(ctx, userID, tenantID, secret, code) error` | Enable TOTP |
@@ -127,6 +128,8 @@ type Config struct {
     BcryptCost            int                           // default: bcrypt.DefaultCost (10); 0 means unset
     Require2FA            bool
     BuildTokenClaims      func(ctx, User) (map[string]any, error)
+    SendMagicLink         MagicLinkSender               // required by POST /auth/magic-link/send
+    SendSMSCode           SMSCodeSender                 // required by POST /auth/sms/send
     Logger                func(format string, args ...any)
 }
 ```
@@ -297,6 +300,8 @@ Pass to `auth.New(...)`:
 | `WithBcryptCost(int)` | Password hashing cost, `bcrypt.MinCost`..`bcrypt.MaxCost` |
 | `WithRequire2FA(bool)` | Require 2FA for all users |
 | `WithTokenClaimsBuilder(func)` | Custom JWT claims |
+| `WithMagicLinkSender(MagicLinkSender)` | Deliver magic links — see [Delivery](#delivery) |
+| `WithSMSCodeSender(SMSCodeSender)` | Deliver SMS codes — see [Delivery](#delivery) |
 | `WithLogger(func)` | Logging callback |
 
 Pass to `NewService(...)` as `ServiceOption`:
@@ -495,6 +500,91 @@ Falls back to `en/` templates when locale template is not found.
 
 ---
 
+## Delivery
+
+`POST /auth/magic-link/send` and `POST /auth/sms/send` answer `{"success": true}` and
+nothing else: the credential they mint cannot travel in the response body, because
+handing a second factor back to whoever asked for it is no second factor at all.
+`SendMagicLink` and `SendSMSCode` therefore pass it to a sender you configure.
+
+**A sender is required to use these routes.** Without one they answer
+`500 {"error": "Email not configured", "code": "EMAIL_NOT_CONFIGURED"}` and
+`500 {"error": "SMS is not configured", "code": "SMS_NOT_CONFIGURED"}`, matching the
+reference. Nothing is stored in that case, and `Config.validate()` does not ask for a
+sender — a deployment that never calls these routes needs neither.
+
+### Sender types
+
+```go
+type MagicLinkSender func(ctx context.Context, delivery MagicLinkDelivery) error
+type SMSCodeSender   func(ctx context.Context, delivery SMSCodeDelivery) error
+
+type MagicLinkDelivery struct {
+    UserID, TenantID, Email string
+    Token                   string    // plaintext; the store holds only its hash
+    ExpiresAt               time.Time
+}
+
+type SMSCodeDelivery struct {
+    UserID, TenantID, Phone string
+    Code                    string    // plaintext; the store holds only its hash
+    ExpiresAt               time.Time
+}
+```
+
+Each delivery carries the one credential it has to transmit and no other user
+secret — no password hash, no TOTP secret, no `User`. A sender needing more about
+the recipient has `UserID` and `TenantID` to read it back with.
+
+A sender that returns an error fails the route with a generic `500` (no code, no
+detail — a transport failure must not describe itself to the caller) and leaves the
+stored credential in place, which is what the reference does: an undelivered token
+is unguessable and expires on its own.
+
+### Built-in senders
+
+```go
+a, err := auth.New(
+    auth.WithMagicLinkSender(auth.NewMagicLinkMailer(
+        auth.NewHTTPMailerTransport("https://mail.example.com/send", secret),
+        "Example App",                       // greets the recipient in the template
+        "https://app.example.com/auth",      // link base; see MagicLinkURL
+    ).Send),
+    auth.WithSMSCodeSender(auth.SMSTransportSender(
+        auth.NewHTTPSMSTransport("https://sms.example.com/send", apiKey, user, pass),
+    )),
+)
+```
+
+| Helper | Purpose |
+|--------|---------|
+| `NewMagicLinkMailer(MailerTransport, appName, baseURL) *MagicLinkMailer` | Renders the built-in `magic_link` template and sends it; `.Locale` selects `en` (default) or `it` |
+| `MagicLinkURL(base, token) string` | The link shape the verify route and every family client expect: `<base>/magic-link/verify?token=<token>` |
+| `SMSTransportSender(SMSTransport) SMSCodeSender` | Adapts a transport, formatting the code with `SMSCodeMessage` |
+| `SMSCodeMessage(code) string` | The family's handset text: `Your verification code is: <code>` |
+| `NewHTTPSMSTransport(endpoint, apiKey, username, password) *HTTPSMSTransport` | `GET` gateway with credentials as query parameters and `X-API-Key` — see the caveat below |
+
+```go
+type SMSTransport interface {
+    Send(ctx context.Context, phone, message string) error
+}
+```
+
+> **`HTTPSMSTransport` puts the gateway credentials in the URL.** That is the request
+> the rest of this family sends, so an existing gateway keeps working, but query
+> strings reach access logs and proxies. The fix belongs at the gateway; until then,
+> `WithSMSCodeSender` takes any sender, so a deployment whose provider accepts a
+> safer shape supplies its own transport and never constructs this one.
+
+### Locale
+
+`MagicLinkMailer.Locale` is static. The reference has a per-request `emailLang` body
+field on `/magic-link/send`; the port's send routes do not carry it, so threading a
+locale off the wire is a request-shape change and is left to the template
+configuration work.
+
+---
+
 ## OIDC IDP
 
 The `IDP` type turns awesome-go-auth into a full OIDC Identity Provider.
@@ -571,14 +661,27 @@ Returns an OpenAPI 3.0.3 spec as a `map[string]any` (JSON-serializable).
 ```go
 type OpenAPIInfo struct {
     Title, Description, Version, ServerURL string
+    APIPrefix string // must match the mount; empty means DefaultAPIPrefix ("/auth")
 }
 ```
 
 Serve as JSON:
 ```go
-spec := auth.GenerateOpenAPISpec(auth.OpenAPIInfo{Title: "My API", ServerURL: "https://api.example.com"})
+spec := auth.GenerateOpenAPISpec(auth.OpenAPIInfo{
+    Title:     "My API",
+    ServerURL: "https://api.example.com",
+    APIPrefix: auth.DefaultAPIPrefix,
+})
 json.NewEncoder(w).Encode(spec)
 ```
+
+The spec describes exactly the operations the adapters mount — the current
+envelope, the per-route error catalog entries, the `X-Auth-Strategy` and
+`X-CSRF-Token` headers, and both the bearer and cookie security schemes. Set
+`APIPrefix` to whatever you passed to `MountWithConfig`; a mismatch documents
+paths the server does not serve. The wire conformance suite replays every
+documented operation against every adapter, so a route added without a spec entry
+(or a spec entry with no route) fails the build.
 
 ---
 
