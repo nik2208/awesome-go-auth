@@ -67,10 +67,36 @@ routes minted and stored a credential that no deployment could actually send.
 - A conformance case that replays every documented operation against every mounted
   adapter, so the spec cannot describe a route nobody serves.
 
+- **The served browser assets talk to the routes that exist.** `ui/auth.js` was
+  calling `/auth/totp/setup`, `/auth/totp/verify`, `/auth/email/verify`,
+  `/auth/email/change/*` and `/auth/metadata` — none of which any adapter mounts —
+  sending snake_case bodies, and reading tokens out of a `tokens` object the
+  server stopped returning in 0.2.0. It never sent `X-Auth-Strategy`, so the
+  bearer delivery it assumed never happened.
+
+  It is now a cookie client by default, like the reference: `credentials:
+  'include'` on every call, the CSRF cookie mirrored into `X-CSRF-Token` and read
+  with the `__Host-` → `__Secure-` → bare priority, and a single-flight
+  refresh-and-retry on 401/403 that stops dead on `SESSION_REVOKED` instead of
+  looping. `configure({bearer: true})` opts into header/localStorage delivery for
+  a cross-origin page, sending the exact `X-Auth-Strategy: bearer` the server
+  compares literally. The route and field names now match the router, and the
+  surface covers the sessions, account, password, email, OAuth and linking routes
+  0.2.0 added. `ui/auth.html` calls the SDK instead of hand-rolling fetches, and
+  `ui/admin.html` lists the real endpoints.
+
+  Three tests keep the assets honest: every path literal they contain must name a
+  route the OpenAPI spec documents (which the conformance suite ties to the
+  mount), none of the retired snake_case or `tokens` shapes may reappear, and
+  `auth.js` must keep sending credentials, the CSRF header and the exact bearer
+  strategy value.
+
 ### Known limitations
-- The served `ui/auth.js` still consumes the pre-0.2.0 shapes (`{"tokens": …}`,
-  snake_case request fields). It is one of the family's pinned clients, so bringing
-  it onto the new contract is its own piece of work, tracked with the rest of #22.
+- `POST /auth/login` answers `403 2FA_REQUIRED` for an account with a second
+  factor but issues no `tempToken`, where the reference returns one alongside
+  `available2faMethods`. Every step-up route requires a `tempToken`, so no client
+  can currently complete a second factor after a password login. The served UI
+  says so rather than presenting a form that cannot succeed.
 
 ## [0.2.0] - 2026-08-07
 

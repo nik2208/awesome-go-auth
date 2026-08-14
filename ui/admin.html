@@ -141,11 +141,21 @@
       <div class="api-endpoint"><span class="method method-get">GET</span>/auth/me</div>
       <div class="api-endpoint"><span class="method method-post">POST</span>/auth/forgot-password</div>
       <div class="api-endpoint"><span class="method method-post">POST</span>/auth/reset-password</div>
+      <div class="api-endpoint"><span class="method method-post">POST</span>/auth/change-password</div>
       <div class="api-endpoint"><span class="method method-post">POST</span>/auth/magic-link/send</div>
       <div class="api-endpoint"><span class="method method-post">POST</span>/auth/magic-link/verify</div>
-      <div class="api-endpoint"><span class="method method-post">POST</span>/auth/totp/setup</div>
-      <div class="api-endpoint"><span class="method method-post">POST</span>/auth/totp/verify</div>
+      <div class="api-endpoint"><span class="method method-post">POST</span>/auth/sms/send</div>
+      <div class="api-endpoint"><span class="method method-post">POST</span>/auth/sms/verify</div>
+      <div class="api-endpoint"><span class="method method-post">POST</span>/auth/2fa/setup</div>
+      <div class="api-endpoint"><span class="method method-post">POST</span>/auth/2fa/verify-setup</div>
+      <div class="api-endpoint"><span class="method method-post">POST</span>/auth/2fa/verify</div>
+      <div class="api-endpoint"><span class="method method-post">POST</span>/auth/2fa/disable</div>
       <div class="api-endpoint"><span class="method method-get">GET</span>/auth/sessions</div>
+      <div class="api-endpoint"><span class="method method-get">GET</span>/auth/linked-accounts</div>
+      <p style="color:#6b7280;font-size:13px;margin-top:12px">
+        The full machine-readable contract is what <code>GenerateOpenAPISpec</code> returns; serve it
+        at <code>/openapi.json</code> to get every route, body and error code.
+      </p>
     </div>
   </div>
 </div>
@@ -169,13 +179,15 @@ async function registerUser() {
   const password = document.getElementById('reg-password').value;
   const tenantID = document.getElementById('reg-tenant').value;
   const res = await fetch(API + '/auth/register', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({email, password, tenant_id: tenantID})
+    method: 'POST', credentials: 'include',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({email, password, tenantId: tenantID})
   }).catch(() => null);
   const el = document.getElementById('reg-result');
   if (!res) { el.style.color = 'red'; el.textContent = 'Network error'; return; }
   const data = await res.json();
-  if (res.ok) { el.style.color = 'green'; el.textContent = 'User created: ' + data.user?.id; }
+  // 201 {success, userId} — the user object is not echoed back.
+  if (res.ok) { el.style.color = 'green'; el.textContent = 'User created: ' + data.userId; }
   else { el.style.color = 'red'; el.textContent = data.error || 'Error'; }
 }
 

@@ -104,8 +104,15 @@
 
 <script src="auth.js"></script>
 <script>
-const API = window.location.origin;
-let pendingUser = null;
+// Every call goes through the SDK, which owns the wire contract: cookie
+// delivery, the CSRF double-submit and the refresh-on-403 handling. Hand-rolled
+// fetches here are how this page drifted a major version behind the router.
+AuthSDK.configure({ baseURL: window.location.origin });
+
+// The step-up token a 2FA challenge is verified against. It stays null on this
+// page: /login answers 403 2FA_REQUIRED without issuing one (the reference does
+// issue it), so the TOTP form below is reachable only if a host sets this.
+let pendingTempToken = null;
 
 function switchTab(tab) {
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
@@ -131,16 +138,19 @@ async function doLogin() {
   const btn = document.getElementById('login-btn');
   btn.disabled = true; btn.textContent = 'Signing in…';
   try {
-    const r = await fetch(API + '/auth/login', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email, password}) });
-    const d = await r.json();
-    if (r.ok) {
-      if (window.AuthSDK) AuthSDK.storeTokens(d.tokens);
-      showSuccess('login-success', 'Signed in! Redirecting…');
-      setTimeout(() => window.dispatchEvent(new CustomEvent('auth:login', {detail: d})), 800);
-    } else if (r.status === 403 && d.error?.includes('two-factor')) {
-      pendingUser = d; switchTab('totp');
-    } else { showError('login-error', d.error || 'Invalid credentials'); }
-  } catch { showError('login-error', 'Network error'); }
+    await AuthSDK.login(email, password);
+    showSuccess('login-success', 'Signed in! Redirecting…');
+  } catch (e) {
+    // A 2FA-gated account answers 403 2FA_REQUIRED. This port's /login stops
+    // there: unlike the reference it does not hand back a tempToken, and every
+    // step-up route needs one, so the challenge cannot be completed from here.
+    // Switching to the TOTP tab would just present a form that cannot succeed.
+    if (e.code === '2FA_REQUIRED') {
+      showError('login-error', 'This account needs a second factor, which this build cannot complete from the login page yet.');
+    } else {
+      showError('login-error', e.message || 'Invalid credentials');
+    }
+  }
   btn.disabled = false; btn.textContent = 'Sign In';
 }
 
@@ -151,48 +161,55 @@ async function doRegister() {
   const btn = document.getElementById('reg-btn');
   btn.disabled = true; btn.textContent = 'Creating account…';
   try {
-    const r = await fetch(API + '/auth/register', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email, password, tenant_id: tenantID}) });
-    const d = await r.json();
-    if (r.ok) {
-      if (window.AuthSDK) AuthSDK.storeTokens(d.tokens);
-      showSuccess('reg-success', 'Account created! Welcome aboard.');
-      setTimeout(() => window.dispatchEvent(new CustomEvent('auth:register', {detail: d})), 800);
-    } else { showError('reg-error', d.error || 'Registration failed'); }
-  } catch { showError('reg-error', 'Network error'); }
+    await AuthSDK.register(email, password, tenantID);
+    showSuccess('reg-success', 'Account created! Welcome aboard.');
+  } catch (e) {
+    showError('reg-error', e.message || 'Registration failed');
+  }
   btn.disabled = false; btn.textContent = 'Create Account';
 }
 
 async function doMagicLink() {
   const email = document.getElementById('magic-email').value;
-  const r = await fetch(API + '/auth/magic-link/send', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email}) }).catch(() => null);
-  if (!r) { showError('magic-error', 'Network error'); return; }
-  showSuccess('magic-success', 'Magic link sent! Check your email.');
+  try {
+    await AuthSDK.sendMagicLink(email);
+    // The route answers the same way for an address nobody has registered, so
+    // this message must not claim the address exists.
+    showSuccess('magic-success', 'If that address has an account, a link is on its way.');
+  } catch (e) {
+    showError('magic-error', e.message || 'Could not send the link');
+  }
 }
 
 async function doForgot() {
   const email = document.getElementById('forgot-email').value;
-  const r = await fetch(API + '/auth/forgot-password', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email}) }).catch(() => null);
-  showSuccess('forgot-success', 'Reset link sent if this email exists.');
+  try {
+    await AuthSDK.forgotPassword(email);
+  } catch (e) { /* the answer is deliberately the same either way */ }
+  showSuccess('forgot-success', 'If that address has an account, a reset link is on its way.');
 }
 
 async function doTOTP() {
   const code = document.getElementById('totp-code').value;
-  const r = await fetch(API + '/auth/totp/verify', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({code, user_id: pendingUser?.user?.id, tenant_id: pendingUser?.user?.tenant_id}) }).catch(() => null);
-  if (!r || !r.ok) { showError('totp-error', 'Invalid code'); return; }
-  const d = await r.json();
-  if (window.AuthSDK) AuthSDK.storeTokens(d.tokens);
-  window.dispatchEvent(new CustomEvent('auth:login', {detail: d}));
+  if (!pendingTempToken) { showError('totp-error', 'Sign in again to restart the challenge'); return; }
+  try {
+    await AuthSDK.verifyTwoFactor(pendingTempToken, code);
+    pendingTempToken = null;
+  } catch (e) {
+    showError('totp-error', e.message || 'Invalid code');
+  }
 }
 
 function oauthRedirect(provider) {
-  window.location.href = API + '/oauth/' + provider + '/authorize';
+  AuthSDK.startOAuth(provider);
 }
 
-// Handle magic link token from URL
+// A magic link opened from a mailbox lands here with ?token=…
 const params = new URLSearchParams(window.location.search);
 if (params.get('token')) {
-  fetch(API + '/auth/magic-link/verify', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token: params.get('token')}) })
-    .then(r => r.json()).then(d => { if (d.tokens && window.AuthSDK) AuthSDK.storeTokens(d.tokens); });
+  AuthSDK.verifyMagicLink(params.get('token')).catch(() => {
+    showError('magic-error', 'That link is no longer valid.');
+  });
 }
 </script>
 </body>
