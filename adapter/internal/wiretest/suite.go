@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,152 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("StepUpModeDefault", func(t *testing.T) { testStepUpModeDefault(t, mount) })
 	t.Run("StepUpEmptyBody", func(t *testing.T) { testStepUpEmptyBody(t, mount) })
 	t.Run("PasswordAndEmail", func(t *testing.T) { testPasswordAndEmail(t, mount) })
+	t.Run("OpenAPI", func(t *testing.T) { testOpenAPI(t, mount) })
+}
+
+// documentedRoutes is the operation set GenerateOpenAPISpec must describe,
+// relative to the mount prefix.
+//
+// It is spelled out rather than derived so the list has to be edited by hand
+// when a route is added or dropped — deriving it from the spec would make the
+// test agree with whatever the spec happens to say, which is how openapi.go
+// drifted a whole major version behind the routes in the first place.
+var documentedRoutes = map[string]string{
+	"/register": http.MethodPost,
+	"/login":    http.MethodPost,
+	"/refresh":  http.MethodPost,
+	"/logout":   http.MethodPost,
+	"/me":       http.MethodGet,
+
+	"/sessions":          http.MethodGet,
+	"/sessions/{handle}": http.MethodDelete,
+	"/sessions/cleanup":  http.MethodPost,
+	"/profile":           http.MethodPatch,
+	"/add-phone":         http.MethodPost,
+	"/account":           http.MethodDelete,
+
+	"/oauth/{provider}":                               http.MethodGet,
+	"/oauth/{provider}/callback":                      http.MethodGet,
+	"/linked-accounts":                                http.MethodGet,
+	"/linked-accounts/{provider}/{providerAccountId}": http.MethodDelete,
+	"/link-request":                                   http.MethodPost,
+	"/link-verify":                                    http.MethodPost,
+
+	"/magic-link/send":   http.MethodPost,
+	"/magic-link/verify": http.MethodPost,
+	"/sms/send":          http.MethodPost,
+	"/sms/verify":        http.MethodPost,
+	"/2fa/setup":         http.MethodPost,
+	"/2fa/verify-setup":  http.MethodPost,
+	"/2fa/verify":        http.MethodPost,
+	"/2fa/disable":       http.MethodPost,
+
+	"/forgot-password":         http.MethodPost,
+	"/reset-password":          http.MethodPost,
+	"/change-password":         http.MethodPost,
+	"/send-verification-email": http.MethodPost,
+	"/verify-email":            http.MethodGet,
+	"/change-email/request":    http.MethodPost,
+	"/change-email/confirm":    http.MethodPost,
+}
+
+// openAPIPathParam fills a documented path template with a value a router will
+// actually route. A literal "{handle}" segment matches net/http's wildcard but
+// not every framework's, so the probe substitutes a plain segment.
+var openAPIPathParam = regexp.MustCompile(`\{[^/]+\}`)
+
+// openAPIProbeSegment is what a path parameter is replaced with. It doubles as
+// the name of the OAuth provider the probe env configures, so /oauth/{provider}
+// resolves to something real.
+const openAPIProbeSegment = "probe"
+
+// testOpenAPI holds the generated spec to the routes that exist.
+//
+// Every documented operation is replayed against the mounted adapter and must
+// not answer 404 or 405. A spec is documentation nobody executes, so without
+// this it rots silently: before this test existed openapi.go advertised
+// /auth/totp/setup, /auth/sessions, /auth/forgot-password and
+// /auth/reset-password, none of which any adapter has ever mounted.
+func testOpenAPI(t *testing.T, mount Mounter) {
+	// A non-default prefix as well, so the spec's paths track the mount instead
+	// of hardcoding /auth.
+	for _, prefix := range []string{"", "/api/auth"} {
+		name := "default prefix"
+		if prefix != "" {
+			name = prefix
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := auth.DefaultHTTPConfig()
+			cfg.APIPrefix = prefix
+			// The OAuth routes answer 404 for a provider nobody configured, which
+			// is indistinguishable from "not mounted" at this level. Configuring a
+			// provider named after the substitution below tells the two apart.
+			env := NewEnv(t, mount, cfg, auth.WithOAuth(auth.OAuthWiring{
+				Service: auth.NewOAuthService(auth.OAuthProvider{
+					Name:         openAPIProbeSegment,
+					ClientID:     "probe-client",
+					ClientSecret: "probe-secret",
+					RedirectURL:  "https://api.example.com/auth/oauth/" + openAPIProbeSegment + "/callback",
+					AuthURL:      "https://provider.example.com/authorize",
+					TokenURL:     "https://provider.example.com/token",
+					UserInfoURL:  "https://provider.example.com/userinfo",
+				}),
+				LinkedAccounts: auth.NewMemoryLinkedAccounts(),
+				PendingLinks:   auth.NewMemoryPendingLinks(),
+				SiteURL:        "https://app.example.com",
+				TenantID:       testTenant,
+			}))
+
+			spec := auth.GenerateOpenAPISpec(auth.OpenAPIInfo{APIPrefix: prefix})
+			paths, ok := spec["paths"].(map[string]any)
+			if !ok {
+				t.Fatalf("spec has no paths object: %T", spec["paths"])
+			}
+
+			mountPrefix := env.Config.Prefix()
+			seen := make(map[string]string, len(paths))
+			for path, item := range paths {
+				operations, ok := item.(map[string]any)
+				if !ok {
+					t.Errorf("path %q is not an object: %T", path, item)
+					continue
+				}
+				route, found := strings.CutPrefix(path, mountPrefix)
+				if !found {
+					t.Errorf("documented path %q is not under the mount prefix %q", path, mountPrefix)
+					continue
+				}
+				for method := range operations {
+					seen[route] = strings.ToUpper(method)
+
+					probe := openAPIPathParam.ReplaceAllString(path, openAPIProbeSegment)
+					req := httptest.NewRequest(strings.ToUpper(method), probe, stringReader("{}"))
+					req.Header.Set("Content-Type", "application/json")
+					rec := env.Do(req)
+					switch rec.Code {
+					case http.StatusNotFound, http.StatusMethodNotAllowed:
+						t.Errorf("%s %s is documented but not mounted (%d)", strings.ToUpper(method), probe, rec.Code)
+					}
+				}
+			}
+
+			for route, method := range documentedRoutes {
+				got, ok := seen[route]
+				if !ok {
+					t.Errorf("route %q is mounted but missing from the spec", route)
+					continue
+				}
+				if got != method {
+					t.Errorf("route %q is documented as %s, want %s", route, got, method)
+				}
+			}
+			for route := range seen {
+				if _, ok := documentedRoutes[route]; !ok {
+					t.Errorf("spec documents %q, which is not in documentedRoutes — add the route there or drop it from the spec", route)
+				}
+			}
+		})
+	}
 }
 
 // sensitiveFields must never appear in an adapter response body.
