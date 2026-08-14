@@ -154,6 +154,31 @@ func openAPISchemas() map[string]any {
 				"refreshToken": map[string]any{"type": "string", "description": "Bearer callers only."},
 			},
 		},
+		// The two second-factor answers POST /login can give instead of a session.
+		// Neither is the Error envelope: the first is a 200 with no error member at
+		// all, the second a 403 with a code and no message. See login_2fa.go.
+		"TwoFactorChallenge": map[string]any{
+			"type":     "object",
+			"required": []string{"requiresTwoFactor", "tempToken", "available2faMethods"},
+			"properties": map[string]any{
+				"requiresTwoFactor": map[string]any{"type": "boolean", "enum": []bool{true}},
+				"tempToken":         map[string]any{"type": "string", "description": "Step-up token; present it to the route for the method the client picks."},
+				"available2faMethods": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string", "enum": []string{TwoFactorMethodTOTP, TwoFactorMethodSMS, TwoFactorMethodMagicLink}},
+					"description": "The factors this account can present. Never empty; an account with none gets TwoFactorSetupRequired instead.",
+				},
+			},
+		},
+		"TwoFactorSetupRequired": map[string]any{
+			"type":     "object",
+			"required": []string{"requires2FASetup", "tempToken", "code"},
+			"properties": map[string]any{
+				"requires2FASetup": map[string]any{"type": "boolean", "enum": []bool{true}},
+				"tempToken":        str,
+				"code":             map[string]any{"type": "string", "enum": []string{CodeTwoFactorSetupRequired}},
+			},
+		},
 		"RegisterResult": map[string]any{
 			"type":     "object",
 			"required": []string{"success", "userId"},
@@ -297,6 +322,19 @@ func openAPIPaths(prefix string) map[string]any {
 		"enum":        []string{"login", StepUpMode},
 		"description": "Only the literal `" + StepUpMode + "` selects the step-up branch; absent, empty and anything else mean login.",
 	}
+	// POST /login is the one route with two answers per status, which the catalog
+	// cannot express: a 200 is either a session or a second-factor challenge, and a
+	// 403 is either EMAIL_NOT_VERIFIED or the 2FA_SETUP_REQUIRED envelope. Neither
+	// challenge body is the error envelope — see login_2fa.go — so both statuses are
+	// written out here rather than through fail().
+	loginResponses := respond(http.StatusOK, "Session issued, or a second-factor challenge (`requiresTwoFactor`)",
+		map[string]any{"oneOf": []any{schema("AuthResult"), schema("TwoFactorChallenge")}},
+		HTTPErrInvalidBody, HTTPErrInvalidCredentials)
+	loginResponses[strconv.Itoa(http.StatusForbidden)] = map[string]any{
+		"description": HTTPErrEmailNotVerified.Message + " (`" + CodeEmailNotVerified + "`); or a second factor is required and this account has none enrolled (`" + CodeTwoFactorSetupRequired + "`)",
+		"content":     jsonContent(map[string]any{"oneOf": []any{schema("Error"), schema("TwoFactorSetupRequired")}}),
+	}
+
 	tokenDelivery := []map[string]any{param("AuthStrategy")}
 	protected := []map[string]any{param("AuthStrategy"), param("CSRFToken")}
 	anyCredential := []map[string]any{{"BearerAuth": []string{}}, {"CookieAuth": []string{}}}
@@ -320,8 +358,7 @@ func openAPIPaths(prefix string) map[string]any {
 				"tags":        []string{"Auth"},
 				"parameters":  tokenDelivery,
 				"requestBody": body(schema("LoginInput")),
-				"responses": respond(http.StatusOK, "Session issued", schema("AuthResult"),
-					HTTPErrInvalidBody, HTTPErrInvalidCredentials, HTTPErrEmailNotVerified, HTTPErrTwoFactorRequired),
+				"responses":   loginResponses,
 			},
 		},
 

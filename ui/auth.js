@@ -222,8 +222,23 @@
     return data;
   }
 
+  /**
+   * A 2FA-gated account is answered 200 { requiresTwoFactor, tempToken,
+   * available2faMethods } — a challenge, not a session. It has to be told apart
+   * from a completed login here: storing tokens and firing auth:login for it
+   * would leave the page believing it is signed in when nothing was issued.
+   *
+   * The caller either presents the tempToken to the route for one of the
+   * advertised methods, or listens for auth:2fa-required. The other branch,
+   * 403 { requires2FASetup, tempToken, code:'2FA_SETUP_REQUIRED' }, arrives as a
+   * thrown error whose .data carries the same fields.
+   */
   async function login(email, password, tenantId) {
     const data = await request('POST', '/login', { email, password, tenantId: tenantId || '' });
+    if (data && data.requiresTwoFactor) {
+      window.dispatchEvent(new CustomEvent('auth:2fa-required', { detail: data }));
+      return data;
+    }
     storeTokens(data);
     window.dispatchEvent(new CustomEvent('auth:login', { detail: data }));
     return data;

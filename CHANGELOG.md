@@ -40,6 +40,23 @@ routes minted and stored a credential that no deployment could actually send.
   `chiAdapter.New`, per-route registration). They now use `Mount`, drop the routes
   the port does not serve, and wire the delivery senders. The build constraints are
   gone, so they cannot rot again silently.
+- **BREAKING — `POST /auth/login` answers a second-factor account with a
+  challenge instead of an error.** It was
+  `403 {"error": "Two-factor authentication required", "code": "2FA_REQUIRED"}`
+  and carried no `tempToken`, so the whole step-up half of the contract
+  (`/2fa/verify`, and `/sms/*` + `/magic-link/*` in `mode: "2fa"`) was unreachable
+  over HTTP even though those routes were implemented — the tests minted their own
+  `tempToken`, which is why it survived. It is now the reference's pair of answers:
+  `200 {"requiresTwoFactor": true, "tempToken": "<5-minute token>",
+  "available2faMethods": [...]}`, or, when a policy demands a factor the account
+  has not enrolled, `403 {"requires2FASetup": true, "tempToken": "…",
+  "code": "2FA_SETUP_REQUIRED"}`. Neither body is the error envelope and neither
+  sets a cookie, in bearer or cookie mode — nothing has been issued yet. A client
+  that branched on `403 2FA_REQUIRED` at `/login` has to branch on
+  `requiresTwoFactor` instead; the code itself is unchanged where it is still
+  emitted, on `/2fa/disable`. `Service.Login` keeps its signature and still
+  reports `ErrTwoFactorRequired`; `Service.LoginWithChallenge` is the form that
+  returns the challenge.
 
 ### Added
 - **`delivery.go`: the mail/SMS delivery seam for the passwordless send routes.**
@@ -91,12 +108,38 @@ routes minted and stored a credential that no deployment could actually send.
   `auth.js` must keep sending credentials, the CSRF header and the exact bearer
   strategy value.
 
+- **`login_2fa.go`: the login second-factor challenge.**
+  `Service.LoginWithChallenge` / `Auth.LoginWithChallenge` return a `LoginResult`
+  that is either a session or a `*TwoFactorChallenge`; `WriteTwoFactorChallenge`
+  writes it. `available2faMethods` is built from what the account can actually use
+  — `TwoFactorMethodTOTP` for an enrolled authenticator, `TwoFactorMethodSMS` for a
+  stored number *and* a configured `SendSMSCode`, `TwoFactorMethodMagicLink` for a
+  configured `SendMagicLink` — plus, with no counterpart in the reference, the
+  store capability each method needs, so a method is never advertised that would
+  answer `501 NOT_IMPLEMENTED`. `CodeTwoFactorSetupRequired` is the new code. The
+  step-up token is minted below both the password check and the
+  email-verification gate, so a failed login hands out nothing.
+- Conformance cases that log in over HTTP and drive `/2fa/verify`, `/sms/*` and
+  `/magic-link/*` with the `tempToken` taken **out of the login response**, for all
+  four adapters. Also pinned: a wrong password, an unknown address and an
+  unverified address each carry no `tempToken`; a challenge token is refused by a
+  route wanting a real access token (it is typed `temp`, unlike the reference's);
+  and the advertised list for a TOTP-only, an SMS-only and a both-factors account.
+- `ui/auth.html` presents the TOTP form off the login challenge, and
+  `AuthSDK.login` tells a challenge apart from a session, firing
+  `auth:2fa-required` instead of `auth:login`.
+
 ### Known limitations
-- `POST /auth/login` answers `403 2FA_REQUIRED` for an account with a second
-  factor but issues no `tempToken`, where the reference returns one alongside
-  `available2faMethods`. Every step-up route requires a `tempToken`, so no client
-  can currently complete a second factor after a password login. The served UI
-  says so rather than presenting a form that cannot succeed.
+- The `tempToken` in the `2FA_SETUP_REQUIRED` answer authenticates nothing here.
+  The reference's is an ordinary access token, so there it gets the client into
+  `/2fa/setup`; this port types it separately (a documented improvement) and both
+  enrolment routes sit behind the access-token gate. Enrolment therefore needs a
+  full session, and the served UI reports the situation rather than offering a
+  form. Letting `/2fa/setup` accept a step-up token is a security decision of its
+  own and has not been made.
+- An OAuth login that needs a second factor still completes without one. The
+  reference 302-redirects to `<redirectTo>/auth/2fa?tempToken=…&methods=…`
+  (auth.router.ts:1298-1313); the port's OAuth callback has no 2FA branch at all.
 
 ## [0.2.0] - 2026-08-07
 

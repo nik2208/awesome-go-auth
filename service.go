@@ -109,17 +109,28 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (User, AuthTok
 	return created, tokens, nil
 }
 
+// Login verifies a password and issues a session, reporting a 2FA-gated account
+// as ErrTwoFactorRequired.
+//
+// It is the narrow form of LoginWithChallenge, which is what the HTTP adapters
+// call: the sentinel can say that a second factor is needed and nothing more, and
+// the step-up routes need the token that comes with the challenge. Kept as it was
+// for direct callers. See login_2fa.go.
+//
+// It shares the password path with LoginWithChallenge but stops at the decision
+// rather than at the built challenge, so the sentinel is reported whenever a
+// second factor is *required* and not merely whenever one could be minted. Going
+// through the challenge would make this wrapper fail wherever minting fails —
+// Config.BuildTokenClaims returning an error is enough (token.go:66-71) — and
+// answer a 2FA account with that error instead of ErrTwoFactorRequired. Nothing
+// is minted here: the token this call cannot return is never built.
 func (s *Service) Login(ctx context.Context, in LoginInput) (User, AuthTokens, error) {
 	var zeroTokens AuthTokens
-	in.Email = normalizeEmail(in.Email)
-	user, err := s.users.GetUserByEmail(ctx, in.Email, in.TenantID)
-	if err != nil || !verifyPassword(in.Password, user.PasswordHash) {
-		return User{}, zeroTokens, ErrInvalidCredentials
+	user, secondFactor, err := s.loginPassword(ctx, in)
+	if err != nil {
+		return User{}, zeroTokens, err
 	}
-	if !user.IsEmailVerified && s.emailVerificationMode() != EmailVerificationModeLazy {
-		return User{}, zeroTokens, ErrEmailNotVerified
-	}
-	if s.requiresTwoFactor(user) {
+	if secondFactor {
 		return User{}, zeroTokens, ErrTwoFactorRequired
 	}
 	tokens, err := s.newSessionTokens(ctx, user)
