@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -375,6 +376,68 @@ func TestSectionTwoDeliveryFailureKeepsTheCredential(t *testing.T) {
 			t.Errorf("wire envelope = %+v, want the generic 500 %+v", envelope, HTTPErrInternal)
 		}
 	})
+}
+
+// TestSectionTwoDeliveryFailureIsAlwaysTheGenericFiveHundred closes the hole the
+// case above leaves open. It asserts the same thing — a failed send is the
+// reference's generic code-less 500 — but with transport errors that are library
+// sentinels rather than an anonymous errors.New, which is the only shape that can
+// actually go wrong.
+//
+// The delivery wrapper joins ErrDeliveryFailed to the transport's error instead of
+// replacing it, deliberately, so a caller can read the cause. That means errors.Is
+// in these two mappers can see straight through to whatever the host sender
+// returned, and a sender is host code: one that reads the store back through the
+// UserID the delivery carries — which is what the delivery carries it for — will
+// propagate exactly these values. A mail gateway may not choose this route's wire
+// answer.
+func TestSectionTwoDeliveryFailureIsAlwaysTheGenericFiveHundred(t *testing.T) {
+	// Every sentinel either mapper would otherwise match, plus one that neither
+	// does, to pin that the generic answer is unconditional.
+	transports := []struct {
+		name string
+		err  error
+	}{
+		{"ErrUserExists", ErrUserExists},
+		{"ErrAlreadyExists", ErrAlreadyExists},
+		{"ErrInvalidCredentials", ErrInvalidCredentials},
+		{"ErrFeatureNotSupported", ErrFeatureNotSupported},
+		{"an anonymous transport error", errors.New("mail gateway unreachable")},
+	}
+
+	for _, tc := range transports {
+		t.Run("send verification email/"+tc.name, func(t *testing.T) {
+			spy := &passwordEmailSpy{fail: fmt.Errorf("smtp: %w", tc.err)}
+			svc := newPasswordEmailSvc(t, spy)
+			user := seedUnverifiedUser(t, svc, "verifysentinel@example.com")
+
+			_, err := svc.SendVerificationEmailToken(context.Background(), EmailVerificationInput{UserID: user.ID, TenantID: "t1"})
+			if !errors.Is(err, ErrDeliveryFailed) {
+				t.Fatalf("err = %v, want it to wrap ErrDeliveryFailed", err)
+			}
+			if envelope := SendVerificationEmailHTTPError(err); envelope != HTTPErrInternal {
+				t.Errorf("a sender that failed with %s answered %+v; a failed send is the generic 500 %+v",
+					tc.name, envelope, HTTPErrInternal)
+			}
+		})
+
+		t.Run("change email request/"+tc.name, func(t *testing.T) {
+			spy := &passwordEmailSpy{fail: fmt.Errorf("smtp: %w", tc.err)}
+			svc := newPasswordEmailSvc(t, spy)
+			user := seedUser(t, svc, "changesentinel@example.com")
+
+			_, err := svc.RequestEmailChange(context.Background(), ChangeEmailRequestInput{
+				UserID: user.ID, TenantID: "t1", NewEmail: "changesentinelnew@example.com",
+			})
+			if !errors.Is(err, ErrDeliveryFailed) {
+				t.Fatalf("err = %v, want it to wrap ErrDeliveryFailed", err)
+			}
+			if envelope := ChangeEmailRequestHTTPError(err); envelope != HTTPErrInternal {
+				t.Errorf("a sender that failed with %s answered %+v; a failed send is the generic 500 %+v",
+					tc.name, envelope, HTTPErrInternal)
+			}
+		})
+	}
 }
 
 // TestAuthForgotPasswordSwallowsADeliveryFailure is the divergence from the

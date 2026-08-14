@@ -134,6 +134,14 @@ func ChangePasswordHTTPError(err error) HTTPError {
 // The divergence belongs to the shared middleware, not to this route.
 func SendVerificationEmailHTTPError(err error) HTTPError {
 	switch {
+	case errors.Is(err, ErrDeliveryFailed):
+		// A failed send is the reference's generic 500 and nothing else. This case
+		// comes first because the delivery wrapper joins the transport's own error
+		// rather than replacing it, so without it a host sender that returned (or
+		// wrapped) a library sentinel would pick this route's wire answer for it —
+		// a mail gateway is not entitled to answer 404 "User not found" for an
+		// authenticated user who exists.
+		return HTTPErrInternal
 	case errors.Is(err, ErrFeatureNotSupported):
 		return HTTPErrEmailVerificationStoreMissing
 	case errors.Is(err, ErrInvalidCredentials):
@@ -161,6 +169,12 @@ func VerifyEmailHTTPError(err error) HTTPError {
 // port's auth gate answers 403 where the reference's handler would answer 404.
 func ChangeEmailRequestHTTPError(err error) HTTPError {
 	switch {
+	case errors.Is(err, ErrDeliveryFailed):
+		// As on /send-verification-email, and it matters more here: without this
+		// case a sender that returned ErrUserExists would turn a failed send into
+		// 409 "Email address is already in use" about an address that is free,
+		// which is both a false answer and an oracle the caller never asked for.
+		return HTTPErrInternal
 	case errors.Is(err, ErrFeatureNotSupported):
 		return HTTPErrChangeEmailStoreMissing
 	case errors.Is(err, ErrUserExists), errors.Is(err, ErrAlreadyExists):
