@@ -297,6 +297,13 @@ func DecodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 func (a *Auth) ForgotPassword(ctx context.Context, in ForgotPasswordInput) (string, error) {
 	token, err := a.service.ForgotPassword(ctx, in)
 	if errors.Is(err, ErrDeliveryFailed) {
+		// Logged, because the wire deliberately cannot report it: a deployment
+		// whose mail gateway is down would otherwise see nothing but 200s while no
+		// reset mail arrives. This is the arrangement the link-token delivery
+		// already uses for the same swallow (see LinkStart). The address is left
+		// out on purpose — the route's whole job is not to say who is registered,
+		// and that applies to the log too.
+		a.service.logf("auth: password reset delivery failed; the route still answered success: %v", err)
 		// Nothing is returned to the caller either way — the route may not put a
 		// reset token in a body — so this is indistinguishable from the
 		// unknown-address path, which is the point.

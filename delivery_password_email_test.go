@@ -447,7 +447,10 @@ func TestSectionTwoDeliveryFailureIsAlwaysTheGenericFiveHundred(t *testing.T) {
 // deny (auth.router.ts:796-798, wire-contract §2 "Anti-enumeration caveat").
 func TestAuthForgotPasswordSwallowsADeliveryFailure(t *testing.T) {
 	spy := &passwordEmailSpy{fail: errors.New("mail gateway unreachable")}
-	a := newPasswordEmailAuth(t, spy)
+	var logged []string
+	a := newPasswordEmailAuth(t, spy, WithLogger(func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}))
 	if _, _, err := a.Register(context.Background(), RegisterInput{
 		Email: "authresetfail@example.com", Password: "password1", TenantID: "t1",
 	}); err != nil {
@@ -474,6 +477,27 @@ func TestAuthForgotPasswordSwallowsADeliveryFailure(t *testing.T) {
 	}
 	if stored.ResetTokenHash != hashToken(spy.resets[0].Token) {
 		t.Error("the stored hash does not match the token the sender was handed")
+	}
+
+	// Swallowed on the wire, but not in silence: the log is the only signal a
+	// deployment with a dead mail gateway can get, since every request still
+	// answers 200. Same arrangement as the link-token delivery's swallow.
+	var reported string
+	for _, line := range logged {
+		if strings.Contains(line, "password reset delivery failed") {
+			reported = line
+		}
+	}
+	if reported == "" {
+		t.Errorf("the swallowed delivery failure was never logged; lines = %q", logged)
+	}
+	if !strings.Contains(reported, "mail gateway unreachable") {
+		t.Errorf("log line %q does not carry the transport's cause", reported)
+	}
+	// And it does not name the address: the route's job is not to say who is
+	// registered, which holds for the log as much as for the body.
+	if strings.Contains(reported, "authresetfail@example.com") {
+		t.Errorf("log line %q names the address the route refuses to confirm", reported)
 	}
 
 	// A store failure is NOT swallowed: that oracle is the reference's and stays.
