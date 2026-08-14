@@ -297,10 +297,24 @@ func (s *Service) ChangePassword(ctx context.Context, in ChangePasswordInput) er
 	return ps.UpdatePassword(ctx, user.ID, user.TenantID, pwHash)
 }
 
+// SendMagicLink mints a magic link, stores its hash and delivers it through
+// Config.SendMagicLink.
+//
+// The returned plaintext token is redundant for an HTTP caller — the routes
+// answer {"success":true} and drop it — and is kept for a direct caller that
+// delivers the link itself, and for tests.
 func (s *Service) SendMagicLink(ctx context.Context, in MagicLinkSendInput) (string, error) {
 	ms, ok := s.users.(MagicLinkStore)
 	if !ok {
 		return "", ErrFeatureNotSupported
+	}
+	// Before the lookup, exactly as the reference orders it
+	// (magic-link.strategy.ts:12-14 precedes :15). The ordering is visible: a
+	// deployment that cannot send mail answers 500 even for an address it does
+	// not have, so the not-configured failure outranks the anti-enumeration
+	// silence below rather than hiding behind it.
+	if s.cfg.SendMagicLink == nil {
+		return "", ErrEmailNotConfigured
 	}
 	in.Email = normalizeEmail(in.Email)
 	user, err := s.users.GetUserByEmail(ctx, in.Email, in.TenantID)
@@ -311,8 +325,22 @@ func (s *Service) SendMagicLink(ctx context.Context, in MagicLinkSendInput) (str
 	if err != nil {
 		return "", err
 	}
-	if err := ms.UpdateMagicLinkToken(ctx, user.ID, user.TenantID, hashToken(magicToken), s.now().Add(s.cfg.MagicLinkTTL)); err != nil {
+	expiresAt := s.now().Add(s.cfg.MagicLinkTTL)
+	if err := ms.UpdateMagicLinkToken(ctx, user.ID, user.TenantID, hashToken(magicToken), expiresAt); err != nil {
 		return "", err
+	}
+	// Store first, then send — the reference's order (:22 then :28-33). A send
+	// that fails leaves a stored token nobody received, which is harmless: it is
+	// unguessable and expires on its own. Sending first would risk the opposite,
+	// a delivered link the store never learned about.
+	if err := s.cfg.SendMagicLink(ctx, MagicLinkDelivery{
+		UserID:    user.ID,
+		TenantID:  user.TenantID,
+		Email:     user.Email,
+		Token:     magicToken,
+		ExpiresAt: expiresAt,
+	}); err != nil {
+		return "", fmt.Errorf("auth: deliver magic link: %w", err)
 	}
 	return magicToken, nil
 }
@@ -362,10 +390,21 @@ func (s *Service) verifyMagicLink(ctx context.Context, in MagicLinkVerifyInput, 
 	return user, tokens, nil
 }
 
+// SendSMSCode mints a one-time code, stores its hash and delivers it through
+// Config.SendSMSCode. See SendMagicLink on the returned plaintext.
+//
+// The HTTP routes refuse an unconfigured deployment before they reach this call
+// (Auth.SMSConfigured), because the reference checks config.sms at the top of
+// the route rather than in the strategy. This check is what protects a direct
+// caller, and it is why a handler that skipped the precheck still cannot store a
+// code nobody can deliver.
 func (s *Service) SendSMSCode(ctx context.Context, in SMSCodeSendInput) (string, error) {
 	ss, ok := s.users.(SMSStore)
 	if !ok {
 		return "", ErrFeatureNotSupported
+	}
+	if s.cfg.SendSMSCode == nil {
+		return "", ErrSMSNotConfigured
 	}
 	user, err := s.resolveUser(ctx, in.UserID, in.Email, in.TenantID)
 	if err != nil || user.PhoneNumber == "" {
@@ -375,8 +414,18 @@ func (s *Service) SendSMSCode(ctx context.Context, in SMSCodeSendInput) (string,
 	if err != nil {
 		return "", err
 	}
-	if err := ss.UpdateSMSCode(ctx, user.ID, user.TenantID, hashToken(code), s.now().Add(s.cfg.SMSCodeTTL)); err != nil {
+	expiresAt := s.now().Add(s.cfg.SMSCodeTTL)
+	if err := ss.UpdateSMSCode(ctx, user.ID, user.TenantID, hashToken(code), expiresAt); err != nil {
 		return "", err
+	}
+	if err := s.cfg.SendSMSCode(ctx, SMSCodeDelivery{
+		UserID:    user.ID,
+		TenantID:  user.TenantID,
+		Phone:     user.PhoneNumber,
+		Code:      code,
+		ExpiresAt: expiresAt,
+	}); err != nil {
+		return "", fmt.Errorf("auth: deliver sms code: %w", err)
 	}
 	return code, nil
 }

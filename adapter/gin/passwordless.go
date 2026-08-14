@@ -14,11 +14,10 @@ import (
 // The branching, the literals and the sentinel mappings live in the root
 // package, so these closures are the Gin plumbing and nothing else.
 //
-// SendMagicLink and SendSMSCode return the credential they minted to their
-// caller and there is no mail or SMS transport in this package to hand it to,
-// so the handlers drop it. A deployment delivers it by calling the service
-// directly; putting it in the response body would turn a second factor into no
-// factor at all.
+// SendMagicLink and SendSMSCode return the credential they minted and these
+// handlers drop it: putting it in the response body would turn a second factor
+// into no factor at all. The service delivers it through the senders on Config
+// (see delivery.go); the send routes owe that seam only the /sms/send precheck.
 
 // bindStepUpJSON binds a request body and treats an absent one as a body with
 // every field omitted — the reference's behaviour, where express.json() leaves
@@ -105,6 +104,13 @@ func (ad *Adapter) magicLinkVerify(c *gin.Context) {
 }
 
 func (ad *Adapter) smsSend(c *gin.Context) {
+	// First, before the body is even read: the reference checks config.sms at the
+	// top of this route, so an unconfigured deployment answers 500 rather than
+	// the 200 an unknown address would otherwise get. See Auth.SMSConfigured.
+	if !ad.auth.SMSConfigured() {
+		auth.WriteHTTPError(c.Writer, auth.HTTPErrSMSNotConfigured)
+		return
+	}
 	var req struct {
 		UserID    string `json:"userId"`
 		Email     string `json:"email"`

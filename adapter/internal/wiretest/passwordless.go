@@ -22,10 +22,12 @@ import (
 // factor: wire-contract §3.
 //
 // The credential the send routes mint never reaches the response, so the
-// assertions come at it from two sides: the body is pinned to exactly
-// {"success":true}, and the store is read directly to prove the route really
-// did mint and persist something. A handler that returned 200 without calling
-// the service passes the first and fails the second.
+// assertions come at it from three sides: the body is pinned to exactly
+// {"success":true}, the store is read directly to prove the route really did
+// mint and persist something, and Env.Delivered is read to prove it was handed
+// to the delivery seam. A handler that returned 200 without calling the service
+// passes the first and fails the others; one that stored a credential nobody
+// could receive passes the first two and fails the third.
 
 const testTenant = "t1"
 
@@ -174,7 +176,7 @@ func tempTokenFor(t *testing.T, env *Env, user auth.User) string {
 // -----------------------------------------------------------------------------
 
 func testMagicLink(t *testing.T, mount Mounter) {
-	t.Run("send stores a link and answers with nothing else", func(t *testing.T) {
+	t.Run("send stores a link, delivers it, and answers with nothing else", func(t *testing.T) {
 		store := auth.NewMemoryUserStore()
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithUserStore(store))
 		user, _ := env.Seed("magic@example.com")
@@ -189,8 +191,26 @@ func testMagicLink(t *testing.T, mount Mounter) {
 		if body["success"] != true {
 			t.Fatalf("success = %v", body["success"])
 		}
-		if passwordlessStoredUser(t, store, user.ID).MagicLinkTokenHash == "" {
+		stored := passwordlessStoredUser(t, store, user.ID).MagicLinkTokenHash
+		if stored == "" {
 			t.Fatal("no magic-link token was stored: the route answered without doing anything")
+		}
+		// The link has to have gone somewhere, and it has to be the link the
+		// store will accept — a token delivered to the recipient that the store
+		// never learned about verifies as invalid.
+		if len(env.Delivered.MagicLinks) != 1 {
+			t.Fatalf("delivered %d links, want 1: the route stored a credential nobody received", len(env.Delivered.MagicLinks))
+		}
+		delivered := env.Delivered.MagicLinks[0]
+		if delivered.Email != "magic@example.com" {
+			t.Errorf("delivered to %q", delivered.Email)
+		}
+		if delivered.Token == "" || delivered.Token == stored {
+			t.Errorf("delivered token %q: want the plaintext, not the stored hash", delivered.Token)
+		}
+		// The credential must still not be on the wire.
+		if strings.Contains(rec.Body.String(), delivered.Token) {
+			t.Errorf("the response body carries the magic-link token: %s", rec.Body.String())
 		}
 	})
 
@@ -201,6 +221,56 @@ func testMagicLink(t *testing.T, mount Mounter) {
 		}))
 		AssertStatus(t, rec, http.StatusOK)
 		AssertKeys(t, Body(t, rec), "success")
+		if len(env.Delivered.MagicLinks) != 0 {
+			t.Errorf("something was mailed for an address the store does not have: %+v", env.Delivered.MagicLinks)
+		}
+	})
+
+	// A deployment with nothing to mail the link with answers 500, and it answers
+	// it before the lookup: an address the store does not have gets the same 500,
+	// not the 200 the anti-enumeration path would otherwise give
+	// (magic-link.strategy.ts:12-14 precedes :15).
+	t.Run("send without email delivery configured", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			email string
+		}{
+			{name: "known address", email: "magicunconfigured@example.com"},
+			{name: "unknown address", email: "nobody@example.com"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				store := auth.NewMemoryUserStore()
+				env := NewEnvWithoutDelivery(t, mount, auth.DefaultHTTPConfig(), auth.WithUserStore(store))
+				user, _ := env.Seed("magicunconfigured@example.com")
+
+				rec := env.Do(env.Request(http.MethodPost, "/magic-link/send", map[string]any{
+					"email": tc.email, "tenantId": testTenant,
+				}))
+
+				AssertError(t, rec, http.StatusInternalServerError, "Email not configured", auth.CodeEmailNotConfigured)
+				if hash := passwordlessStoredUser(t, store, user.ID).MagicLinkTokenHash; hash != "" {
+					t.Errorf("a token was stored for a deployment that cannot send it: %q", hash)
+				}
+			})
+		}
+	})
+
+	// The 2fa branch reaches the same check, but only after the step-up token has
+	// been resolved: an unusable tempToken still answers 401, because the
+	// reference's email check lives in the strategy behind the route.
+	t.Run("send in 2fa mode without email delivery configured", func(t *testing.T) {
+		env := NewEnvWithoutDelivery(t, mount, auth.DefaultHTTPConfig())
+		user, _ := env.Seed("magicstepupunconfigured@example.com")
+
+		bad := env.Do(env.Request(http.MethodPost, "/magic-link/send", map[string]any{
+			"mode": auth.StepUpMode, "tempToken": "not-a-token",
+		}))
+		AssertError(t, bad, http.StatusUnauthorized, "Invalid or expired temp token", auth.CodeInvalidTempToken)
+
+		good := env.Do(env.Request(http.MethodPost, "/magic-link/send", map[string]any{
+			"mode": auth.StepUpMode, "tempToken": tempTokenFor(t, env, user),
+		}))
+		AssertError(t, good, http.StatusInternalServerError, "Email not configured", auth.CodeEmailNotConfigured)
 	})
 
 	// Code-less on purpose: the reference answers this one inline.
@@ -435,9 +505,9 @@ func seedUnverified(t *testing.T, store *auth.MemoryUserStore, email string) aut
 	return user
 }
 
-// magicLinkToken mints a link through the service. The send route drops the
-// token — there is no mail transport in the port — so a test that wants to
-// verify a link has to ask for one directly.
+// magicLinkToken mints a link through the service. The send route delivers the
+// token rather than returning it, so a test that wants to verify a link asks for
+// one directly instead of digging it out of Env.Delivered.
 func magicLinkToken(t *testing.T, env *Env, user auth.User) string {
 	t.Helper()
 	token, err := env.Auth.SendMagicLink(context.Background(), auth.MagicLinkSendInput{Email: user.Email, TenantID: user.TenantID})
@@ -462,7 +532,7 @@ func newPhoneEnv(t *testing.T, mount Mounter) (*Env, *auth.MemoryUserStore) {
 }
 
 func testSMSOTP(t *testing.T, mount Mounter) {
-	t.Run("send by address stores a code and answers with nothing else", func(t *testing.T) {
+	t.Run("send by address stores a code, delivers it, and answers with nothing else", func(t *testing.T) {
 		env, store := newPhoneEnv(t, mount)
 		user, _ := env.Seed("sms@example.com")
 
@@ -472,9 +542,98 @@ func testSMSOTP(t *testing.T, mount Mounter) {
 
 		AssertStatus(t, rec, http.StatusOK)
 		AssertKeys(t, Body(t, rec), "success")
-		if passwordlessStoredUser(t, store, user.ID).SMSCodeHash == "" {
+		stored := passwordlessStoredUser(t, store, user.ID).SMSCodeHash
+		if stored == "" {
 			t.Fatal("no SMS code was stored: the route answered without doing anything")
 		}
+		if len(env.Delivered.SMSCodes) != 1 {
+			t.Fatalf("delivered %d codes, want 1: the route stored a credential nobody received", len(env.Delivered.SMSCodes))
+		}
+		delivered := env.Delivered.SMSCodes[0]
+		if delivered.Phone != "+15555550100" {
+			t.Errorf("texted %q, want the stored number", delivered.Phone)
+		}
+		if len(delivered.Code) != 6 || delivered.Code == stored {
+			t.Errorf("delivered code %q: want the six-digit plaintext, not the stored hash", delivered.Code)
+		}
+		if strings.Contains(rec.Body.String(), delivered.Code) {
+			t.Errorf("the response body carries the SMS code: %s", rec.Body.String())
+		}
+	})
+
+	// config.sms is checked at the very top of the reference's route
+	// (auth.router.ts:1178-1181), before the body is even destructured, so every
+	// one of these answers the same 500. The unknown-address case is the one that
+	// matters: with the check any lower it would answer 200 "sent" from a
+	// deployment that cannot text anybody.
+	t.Run("send without SMS delivery configured", func(t *testing.T) {
+		cases := []struct {
+			name string
+			body map[string]any
+		}{
+			{name: "by address", body: map[string]any{"email": "smsunconfigured@example.com", "tenantId": testTenant}},
+			{name: "by unknown address", body: map[string]any{"email": "nobody@example.com", "tenantId": testTenant}},
+			{name: "by unknown id", body: map[string]any{"userId": "usr_missing", "tenantId": testTenant}},
+			{name: "with no id or address", body: map[string]any{"tenantId": testTenant}},
+			{name: "in 2fa mode with no tempToken", body: map[string]any{"mode": auth.StepUpMode}},
+			{name: "in 2fa mode with an unusable tempToken", body: map[string]any{"mode": auth.StepUpMode, "tempToken": "not-a-token"}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				backing := auth.NewMemoryUserStore()
+				store := phoneUserStore{MemoryUserStore: backing, phone: "+15555550100"}
+				env := NewEnvWithoutDelivery(t, mount, auth.DefaultHTTPConfig(), auth.WithUserStore(store))
+				user, _ := env.Seed("smsunconfigured@example.com")
+
+				rec := env.Do(env.Request(http.MethodPost, "/sms/send", tc.body))
+
+				AssertError(t, rec, http.StatusInternalServerError, "SMS is not configured", auth.CodeSMSNotConfigured)
+				if hash := passwordlessStoredUser(t, backing, user.ID).SMSCodeHash; hash != "" {
+					t.Errorf("a code was stored for a deployment that cannot send it: %q", hash)
+				}
+			})
+		}
+
+		// Also with a body the route would otherwise have accepted outright.
+		t.Run("by id", func(t *testing.T) {
+			backing := auth.NewMemoryUserStore()
+			store := phoneUserStore{MemoryUserStore: backing, phone: "+15555550100"}
+			env := NewEnvWithoutDelivery(t, mount, auth.DefaultHTTPConfig(), auth.WithUserStore(store))
+			user, _ := env.Seed("smsunconfiguredid@example.com")
+
+			rec := env.Do(env.Request(http.MethodPost, "/sms/send", map[string]any{
+				"userId": user.ID, "tenantId": testTenant,
+			}))
+
+			AssertError(t, rec, http.StatusInternalServerError, "SMS is not configured", auth.CodeSMSNotConfigured)
+			if hash := passwordlessStoredUser(t, backing, user.ID).SMSCodeHash; hash != "" {
+				t.Errorf("a code was stored for a deployment that cannot send it: %q", hash)
+			}
+		})
+	})
+
+	// Magic-link delivery is a separate half of the seam: an SMS-only deployment
+	// still texts codes, and a mail-only one still mails links.
+	t.Run("send needs only the SMS half of the seam", func(t *testing.T) {
+		backing := auth.NewMemoryUserStore()
+		store := phoneUserStore{MemoryUserStore: backing, phone: "+15555550100"}
+		env := NewEnvWithoutDelivery(t, mount, auth.DefaultHTTPConfig(),
+			auth.WithUserStore(store),
+			auth.WithSMSCodeSender(func(context.Context, auth.SMSCodeDelivery) error { return nil }),
+		)
+		user, _ := env.Seed("smsonly@example.com")
+
+		rec := env.Do(env.Request(http.MethodPost, "/sms/send", map[string]any{
+			"userId": user.ID, "tenantId": testTenant,
+		}))
+		AssertStatus(t, rec, http.StatusOK)
+		AssertKeys(t, Body(t, rec), "success")
+
+		// ...and the mail half is still missing, which only /magic-link/send cares about.
+		mail := env.Do(env.Request(http.MethodPost, "/magic-link/send", map[string]any{
+			"email": "smsonly@example.com", "tenantId": testTenant,
+		}))
+		AssertError(t, mail, http.StatusInternalServerError, "Email not configured", auth.CodeEmailNotConfigured)
 	})
 
 	t.Run("send by id", func(t *testing.T) {
@@ -656,8 +815,8 @@ func testSMSOTP(t *testing.T, mount Mounter) {
 	})
 }
 
-// smsCode mints a code through the service: the send route drops it, because
-// the port has no SMS transport to hand it to.
+// smsCode mints a code through the service: the send route delivers it rather
+// than returning it. See magicLinkToken.
 func smsCode(t *testing.T, env *Env, user auth.User) string {
 	t.Helper()
 	code, err := env.Auth.SendSMSCode(context.Background(), auth.SMSCodeSendInput{UserID: user.ID, TenantID: user.TenantID})

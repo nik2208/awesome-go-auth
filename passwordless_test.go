@@ -20,6 +20,8 @@ func TestStepUpErrorCatalogLiterals(t *testing.T) {
 		CodeInvalidMagicLink:   "INVALID_MAGIC_LINK",
 		CodeTokenMismatch:      "TOKEN_MISMATCH",
 		CodePhoneNotSet:        "PHONE_NOT_SET",
+		CodeEmailNotConfigured: "EMAIL_NOT_CONFIGURED",
+		CodeSMSNotConfigured:   "SMS_NOT_CONFIGURED",
 	}
 	for got, want := range codes {
 		if got != want {
@@ -42,6 +44,13 @@ func TestStepUpErrorCatalogLiterals(t *testing.T) {
 		HTTPErrUserIDRequired:            {400, "userId is required", ""},
 		HTTPErrPhoneNotSet:               {400, "User does not have a phone number configured", "PHONE_NOT_SET"},
 		HTTPErrInvalidSMSCode:            {401, "Invalid or expired SMS code", ""},
+		// "SMS is not configured" is the router's wording. The reference's
+		// strategy says "SMS not configured" without the "is", but its check is
+		// unreachable behind the route's, so the router's string is the one on the
+		// wire. Dropping the "is" to match the strategy would break a client that
+		// surfaces the server message.
+		HTTPErrEmailNotConfigured:        {500, "Email not configured", "EMAIL_NOT_CONFIGURED"},
+		HTTPErrSMSNotConfigured:          {500, "SMS is not configured", "SMS_NOT_CONFIGURED"},
 		HTTPErrInvalidMagicLink:          {401, "Invalid magic link token", "INVALID_MAGIC_LINK"},
 		HTTPErrTokenMismatch:             {401, "Token mismatch", "TOKEN_MISMATCH"},
 		HTTPErrInvalidTOTPCode:           {401, "Invalid TOTP code", ""},

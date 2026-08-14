@@ -30,6 +30,10 @@ const testSecret = "12345678901234567890123456789012"
 func testConfig(secret string) Config {
 	cfg := DefaultConfig(secret)
 	cfg.BcryptCost = testBcryptCost
+	// Delivery is a precondition of the passwordless send calls, so a service
+	// built for a test about something else still has to satisfy it. See
+	// noopDelivery in delivery_test.go.
+	noopDelivery(&cfg)
 	return cfg
 }
 

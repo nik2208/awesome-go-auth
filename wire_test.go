@@ -241,7 +241,7 @@ func TestUnmappedSentinelsAreDeliberate(t *testing.T) {
 		ErrInvalidCredentials, ErrUserExists, ErrInvalidToken, ErrSessionNotFound,
 		ErrSessionRevoked, ErrWeakPassword, ErrFeatureNotSupported, ErrEmailNotVerified,
 		ErrInvalidCode, ErrTwoFactorRequired, ErrAlreadyExists, ErrTenantNotFound,
-		ErrRoleNotFound,
+		ErrRoleNotFound, ErrEmailNotConfigured, ErrSMSNotConfigured,
 	}
 	for _, err := range all {
 		mapped := HTTPErrorFor(err) != HTTPErrInternal

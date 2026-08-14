@@ -1,16 +1,17 @@
-//go:build ignore
-
 // Gin + MongoDB example for awesome-go-auth.
-// Shows how to use the Gin adapter and wire a MongoDB-backed store.
-// The store implementation is left as a comment skeleton — replace it
-// with your actual go.mongodb.org/mongo-driver adapter.
 //
-// Run (after implementing the store):
+// It wires the Gin adapter, the OIDC identity-provider endpoints and the
+// generated OpenAPI spec. The Mongo store is left as a comment skeleton — swap
+// NewMemoryUserStore for your go.mongodb.org/mongo-driver implementation.
 //
-//	go run main.go
+//	go run ./examples/gin-mongodb
+//
+// This file is compiled by `go build ./...`, so it cannot drift away from the
+// library API without CI noticing.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -23,7 +24,7 @@ import (
 )
 
 func main() {
-	// ── 1. Build the auth service ──────────────────────────────────────────
+	// ── 1. Build the auth instance ─────────────────────────────────────────
 	a, err := auth.New(
 		auth.WithSecret(getEnv("AUTH_SECRET", "change-me-in-production-32bytes!!")),
 		auth.WithIssuer("https://api.example.com"),
@@ -33,6 +34,22 @@ func main() {
 		auth.WithSessionStore(auth.NewMemorySessionStore()),
 		auth.WithMetadataProvider(auth.NewMemoryMetadataStore()),
 		auth.WithRBACProvider(auth.NewMemoryRolesPermissionsStore()),
+		// The passwordless routes need somewhere to send what they mint, or they
+		// answer 500 EMAIL_NOT_CONFIGURED / SMS_NOT_CONFIGURED. These log instead
+		// of sending; in production use a transport:
+		//
+		//	auth.WithMagicLinkSender(auth.NewMagicLinkMailer(
+		//		auth.NewHTTPMailerTransport(endpoint, secret),
+		//		"My App", "https://api.example.com/auth",
+		//	).Send),
+		auth.WithMagicLinkSender(func(_ context.Context, d auth.MagicLinkDelivery) error {
+			log.Printf("[auth] magic link for %s: %s", d.Email, auth.MagicLinkURL("http://localhost:8080/auth", d.Token))
+			return nil
+		}),
+		auth.WithSMSCodeSender(func(_ context.Context, d auth.SMSCodeDelivery) error {
+			log.Printf("[auth] sms to %s: %s", d.Phone, auth.SMSCodeMessage(d.Code))
+			return nil
+		}),
 	)
 	if err != nil {
 		log.Fatalf("auth init: %v", err)
@@ -64,41 +81,29 @@ func main() {
 	}
 	r := gin.Default()
 
-	adapt := ginAdapter.New(svc)
-
-	// Auth routes
-	authGroup := r.Group("/auth")
-	{
-		authGroup.POST("/register", adapt.Register)
-		authGroup.POST("/login", adapt.Login)
-		authGroup.POST("/refresh", adapt.Refresh)
-		authGroup.POST("/logout", adapt.Logout)
-		authGroup.GET("/me", adapt.RequireAuth(), adapt.Me)
-		authGroup.POST("/forgot-password", adapt.ForgotPassword)
-		authGroup.POST("/reset-password", adapt.ResetPassword)
-		authGroup.POST("/magic-link/send", adapt.SendMagicLink)
-		authGroup.POST("/magic-link/verify", adapt.VerifyMagicLink)
-		authGroup.POST("/totp/setup", adapt.RequireAuth(), adapt.SetupTOTP)
-		authGroup.POST("/totp/verify", adapt.VerifyTOTP)
-	}
+	// One call mounts every auth route under the configured prefix (/auth by
+	// default). Mounting on a group works too — the CSRF middleware locates the
+	// prefix on any segment boundary — via ginAdapter.MountWithConfig.
+	ginAdapter.Mount(r, a)
 
 	// OIDC IDP endpoints
 	oidcMux := http.NewServeMux()
 	idp.RegisterHandlers(oidcMux, "/oidc/")
 	r.Any("/oidc/*path", gin.WrapH(oidcMux))
 
-	// Admin UI
+	// Embedded UI
 	r.GET("/admin", gin.WrapH(auth.ServeAdminUI()))
 	r.GET("/auth.js", gin.WrapH(auth.ServeAuthJS()))
 
-	// OpenAPI spec
+	// OpenAPI spec. APIPrefix must match the mount.
 	r.GET("/openapi.json", func(c *gin.Context) {
 		spec := auth.GenerateOpenAPISpec(auth.OpenAPIInfo{
 			Title:     "My App API",
 			ServerURL: "https://api.example.com",
+			APIPrefix: auth.DefaultAPIPrefix,
 		})
 		c.Header("Content-Type", "application/json")
-		json.NewEncoder(c.Writer).Encode(spec) //nolint:errcheck
+		_ = json.NewEncoder(c.Writer).Encode(spec)
 	})
 
 	addr := getEnv("ADDR", ":8080")
@@ -107,12 +112,12 @@ func main() {
 }
 
 // ── MongoDB store skeleton ─────────────────────────────────────────────────
-// Uncomment and implement these when you add a mongo-driver dependency:
+// Implement these when you add a mongo-driver dependency:
 //
 // type MongoUserStore struct{ coll *mongo.Collection }
 // func (s *MongoUserStore) CreateUser(ctx context.Context, user auth.User) (auth.User, error) { ... }
 // func (s *MongoUserStore) GetUserByEmail(ctx context.Context, email, tenantID string) (auth.User, error) { ... }
-// ...
+// func (s *MongoUserStore) GetUserByID(ctx context.Context, id, tenantID string) (auth.User, error) { ... }
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

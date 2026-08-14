@@ -16,4 +16,12 @@ var (
 	ErrAlreadyExists       = errors.New("auth: resource already exists")
 	ErrTenantNotFound      = errors.New("auth: tenant not found")
 	ErrRoleNotFound        = errors.New("auth: role not found")
+
+	// ErrEmailNotConfigured and ErrSMSNotConfigured mean the deployment has no
+	// way to deliver the credential a send route just asked for. They are
+	// deliberately not ErrFeatureNotSupported: that one says the configured
+	// store cannot hold the column, and it is already on the wire as
+	// NOT_IMPLEMENTED on these same routes. See delivery.go.
+	ErrEmailNotConfigured = errors.New("auth: email delivery is not configured")
+	ErrSMSNotConfigured   = errors.New("auth: sms delivery is not configured")
 )

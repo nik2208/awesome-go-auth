@@ -181,6 +181,37 @@ func WithTokenClaimsBuilder(fn func(ctx context.Context, user User) (map[string]
 	}
 }
 
+// WithMagicLinkSender wires magic-link delivery. Without it POST
+// <prefix>/magic-link/send answers 500 EMAIL_NOT_CONFIGURED, because the route
+// cannot put the link in its response body.
+//
+// Pass a callback to send the mail yourself, or MagicLinkMailer.Send to use the
+// built-in templates over a MailerTransport.
+func WithMagicLinkSender(sender MagicLinkSender) Option {
+	return func(b *authBuilder) error {
+		if sender == nil {
+			return errors.New("auth: magic link sender is required")
+		}
+		b.cfg.SendMagicLink = sender
+		return nil
+	}
+}
+
+// WithSMSCodeSender wires SMS delivery. Without it POST <prefix>/sms/send
+// answers 500 SMS_NOT_CONFIGURED.
+//
+// Pass a callback to send the message yourself, or SMSTransportSender over an
+// SMSTransport such as HTTPSMSTransport.
+func WithSMSCodeSender(sender SMSCodeSender) Option {
+	return func(b *authBuilder) error {
+		if sender == nil {
+			return errors.New("auth: sms code sender is required")
+		}
+		b.cfg.SendSMSCode = sender
+		return nil
+	}
+}
+
 // WithLogger provides optional library logging callback.
 func WithLogger(fn func(format string, args ...any)) Option {
 	return func(b *authBuilder) error {
