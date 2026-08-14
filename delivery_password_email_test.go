@@ -500,6 +500,26 @@ func TestAuthForgotPasswordSwallowsADeliveryFailure(t *testing.T) {
 		t.Errorf("log line %q names the address the route refuses to confirm", reported)
 	}
 
+	// The reason the swallow exists, pinned at the layer that performs it. This is
+	// the deviation the README registers as "forgot-password: unconditional 200 on
+	// delivery failure", and its whole justification is that a broken mailer must
+	// not tell an attacker which addresses are registered. So with the same failing
+	// sender wired, a known address and an unknown one have to come back
+	// indistinguishable — same value, same nil error — because everything the route
+	// can put on the wire is derived from exactly that pair. Whoever revisits the
+	// swallow: if this stops holding, the divergence has lost its argument and the
+	// README entry is wrong, not this test.
+	unknownToken, unknownErr := a.ForgotPassword(context.Background(), ForgotPasswordInput{
+		Email: "nobodyhere@example.com", TenantID: "t1",
+	})
+	if unknownToken != token || unknownErr != nil {
+		t.Errorf("unknown address = (%q, %v), known address with a failing sender = (%q, <nil>): the two must be indistinguishable",
+			unknownToken, unknownErr, token)
+	}
+	if len(spy.resets) != 1 {
+		t.Errorf("the sender was called %d times, want 1: an unknown address must mint and send nothing", len(spy.resets))
+	}
+
 	// A store failure is NOT swallowed: that oracle is the reference's and stays.
 	// coreOnlyStore cannot persist a reset token, so an existing address errors.
 	bare, err := New(

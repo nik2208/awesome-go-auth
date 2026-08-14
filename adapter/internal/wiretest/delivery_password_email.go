@@ -133,11 +133,18 @@ func testPasswordResetDelivery(t *testing.T, mount Mounter) {
 		}
 	})
 
-	// The case that matters most. A failing sender must not change the answer: a
-	// 500 here would be a 500 only for an address that exists, which is the
-	// enumeration oracle the route exists to deny. The reference does answer 500
+	// The case that matters most, and the one that pins the *reason* for the
+	// deviation the README registers as "forgot-password: unconditional 200 on
+	// delivery failure". A failing sender must not change the answer: a 500 here
+	// would be a 500 only for an address that exists, which is the enumeration
+	// oracle the route exists to deny. The reference does answer 500
 	// (auth.router.ts:796-798) and its own spec marks that an [UNTESTED] oracle;
 	// this is the port's deliberate divergence, and the credential still survives.
+	//
+	// The known/unknown comparison at the end is the assertion that makes the
+	// reason true rather than merely intended: with the same broken sender wired,
+	// the two addresses must be indistinguishable. Do not weaken it to a bare
+	// "status is 200" — a 200 whose body differed would still be an oracle.
 	t.Run("a failing sender still gets 200 and keeps the stored token", func(t *testing.T) {
 		env, store := senderEnv(t, mount, auth.WithPasswordResetSender(
 			func(context.Context, auth.PasswordResetDelivery) error { return errTransportDown },

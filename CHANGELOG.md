@@ -71,7 +71,14 @@ routes minted and stored a credential that no deployment could actually send.
   `[UNTESTED]` in the contract, so no client can depend on it. `Auth.ForgotPassword`
   absorbs a delivery failure (`ErrDeliveryFailed`) and nothing else; a store that
   cannot persist the token still answers `500`, exactly as before. `Service.ForgotPassword`
-  keeps reporting the failure to a direct library caller.
+  keeps reporting the failure to a direct library caller, and the swallowed failure
+  is logged, so an operator whose mail gateway is down still has a signal.
+
+  Recorded as *`forgot-password`: unconditional 200 on delivery failure* under
+  **Deliberate deviations from the reference** in the README, which is the whole
+  register of such deviations for now: the machine-checked `CompatibilityNotes()`
+  that would stop one dropping out of the docs unnoticed is still open as item 6 of
+  issue #22.
 - **`delivery.go`: the mail/SMS delivery seam for the passwordless send routes.**
   `Config.SendMagicLink` and `Config.SendSMSCode` (with `auth.WithMagicLinkSender`
   and `auth.WithSMSCodeSender`) receive the credential the route mints, since it
