@@ -12,15 +12,11 @@ import (
 
 // The passwordless entry points and the TOTP second factor: wire-contract §3.
 //
-// Two of these routes reach a service call the port cannot complete on its own.
-// SendMagicLink and SendSMSCode mint and store a credential and hand it back to
-// their caller; there is no mail or SMS transport in this package to give it to,
-// so the handlers drop it. The routes are still the contract-correct shape —
-// they store the credential, and the matching verify route accepts it — but a
-// deployment has to deliver it, today by calling the service directly. Wiring a
-// transport is out of scope here and must not be improvised: a handler that
-// returned the credential in the response body would turn a second factor into
-// no factor at all.
+// SendMagicLink and SendSMSCode still return the credential they minted, and
+// these handlers still drop it: putting it in the response body would turn a
+// second factor into no factor at all. Delivery is the service's job now, through
+// the senders on Config (see delivery.go), so the only thing the send routes owe
+// that seam is the precheck below.
 
 // decodeStepUpJSON decodes a request body and treats an absent one as a body
 // with every field omitted, which is what the reference does: express.json()
@@ -159,6 +155,13 @@ func (a *Adapter) MagicLinkVerify(w http.ResponseWriter, r *http.Request) {
 
 // SMSSend handles POST <prefix>/sms/send.
 func (a *Adapter) SMSSend(w http.ResponseWriter, r *http.Request) {
+	// First, before the body is even read: the reference checks config.sms at the
+	// top of this route, so an unconfigured deployment answers 500 rather than
+	// the 200 an unknown address would otherwise get. See Auth.SMSConfigured.
+	if !a.auth.SMSConfigured() {
+		auth.WriteHTTPError(w, auth.HTTPErrSMSNotConfigured)
+		return
+	}
 	var req smsSendRequest
 	if !decodeStepUpJSON(w, r, &req) {
 		return
