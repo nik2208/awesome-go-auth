@@ -130,6 +130,9 @@ type Config struct {
     BuildTokenClaims      func(ctx, User) (map[string]any, error)
     SendMagicLink         MagicLinkSender               // required by POST /auth/magic-link/send
     SendSMSCode           SMSCodeSender                 // required by POST /auth/sms/send
+    SendPasswordReset     PasswordResetSender           // optional; POST /auth/forgot-password
+    SendEmailVerification EmailVerificationSender       // optional; POST /auth/send-verification-email
+    SendEmailChange       EmailChangeSender             // optional; POST /auth/change-email/request
     Logger                func(format string, args ...any)
 }
 ```
@@ -151,11 +154,14 @@ Two limitations apply to `strict`:
 
 - `Register` still returns a usable `AuthTokens` pair, so the mode gates `Login`
   rather than access as a whole ([#21](https://github.com/nik2208/awesome-go-auth/issues/21)).
-- `POST /send-verification-email` and `GET /verify-email` are mounted, but nothing
-  delivers the token they mint: the routes persist it and answer
-  `{"success": true}`, and this port has no mail sender wired into `Config`. Until
-  it has one, a `strict` deployment has to send the mail itself from the token
-  `SendVerificationEmailToken` returns.
+- `POST /send-verification-email` mints and persists the token and answers
+  `{"success": true}`; it mails it only when `Config.SendEmailVerification` is
+  wired (`WithEmailVerificationSender`, or
+  `NewEmailVerificationMailer(...).Send` for the built-in template). With no
+  sender the route still succeeds and sends nothing, which is what a reference
+  deployment with no email block does, so a `strict` deployment either wires a
+  sender or sends the mail itself from the token `SendVerificationEmailToken`
+  returns.
 
 ### `DefaultConfig(secret string) Config`
 

@@ -53,6 +53,24 @@ func main() {
 			log.Printf("[auth] sms to %s: %s", d.Phone, auth.SMSCodeMessage(d.Code))
 			return nil
 		}),
+		// The password-reset, verification and email-change routes answer 200 and
+		// mail nothing without these three, as a reference deployment with no email
+		// block does. NewPasswordResetMailer / NewEmailVerificationMailer /
+		// NewEmailChangeMailer over a MailerTransport give you the built-in
+		// templates instead of a callback.
+		auth.WithPasswordResetSender(func(_ context.Context, d auth.PasswordResetDelivery) error {
+			log.Printf("[auth] password reset for %s: %s", d.Email, auth.PasswordResetURL("http://localhost:8080/auth", d.Token))
+			return nil
+		}),
+		auth.WithEmailVerificationSender(func(_ context.Context, d auth.EmailVerificationDelivery) error {
+			log.Printf("[auth] verify %s: %s", d.Email, auth.EmailVerificationURL("http://localhost:8080/auth", d.Token))
+			return nil
+		}),
+		// Note the recipient: the new address, not the current one.
+		auth.WithEmailChangeSender(func(_ context.Context, d auth.EmailChangeDelivery) error {
+			log.Printf("[auth] email change to %s: %s", d.NewEmail, auth.EmailChangeConfirmURL("http://localhost:8080/auth", d.Token))
+			return nil
+		}),
 		auth.WithLogger(func(format string, args ...any) {
 			log.Printf("[auth] "+format, args...)
 		}),

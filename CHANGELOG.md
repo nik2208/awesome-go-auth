@@ -59,6 +59,43 @@ routes minted and stored a credential that no deployment could actually send.
   returns the challenge.
 
 ### Added
+- **`delivery_password_email.go`: the same seam for the three §2 routes that could
+  not deliver.** `Config.SendPasswordReset`, `Config.SendEmailVerification` and
+  `Config.SendEmailChange` (with `auth.WithPasswordResetSender`,
+  `auth.WithEmailVerificationSender` and `auth.WithEmailChangeSender`) receive the
+  token minted by `POST /auth/forgot-password`,
+  `POST /auth/send-verification-email` and `POST /auth/change-email/request`, which
+  until now stored a credential and answered success without sending anything.
+  Ready-made mailers `PasswordResetMailer`, `EmailVerificationMailer` and
+  `EmailChangeMailer` render the built-in `reset_password`, `verify_email` and
+  `email_change` templates — shipped since 0.1.0 and called by nothing — over any
+  `MailerTransport`, alongside `PasswordResetURL`, `EmailVerificationURL` and
+  `EmailChangeConfirmURL`. `/change-email/request` mails the **new** address: it
+  verifies the new mailbox, as in the reference.
+
+  **Not breaking, unlike the passwordless senders.** All three routes still answer
+  `200 {"success": true}` and mail nothing when no sender is wired, because the
+  reference has no not-configured check on any of them — it prefers a callback,
+  falls back to a mailer, and silently succeeds with neither
+  (`auth.router.ts:787-792, 956-961, 1027-1032`). A *failing* sender leaves the
+  stored token in place and answers the reference's generic code-less `500` on the
+  two authenticated routes.
+- **`POST /auth/forgot-password` now answers `200 {"success": true}` even when
+  delivery fails** — a deliberate divergence, and the only one here. The reference
+  lets a throwing mailer reach `handleError` and answer `500`
+  (`auth.router.ts:796-798`), which means a known address `500`s while an unknown
+  one `200`s: the enumeration oracle the route exists to deny, recorded and marked
+  `[UNTESTED]` in the contract, so no client can depend on it. `Auth.ForgotPassword`
+  absorbs a delivery failure (`ErrDeliveryFailed`) and nothing else; a store that
+  cannot persist the token still answers `500`, exactly as before. `Service.ForgotPassword`
+  keeps reporting the failure to a direct library caller, and the swallowed failure
+  is logged, so an operator whose mail gateway is down still has a signal.
+
+  Recorded as *`forgot-password`: unconditional 200 on delivery failure* under
+  **Deliberate deviations from the reference** in the README, which is the whole
+  register of such deviations for now: the machine-checked `CompatibilityNotes()`
+  that would stop one dropping out of the docs unnoticed is still open as item 6 of
+  issue #22.
 - **`delivery.go`: the mail/SMS delivery seam for the passwordless send routes.**
   `Config.SendMagicLink` and `Config.SendSMSCode` (with `auth.WithMagicLinkSender`
   and `auth.WithSMSCodeSender`) receive the credential the route mints, since it

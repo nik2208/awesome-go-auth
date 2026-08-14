@@ -85,6 +85,9 @@ var (
 // deployment fault, not a feature the caller can be told about, and answering
 // 501 would tell an anonymous caller something the 200-always rule is there to
 // hide.
+//
+// A failed *delivery* never reaches this mapper: Auth.ForgotPassword absorbs it
+// so the route keeps answering 200. See there for why that one diverges.
 func ForgotPasswordHTTPError(error) HTTPError { return HTTPErrInternal }
 
 // ResetPasswordHTTPError maps a Service.ResetPassword failure.
@@ -131,6 +134,14 @@ func ChangePasswordHTTPError(err error) HTTPError {
 // The divergence belongs to the shared middleware, not to this route.
 func SendVerificationEmailHTTPError(err error) HTTPError {
 	switch {
+	case errors.Is(err, ErrDeliveryFailed):
+		// A failed send is the reference's generic 500 and nothing else. This case
+		// comes first because the delivery wrapper joins the transport's own error
+		// rather than replacing it, so without it a host sender that returned (or
+		// wrapped) a library sentinel would pick this route's wire answer for it —
+		// a mail gateway is not entitled to answer 404 "User not found" for an
+		// authenticated user who exists.
+		return HTTPErrInternal
 	case errors.Is(err, ErrFeatureNotSupported):
 		return HTTPErrEmailVerificationStoreMissing
 	case errors.Is(err, ErrInvalidCredentials):
@@ -158,6 +169,12 @@ func VerifyEmailHTTPError(err error) HTTPError {
 // port's auth gate answers 403 where the reference's handler would answer 404.
 func ChangeEmailRequestHTTPError(err error) HTTPError {
 	switch {
+	case errors.Is(err, ErrDeliveryFailed):
+		// As on /send-verification-email, and it matters more here: without this
+		// case a sender that returned ErrUserExists would turn a failed send into
+		// 409 "Email address is already in use" about an address that is free,
+		// which is both a false answer and an oracle the caller never asked for.
+		return HTTPErrInternal
 	case errors.Is(err, ErrFeatureNotSupported):
 		return HTTPErrChangeEmailStoreMissing
 	case errors.Is(err, ErrUserExists), errors.Is(err, ErrAlreadyExists):
@@ -251,12 +268,48 @@ func DecodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-// ForgotPassword delegates to Service.ForgotPassword. The returned reset token
-// is the credential the host application has to deliver: this port has no mail
-// sender wired into Config, so no adapter route emails it and no adapter route
-// puts it in a response body.
+// ForgotPassword delegates to Service.ForgotPassword and then throws away one
+// class of failure: a send that failed after the token was stored. The route
+// answers 200 {"success":true} for it, exactly as it does for an address that does
+// not exist.
+//
+// This is a deliberate divergence, and the only one on this route. The
+// reference's send sits inside the route's try block, so a throwing mailer reaches
+// handleError and answers 500 (auth.router.ts:787-798) — which means a known
+// address 500s while an unknown one 200s, and an attacker with a broken mail
+// gateway has the enumeration oracle the route exists to deny. The spec records
+// exactly that and marks it [UNTESTED] (wire-contract §2, "Anti-enumeration
+// caveat: a throwing mailer produces a 500 only for existing users, which is an
+// observable oracle"), so no client can depend on it. The port already refuses to
+// ship an oracle the reference leaves open elsewhere — SMSVerifyHTTPError answers
+// 401 where the reference would answer 404 for the same reason.
+//
+// Store failures are NOT swallowed: those still 500, and that oracle *is*
+// reproduced (see ForgotPasswordHTTPError and the suite case that pins it). The
+// difference is that a store that cannot persist a reset token has minted no
+// credential and served no request correctly, while a stored-but-undelivered token
+// is harmless — unguessable, single-use, expiring — so silence costs the caller
+// nothing but a mail that never arrives.
+//
+// Divergence from Service.ForgotPassword is the same arrangement as
+// Auth.ChangePassword's: the Auth methods are the HTTP surface, and a library
+// consumer calling the service directly still learns that delivery failed.
 func (a *Auth) ForgotPassword(ctx context.Context, in ForgotPasswordInput) (string, error) {
-	return a.service.ForgotPassword(ctx, in)
+	token, err := a.service.ForgotPassword(ctx, in)
+	if errors.Is(err, ErrDeliveryFailed) {
+		// Logged, because the wire deliberately cannot report it: a deployment
+		// whose mail gateway is down would otherwise see nothing but 200s while no
+		// reset mail arrives. This is the arrangement the link-token delivery
+		// already uses for the same swallow (see LinkStart). The address is left
+		// out on purpose — the route's whole job is not to say who is registered,
+		// and that applies to the log too.
+		a.service.logf("auth: password reset delivery failed; the route still answered success: %v", err)
+		// Nothing is returned to the caller either way — the route may not put a
+		// reset token in a body — so this is indistinguishable from the
+		// unknown-address path, which is the point.
+		return "", nil
+	}
+	return token, err
 }
 
 // ResetPassword delegates to Service.ResetPassword.

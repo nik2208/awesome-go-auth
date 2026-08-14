@@ -71,6 +71,7 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("StepUpModeDefault", func(t *testing.T) { testStepUpModeDefault(t, mount) })
 	t.Run("StepUpEmptyBody", func(t *testing.T) { testStepUpEmptyBody(t, mount) })
 	t.Run("PasswordAndEmail", func(t *testing.T) { testPasswordAndEmail(t, mount) })
+	t.Run("PasswordEmailDelivery", func(t *testing.T) { testPasswordEmailDelivery(t, mount) })
 	t.Run("OpenAPI", func(t *testing.T) { testOpenAPI(t, mount) })
 }
 

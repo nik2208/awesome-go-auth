@@ -69,7 +69,18 @@ type Config struct {
 	// SMS_NOT_CONFIGURED. See delivery.go for why they live here.
 	SendMagicLink MagicLinkSender
 	SendSMSCode   SMSCodeSender
-	Logger        func(format string, args ...any)
+	// SendPasswordReset, SendEmailVerification and SendEmailChange are the other
+	// half of the same seam, for POST <prefix>/forgot-password,
+	// POST <prefix>/send-verification-email and POST <prefix>/change-email/request.
+	//
+	// Leaving one nil is silence rather than an error: the reference's routes send
+	// no mail and still answer 200 when neither a callback nor a mailer is
+	// configured, so these three have no NOT_CONFIGURED code. See
+	// delivery_password_email.go.
+	SendPasswordReset     PasswordResetSender
+	SendEmailVerification EmailVerificationSender
+	SendEmailChange       EmailChangeSender
+	Logger                func(format string, args ...any)
 }
 
 // DefaultConfig returns secure defaults for development and production bootstrap.

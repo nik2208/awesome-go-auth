@@ -258,7 +258,15 @@ func (s *Service) ForgotPassword(ctx context.Context, in ForgotPasswordInput) (s
 	if err != nil {
 		return "", err
 	}
-	if err := ps.UpdateResetToken(ctx, user.ID, user.TenantID, hashToken(resetToken), s.now().Add(s.cfg.ResetTokenTTL)); err != nil {
+	expiresAt := s.now().Add(s.cfg.ResetTokenTTL)
+	if err := ps.UpdateResetToken(ctx, user.ID, user.TenantID, hashToken(resetToken), expiresAt); err != nil {
+		return "", err
+	}
+	// Store first, then send, as on the passwordless routes and in the reference
+	// (auth.router.ts:784 then :787-792). A delivery failure is reported to the
+	// caller and leaves the token in place; Auth.ForgotPassword is where the HTTP
+	// surface decides not to let it change the answer.
+	if err := s.deliverPasswordReset(ctx, user, resetToken, expiresAt); err != nil {
 		return "", err
 	}
 	return resetToken, nil
@@ -480,7 +488,13 @@ func (s *Service) SendVerificationEmailToken(ctx context.Context, in EmailVerifi
 	if err != nil {
 		return "", err
 	}
-	if err := evs.UpdateEmailVerificationToken(ctx, user.ID, user.TenantID, hashToken(token), s.now().Add(s.cfg.EmailVerificationTTL)); err != nil {
+	expiresAt := s.now().Add(s.cfg.EmailVerificationTTL)
+	if err := evs.UpdateEmailVerificationToken(ctx, user.ID, user.TenantID, hashToken(token), expiresAt); err != nil {
+		return "", err
+	}
+	// Store first, then send (auth.router.ts:953 then :956-961). A failed send
+	// yields the reference's generic 500 and leaves the token stored.
+	if err := s.deliverEmailVerification(ctx, user, token, expiresAt); err != nil {
 		return "", err
 	}
 	return token, nil
@@ -518,7 +532,16 @@ func (s *Service) RequestEmailChange(ctx context.Context, in ChangeEmailRequestI
 	if err != nil {
 		return "", err
 	}
-	if err := ecs.UpdateEmailChangeToken(ctx, user.ID, user.TenantID, in.NewEmail, hashToken(token), s.now().Add(s.cfg.EmailChangeTTL)); err != nil {
+	expiresAt := s.now().Add(s.cfg.EmailChangeTTL)
+	if err := ecs.UpdateEmailChangeToken(ctx, user.ID, user.TenantID, in.NewEmail, hashToken(token), expiresAt); err != nil {
+		return "", err
+	}
+	// Store first, then send, and send to the *new* address: this mail verifies
+	// that the new mailbox exists (auth.router.ts:1024 then :1027-1032, which mails
+	// newEmail). The notice the reference sends to the old address happens on
+	// /change-email/confirm and has no sender in this port — see
+	// EmailChangeDelivery.
+	if err := s.deliverEmailChange(ctx, user, in.NewEmail, token, expiresAt); err != nil {
 		return "", err
 	}
 	return token, nil

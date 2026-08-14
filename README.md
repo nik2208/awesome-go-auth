@@ -95,6 +95,39 @@ The HTTP surface follows the `awesome-node-auth` contract the family clients
   unsafe methods only. There is no `/csrf` endpoint: the cookie is distributed by
   the router-level middleware.
 
+## Deliberate deviations from the reference
+
+The standing rule is to reproduce `awesome-node-auth` including its quirks, because
+the family clients are pinned to it. The entries below are the places this port
+knowingly does **not**, each with the reason the rule was set aside.
+
+This list is hand-maintained and not yet exhaustive. The machine-checked
+`CompatibilityNotes()` that would keep it honest — an exported function the README
+mirrors and a test asserts — is still open as item 6 of
+[#22](https://github.com/nik2208/awesome-go-auth/issues/22).
+
+### `forgot-password`: unconditional 200 on delivery failure
+
+- **Route**: `POST <prefix>/forgot-password`.
+- **This port**: always `200 {"success": true}` — when the mail was sent, when the
+  configured sender returns an error, and when no sender is configured at all. The
+  reset token stays stored in every case. A *store* failure still answers `500`,
+  which is the reference's behaviour and is kept.
+- **The reference**: the send sits inside the route's `try`, so a throwing mailer
+  reaches `handleError` and answers `500` (`auth.router.ts:787-798`).
+- **Why**: that `500` fires only for an address that **exists**, so a broken mail
+  gateway turns the one route whose purpose is to reveal nothing about who is
+  registered into an account-enumeration oracle. The contract records it and marks
+  it `[UNTESTED]`, and no client can depend on a status that appears only when the
+  operator's mailer is down. `SMSVerifyHTTPError` answering `401` where the
+  reference would answer `404` is the precedent for declining an oracle the
+  reference leaves open.
+- **Observing the failure**: only the HTTP surface swallows it.
+  `Auth.ForgotPassword` absorbs `ErrDeliveryFailed` (and nothing else) and logs
+  `auth: password reset delivery failed; the route still answered success: …`,
+  without naming the address. `Service.ForgotPassword` still returns the error, so
+  a direct library caller learns about it.
+
 ## Parity Snapshot vs `awesome-node-auth`
 
 | Capability | Status in `awesome-go-auth` | Notes |
