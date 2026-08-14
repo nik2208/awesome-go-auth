@@ -43,6 +43,10 @@ const (
 	CodeInvalidMagicLink   = "INVALID_MAGIC_LINK"
 	CodeTokenMismatch      = "TOKEN_MISMATCH"
 	CodePhoneNotSet        = "PHONE_NOT_SET"
+	// CodeEmailNotConfigured and CodeSMSNotConfigured report a deployment that
+	// cannot deliver what the send route just minted. See delivery.go.
+	CodeEmailNotConfigured = "EMAIL_NOT_CONFIGURED"
+	CodeSMSNotConfigured   = "SMS_NOT_CONFIGURED"
 )
 
 // The catalog entries these routes write. Several carry no code: the reference
@@ -72,6 +76,20 @@ var (
 	HTTPErrPhoneNotSet               = HTTPError{Status: http.StatusBadRequest, Message: "User does not have a phone number configured", Code: CodePhoneNotSet}
 
 	HTTPErrInvalidSMSCode = HTTPError{Status: http.StatusUnauthorized, Message: "Invalid or expired SMS code"}
+
+	// HTTPErrEmailNotConfigured is /magic-link/send's answer when nothing can
+	// mail the link (magic-link.strategy.ts:12-14).
+	HTTPErrEmailNotConfigured = HTTPError{Status: http.StatusInternalServerError, Message: "Email not configured", Code: CodeEmailNotConfigured}
+
+	// HTTPErrSMSNotConfigured is /sms/send's answer when nothing can text the
+	// code. The reference states this one twice with two different messages: the
+	// router checks config.sms first and says "SMS is not configured"
+	// (auth.router.ts:1179), and the strategy behind it says "SMS not
+	// configured" (sms.strategy.ts:12) — no "is". Only the router's string is
+	// ever on the wire, because its check runs before the strategy is reached,
+	// so that is the one reproduced. The strategy's wording is not a second
+	// catalog entry here; it has no route that can emit it.
+	HTTPErrSMSNotConfigured = HTTPError{Status: http.StatusInternalServerError, Message: "SMS is not configured", Code: CodeSMSNotConfigured}
 
 	// HTTPErrInvalidMagicLink covers both of the reference's magic-link
 	// failures. The reference splits them — INVALID_MAGIC_LINK for a token it
@@ -319,6 +337,19 @@ func (a *Auth) StepUpSubject(tempToken string, missing, invalid HTTPError) (Temp
 // every user. It is the port's equivalent of the reference's settingsStore
 // require2FA flag, which is what /2fa/disable refuses on.
 func (a *Auth) TwoFactorPolicy() bool { return a.service.cfg.Require2FA }
+
+// SMSConfigured reports whether the deployment can deliver an SMS code.
+//
+// /sms/send has to ask before it does anything else, because the reference
+// checks config.sms at the very top of the route (auth.router.ts:1178-1181) and
+// not in the strategy behind it. The ordering is client-visible, and not in a
+// cosmetic way: the route answers 200 to an unknown address as an
+// anti-enumeration measure, so a handler that only found out at the service call
+// would tell an unconfigured deployment's caller "sent" for every address it
+// does not have. The magic-link route needs no equivalent — the reference checks
+// email configuration inside the strategy there, which Service.SendMagicLink
+// reproduces, and WriteServiceError maps the sentinel.
+func (a *Auth) SMSConfigured() bool { return a.service.cfg.SendSMSCode != nil }
 
 // IssueTempToken delegates to Service.IssueTempToken.
 func (a *Auth) IssueTempToken(ctx context.Context, user User) (string, error) {

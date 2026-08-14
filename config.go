@@ -62,7 +62,14 @@ type Config struct {
 	TempTokenTTL          time.Duration
 	Require2FA            bool
 	BuildTokenClaims      func(ctx context.Context, user User) (map[string]any, error)
-	Logger                func(format string, args ...any)
+	// SendMagicLink and SendSMSCode are the delivery seam. Both are optional to
+	// construct a service with and required to use the route that needs them:
+	// leaving one nil is what makes POST <prefix>/magic-link/send answer 500
+	// EMAIL_NOT_CONFIGURED and POST <prefix>/sms/send answer 500
+	// SMS_NOT_CONFIGURED. See delivery.go for why they live here.
+	SendMagicLink MagicLinkSender
+	SendSMSCode   SMSCodeSender
+	Logger        func(format string, args ...any)
 }
 
 // DefaultConfig returns secure defaults for development and production bootstrap.

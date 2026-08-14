@@ -163,6 +163,10 @@ func HTTPErrorFor(err error) HTTPError {
 		return HTTPErrWeakPassword
 	case errors.Is(err, ErrFeatureNotSupported):
 		return HTTPErrNotImplemented
+	case errors.Is(err, ErrEmailNotConfigured):
+		return HTTPErrEmailNotConfigured
+	case errors.Is(err, ErrSMSNotConfigured):
+		return HTTPErrSMSNotConfigured
 	case errors.Is(err, ErrSessionNotFound), errors.Is(err, ErrInvalidToken):
 		return HTTPErrInvalidToken
 	default:
