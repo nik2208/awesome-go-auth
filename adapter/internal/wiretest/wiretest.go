@@ -26,26 +26,74 @@ import (
 // Mounter builds a handler serving a's auth routes under cfg.
 type Mounter func(t *testing.T, a *auth.Auth, cfg auth.HTTPConfig) http.Handler
 
+// Deliveries records what the delivery senders were handed, so a send route can
+// be asserted on from the outside: the credential never appears in the response,
+// and checking only that the store holds a hash cannot tell "delivered" from
+// "minted and dropped on the floor".
+type Deliveries struct {
+	MagicLinks []auth.MagicLinkDelivery
+	SMSCodes   []auth.SMSCodeDelivery
+}
+
+func (d *Deliveries) senderOptions() []auth.Option {
+	return []auth.Option{
+		auth.WithMagicLinkSender(func(_ context.Context, delivery auth.MagicLinkDelivery) error {
+			d.MagicLinks = append(d.MagicLinks, delivery)
+			return nil
+		}),
+		auth.WithSMSCodeSender(func(_ context.Context, delivery auth.SMSCodeDelivery) error {
+			d.SMSCodes = append(d.SMSCodes, delivery)
+			return nil
+		}),
+	}
+}
+
 // Env is one mounted adapter under test.
 type Env struct {
 	T       *testing.T
 	Auth    *auth.Auth
 	Handler http.Handler
 	Config  auth.HTTPConfig
+	// Delivered is what the recording senders received. It is empty on an env
+	// built by NewEnvWithoutDelivery, which wires no senders at all.
+	Delivered *Deliveries
 }
 
 // NewEnv builds an auth instance and mounts it.
 //
-// Every Env in the suite is built here, so this is the one place the bcrypt cost
-// needs pinning. The suite runs hundreds of Envs and seeds most of them, and at
-// the production default each seed is tens of milliseconds of key derivation
-// that none of the wire assertions look at — they check statuses, bodies and
-// Set-Cookie headers. bcrypt.MinCost keeps the hashes real (verification is
-// exercised for the whole login path) while taking the cost out of the runtime.
-//
-// It is prepended rather than appended so a caller that deliberately wants a
-// different cost can still override it.
+// The delivery seam is satisfied with recording senders, because it is a
+// precondition of two routes in this suite: without them /magic-link/send and
+// /sms/send answer 500 EMAIL_NOT_CONFIGURED and 500 SMS_NOT_CONFIGURED, which
+// is correct behaviour but not what the other cases are about. A caller may
+// still override either sender through opts, which are applied last.
 func NewEnv(t *testing.T, mount Mounter, cfg auth.HTTPConfig, opts ...auth.Option) *Env {
+	t.Helper()
+	delivered := &Deliveries{}
+	env := newEnv(t, mount, cfg, append(delivered.senderOptions(), opts...)...)
+	env.Delivered = delivered
+	return env
+}
+
+// NewEnvWithoutDelivery builds an env whose delivery seam is unconfigured: the
+// deployment that can mint a credential and has no way to send it.
+func NewEnvWithoutDelivery(t *testing.T, mount Mounter, cfg auth.HTTPConfig, opts ...auth.Option) *Env {
+	t.Helper()
+	env := newEnv(t, mount, cfg, opts...)
+	env.Delivered = &Deliveries{}
+	return env
+}
+
+// newEnv is where every Env in the suite is actually built, so it is the one
+// place the bcrypt cost needs pinning. The suite runs hundreds of Envs and seeds
+// most of them, and at the production default each seed is tens of milliseconds
+// of key derivation that none of the wire assertions look at — they check
+// statuses, bodies and Set-Cookie headers. bcrypt.MinCost keeps the hashes real
+// (verification is exercised for the whole login path) while taking the cost out
+// of the runtime.
+//
+// The defaults are prepended rather than appended so a caller that deliberately
+// wants a different cost, or its own store, can still override them.
+func newEnv(t *testing.T, mount Mounter, cfg auth.HTTPConfig, opts ...auth.Option) *Env {
 	t.Helper()
 	opts = append([]auth.Option{
 		auth.WithUserStore(auth.NewMemoryUserStore()),
