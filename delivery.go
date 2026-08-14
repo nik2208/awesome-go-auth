@@ -107,7 +107,14 @@ const MagicLinkVerifyPath = "/magic-link/verify"
 // needs no query escaping, and the reference interpolates its hex token raw for
 // the same reason.
 func MagicLinkURL(base, token string) string {
-	return strings.TrimSuffix(base, "/") + MagicLinkVerifyPath + "?token=" + token
+	return tokenLink(base, MagicLinkVerifyPath, token)
+}
+
+// tokenLink is the shape every emailed link in this package has. It is shared
+// with the three builders in delivery_password_email.go so that one of them
+// cannot start escaping the token, or keeping the trailing slash, on its own.
+func tokenLink(base, path, token string) string {
+	return strings.TrimSuffix(base, "/") + path + "?token=" + token
 }
 
 // SMSCodeMessage is the text the reference texts (sms.strategy.ts:20). It is on

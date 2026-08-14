@@ -38,8 +38,9 @@ func (ad *Adapter) forgotPassword(c *gin.Context) {
 	if !auth.DecodeOptionalJSON(c.Writer, c.Request, &req) {
 		return
 	}
-	// The reset token is a credential: it never reaches the body, and this port
-	// has no mail sender to hand it to.
+	// The reset token is a credential: it never reaches the body. The service
+	// delivers it through Config.SendPasswordReset, and neither a missing sender
+	// nor a failing one changes this answer.
 	if _, err := ad.auth.ForgotPassword(c.Request.Context(), auth.ForgotPasswordInput{Email: req.Email, TenantID: req.TenantID}); err != nil {
 		auth.WriteHTTPError(c.Writer, auth.ForgotPasswordHTTPError(err))
 		return

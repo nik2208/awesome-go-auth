@@ -24,4 +24,10 @@ var (
 	// NOT_IMPLEMENTED on these same routes. See delivery.go.
 	ErrEmailNotConfigured = errors.New("auth: email delivery is not configured")
 	ErrSMSNotConfigured   = errors.New("auth: sms delivery is not configured")
+
+	// The password-reset, email-verification and email-change senders have no
+	// NOT_CONFIGURED sentinel of their own: on those three routes the reference
+	// sends nothing and still succeeds, so a nil sender is silence rather than an
+	// error. Their one sentinel, ErrDeliveryFailed, lives beside them in
+	// delivery_password_email.go.
 )

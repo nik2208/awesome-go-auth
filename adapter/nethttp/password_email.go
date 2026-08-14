@@ -59,10 +59,12 @@ func (a *Adapter) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	if !auth.DecodeOptionalJSON(w, r, &req) {
 		return
 	}
-	// The reset token is deliberately discarded: it is a credential, so it may
-	// not reach the response body, and this port has no mail sender to hand it
-	// to. A deployment therefore behaves like a reference deployment with no
-	// email sender configured — the route succeeds and no mail goes out.
+	// The reset token is deliberately discarded here: it is a credential, so it
+	// may not reach the response body. Delivery happens inside the service,
+	// through Config.SendPasswordReset; a deployment that wired no sender behaves
+	// like a reference deployment with no email block — the route succeeds and no
+	// mail goes out. A sender that fails does not change the answer either, which
+	// is Auth.ForgotPassword's doing.
 	if _, err := a.auth.ForgotPassword(r.Context(), auth.ForgotPasswordInput{Email: req.Email, TenantID: req.TenantID}); err != nil {
 		auth.WriteHTTPError(w, auth.ForgotPasswordHTTPError(err))
 		return
@@ -179,7 +181,9 @@ func (a *Adapter) ChangeEmailRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The change token is discarded for the same reason the reset token is: it is
-	// a credential, and delivery is the host application's job.
+	// a credential. The service mails it to the *new* address through
+	// Config.SendEmailChange, and unlike /forgot-password a failed send here is
+	// the reference's generic 500.
 	if _, err := a.auth.RequestEmailChange(r.Context(), auth.ChangeEmailRequestInput{UserID: user.ID, TenantID: user.TenantID, NewEmail: req.NewEmail}); err != nil {
 		auth.WriteHTTPError(w, auth.ChangeEmailRequestHTTPError(err))
 		return

@@ -212,6 +212,55 @@ func WithSMSCodeSender(sender SMSCodeSender) Option {
 	}
 }
 
+// WithPasswordResetSender wires password-reset delivery for POST
+// <prefix>/forgot-password. Without it the route still answers 200
+// {"success":true} and mails nothing, which is what a reference deployment with
+// no email block does — see delivery_password_email.go.
+//
+// Pass a callback to send the mail yourself, or PasswordResetMailer.Send to use
+// the built-in reset_password template over a MailerTransport.
+func WithPasswordResetSender(sender PasswordResetSender) Option {
+	return func(b *authBuilder) error {
+		if sender == nil {
+			return errors.New("auth: password reset sender is required")
+		}
+		b.cfg.SendPasswordReset = sender
+		return nil
+	}
+}
+
+// WithEmailVerificationSender wires verification delivery for POST
+// <prefix>/send-verification-email. Without it the route mails nothing and still
+// answers 200.
+//
+// Pass a callback, or EmailVerificationMailer.Send for the built-in verify_email
+// template.
+func WithEmailVerificationSender(sender EmailVerificationSender) Option {
+	return func(b *authBuilder) error {
+		if sender == nil {
+			return errors.New("auth: email verification sender is required")
+		}
+		b.cfg.SendEmailVerification = sender
+		return nil
+	}
+}
+
+// WithEmailChangeSender wires delivery for POST <prefix>/change-email/request.
+// The message goes to the *new* address: it is a verification of the new mailbox.
+// Without it the route mails nothing and still answers 200.
+//
+// Pass a callback, or EmailChangeMailer.Send for the built-in email_change
+// template.
+func WithEmailChangeSender(sender EmailChangeSender) Option {
+	return func(b *authBuilder) error {
+		if sender == nil {
+			return errors.New("auth: email change sender is required")
+		}
+		b.cfg.SendEmailChange = sender
+		return nil
+	}
+}
+
 // WithLogger provides optional library logging callback.
 func WithLogger(fn func(format string, args ...any)) Option {
 	return func(b *authBuilder) error {

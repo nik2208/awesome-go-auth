@@ -33,6 +33,12 @@ type Mounter func(t *testing.T, a *auth.Auth, cfg auth.HTTPConfig) http.Handler
 type Deliveries struct {
 	MagicLinks []auth.MagicLinkDelivery
 	SMSCodes   []auth.SMSCodeDelivery
+	// The §2 half of the seam. Unlike the two above, these three are not a
+	// precondition of any route: an env without them answers exactly as it did
+	// before the senders existed.
+	PasswordResets     []auth.PasswordResetDelivery
+	EmailVerifications []auth.EmailVerificationDelivery
+	EmailChanges       []auth.EmailChangeDelivery
 }
 
 func (d *Deliveries) senderOptions() []auth.Option {
@@ -43,6 +49,18 @@ func (d *Deliveries) senderOptions() []auth.Option {
 		}),
 		auth.WithSMSCodeSender(func(_ context.Context, delivery auth.SMSCodeDelivery) error {
 			d.SMSCodes = append(d.SMSCodes, delivery)
+			return nil
+		}),
+		auth.WithPasswordResetSender(func(_ context.Context, delivery auth.PasswordResetDelivery) error {
+			d.PasswordResets = append(d.PasswordResets, delivery)
+			return nil
+		}),
+		auth.WithEmailVerificationSender(func(_ context.Context, delivery auth.EmailVerificationDelivery) error {
+			d.EmailVerifications = append(d.EmailVerifications, delivery)
+			return nil
+		}),
+		auth.WithEmailChangeSender(func(_ context.Context, delivery auth.EmailChangeDelivery) error {
+			d.EmailChanges = append(d.EmailChanges, delivery)
 			return nil
 		}),
 	}
