@@ -2,6 +2,7 @@ package wiretest
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,12 @@ import (
 
 	auth "github.com/nik2208/awesome-go-auth"
 )
+
+// errClaimsHookDown is what a host's Config.BuildTokenClaims returns in the mint
+// failure cases below. Its identity never reaches the wire — HTTPErrInternal
+// carries neither a code nor the underlying error (wire.go) — so the cases match
+// on the envelope, not on this text.
+var errClaimsHookDown = errors.New("claims hook down")
 
 // Conformance cases for the second-factor branch of POST /login: wire-contract
 // §3.1, the challenge that hands a client the tempToken every step-up route
@@ -358,6 +365,57 @@ func testLoginTwoFactor(t *testing.T, mount Mounter) {
 			rec := env.Do(env.Request(http.MethodPost, "/login", credentials("unverified2fa@example.com")))
 			AssertError(t, rec, http.StatusForbidden, "Email address is not verified", auth.CodeEmailNotVerified)
 			assertNoTempToken(t, rec)
+		})
+	})
+
+	// ── the challenge cannot be minted ──────────────────────────────────────────
+
+	// A host whose Config.BuildTokenClaims hook fails breaks token minting from
+	// outside the package (issueToken wraps a hook error as an ordinary error), so
+	// /login reaches the challenge branch and cannot produce the token it exists to
+	// hand over.
+	//
+	// The route answers 500, not a challenge with an empty tempToken and not the
+	// 403 2FA_REQUIRED this PR removed from /login: a client told to step up with a
+	// token it was never given would be refused by every §3 route. The two cases
+	// together pin that the answer is the deployment's broken minting either way —
+	// the second factor does not change it. Service.Login, whose contract is the
+	// sentinel rather than the token, still reports ErrTwoFactorRequired here; that
+	// is a Go-API guarantee with no wire counterpart and is pinned in the root
+	// package (login_2fa_test.go).
+	t.Run("a login whose token cannot be minted answers 500", func(t *testing.T) {
+		mintFailure := func(t *testing.T, email string, enrol bool) *httptest.ResponseRecorder {
+			t.Helper()
+			// The hook has to work while the account is seeded and enrolled — both go
+			// through it — and fail only for the login under test.
+			broken := false
+			env := challengeEnv(t, mount, challengeOpts{},
+				auth.WithTokenClaimsBuilder(func(context.Context, auth.User) (map[string]any, error) {
+					if broken {
+						return nil, errClaimsHookDown
+					}
+					return nil, nil
+				}))
+			if enrol {
+				enrolledTOTPEnv(t, env, email)
+			} else {
+				env.Seed(email)
+			}
+			broken = true
+			return env.Do(env.Request(http.MethodPost, "/login", credentials(email)))
+		}
+
+		t.Run("a 2FA account", func(t *testing.T) {
+			rec := mintFailure(t, "mintfail2fa@example.com", true)
+			AssertError(t, rec, http.StatusInternalServerError, "Internal server error", "")
+			assertNoTempToken(t, rec)
+		})
+
+		t.Run("an account with no second factor", func(t *testing.T) {
+			rec := mintFailure(t, "mintfailplain@example.com", false)
+			AssertError(t, rec, http.StatusInternalServerError, "Internal server error", "")
+			AssertNoCookie(t, rec, hostAccess)
+			AssertNoCookie(t, rec, hostRefresh)
 		})
 	})
 

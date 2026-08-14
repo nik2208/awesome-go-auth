@@ -92,27 +92,54 @@ type LoginResult struct {
 	Challenge *TwoFactorChallenge
 }
 
+// loginPassword is the part of POST /login the two entry points share: it
+// verifies the credentials and reports whether a second factor is demanded. It
+// mints nothing.
+//
+// The split is what makes "a second factor is needed" reachable without a
+// token. Service.Login promises that decision as ErrTwoFactorRequired, and if it
+// could only learn it from a successfully built challenge then a deployment whose
+// Config.BuildTokenClaims hook fails (token.go:66-71 wraps that as an ordinary
+// error) would get a generic 500 out of the compatibility wrapper where it used
+// to get 403 2FA_REQUIRED — the one thing this PR promised not to change.
+func (s *Service) loginPassword(ctx context.Context, in LoginInput) (User, bool, error) {
+	in.Email = normalizeEmail(in.Email)
+	user, err := s.users.GetUserByEmail(ctx, in.Email, in.TenantID)
+	if err != nil || !verifyPassword(in.Password, user.PasswordHash) {
+		return User{}, false, ErrInvalidCredentials
+	}
+	if !user.IsEmailVerified && s.emailVerificationMode() != EmailVerificationModeLazy {
+		return User{}, false, ErrEmailNotVerified
+	}
+	return user, s.requiresTwoFactor(user), nil
+}
+
 // LoginWithChallenge is the full POST /login path: it verifies the password and
 // then either issues a session or mints the step-up challenge.
 //
 // Service.Login is the narrower form of the same call, kept for direct callers:
 // it collapses a challenge back into ErrTwoFactorRequired, which says a second
 // factor is needed and cannot say anything more.
+//
+// A challenge that cannot be minted is returned as the error, not as a challenge
+// with an empty TempToken and not as ErrTwoFactorRequired. This call's whole
+// point is the token: a client handed a challenge without one would believe it
+// had a step-up credential and be refused by every §3 route, and the sentinel
+// would spell the 403 2FA_REQUIRED body this PR removed from /login — a wire
+// answer no longer served on this route, telling the client to step up with a
+// token it was never given. So the failure surfaces: HTTPErrorFor maps it to
+// HTTPErrInternal (wire.go:172-173), which is what a broken host hook is.
 func (s *Service) LoginWithChallenge(ctx context.Context, in LoginInput) (LoginResult, error) {
 	var zero LoginResult
-	in.Email = normalizeEmail(in.Email)
-	user, err := s.users.GetUserByEmail(ctx, in.Email, in.TenantID)
-	if err != nil || !verifyPassword(in.Password, user.PasswordHash) {
-		return zero, ErrInvalidCredentials
-	}
-	if !user.IsEmailVerified && s.emailVerificationMode() != EmailVerificationModeLazy {
-		return zero, ErrEmailNotVerified
+	user, secondFactor, err := s.loginPassword(ctx, in)
+	if err != nil {
+		return zero, err
 	}
 	// Only here, below both gates, is a step-up token minted. Anywhere earlier —
 	// on a lookup hit, or before verifyPassword returns — and /login becomes an
 	// oracle that hands a step-up credential to whoever guesses an address, and
 	// that credential stands in for the password on every route in §3.
-	if s.requiresTwoFactor(user) {
+	if secondFactor {
 		challenge, err := s.twoFactorChallenge(ctx, user)
 		if err != nil {
 			return zero, err

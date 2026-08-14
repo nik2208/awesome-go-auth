@@ -116,16 +116,28 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (User, AuthTok
 // call: the sentinel can say that a second factor is needed and nothing more, and
 // the step-up routes need the token that comes with the challenge. Kept as it was
 // for direct callers. See login_2fa.go.
+//
+// It shares the password path with LoginWithChallenge but stops at the decision
+// rather than at the built challenge, so the sentinel is reported whenever a
+// second factor is *required* and not merely whenever one could be minted. Going
+// through the challenge would make this wrapper fail wherever minting fails —
+// Config.BuildTokenClaims returning an error is enough (token.go:66-71) — and
+// answer a 2FA account with that error instead of ErrTwoFactorRequired. Nothing
+// is minted here: the token this call cannot return is never built.
 func (s *Service) Login(ctx context.Context, in LoginInput) (User, AuthTokens, error) {
 	var zeroTokens AuthTokens
-	result, err := s.LoginWithChallenge(ctx, in)
+	user, secondFactor, err := s.loginPassword(ctx, in)
 	if err != nil {
 		return User{}, zeroTokens, err
 	}
-	if result.Challenge != nil {
+	if secondFactor {
 		return User{}, zeroTokens, ErrTwoFactorRequired
 	}
-	return result.User, result.Tokens, nil
+	tokens, err := s.newSessionTokens(ctx, user)
+	if err != nil {
+		return User{}, zeroTokens, err
+	}
+	return user, tokens, nil
 }
 
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthTokens, error) {
