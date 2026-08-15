@@ -55,7 +55,7 @@ var wantClaims = map[string][]string{
 	"totp-setup-omits-qrcode":                      {"otpauthUrl", "qrCode"},
 	"one-time-tokens-are-base64url":                {"43", "64", "base64url"},
 	"advertised-2fa-methods-require-store-support": {"available2faMethods", "501"},
-	"csrf-cookie-not-reissued-with-tokens":         {"Set-Cookie", "sendTokens"},
+	"csrf-cookie-not-reissued-with-tokens":         {"Set-Cookie", "setTokenCookies"},
 }
 
 // citationPattern is the reference source citation shape: a TypeScript file and

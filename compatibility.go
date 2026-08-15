@@ -204,10 +204,12 @@ func CompatibilityNotes() APICompatibilityNotes {
 				Behaviour: "The CSRF cookie is written by the router-level auto-init only, when " +
 					"the request carries no readable one. Issuing tokens does not reissue it, so " +
 					"one response never carries two Set-Cookie headers for that name.",
-				Reference: "sendTokens sets a fresh csrf-token cookie on every issuance, in " +
-					"addition to the router-level auto-init, so a first login emits two " +
-					"Set-Cookie headers for the same name with different values in one response.",
-				Citations: []string{"token.service.ts:204-209"},
+				Reference: "setTokenCookies sets a fresh csrf-token cookie on every cookie-mode " +
+					"issuance — it is reached from sendTokens (auth.router.ts:403) and from the " +
+					"OAuth redirect path — in addition to the router-level auto-init, so a first " +
+					"login emits two Set-Cookie headers for the same name with different values " +
+					"in one response.",
+				Citations: []string{"token.service.ts:204-209", "auth.router.ts:529-538"},
 				Why: "Which of two same-name Set-Cookie headers survives is left to the cookie " +
 					"jar, so the reference's pair makes the token a client will send back " +
 					"ambiguous on exactly the response that establishes it. Emitting one keeps " +
