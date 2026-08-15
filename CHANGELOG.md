@@ -59,6 +59,33 @@ routes minted and stored a credential that no deployment could actually send.
   returns the challenge.
 
 ### Added
+- **`compatibility.go`: `CompatibilityNotes()`, the deviation register as data**,
+  closing item 6 of #22. It returns the contract this port targets, the cookie and
+  bearer conventions, and every known deviation from `awesome-node-auth` as a
+  `[]Deviation` — each with a stable id, the route or surface affected, what this
+  port does, what the reference does with a `file:line` citation, and why the
+  standing rule (reproduce the reference, quirks included) was set aside.
+  `ReferenceRevision` names the revision those citations resolve against.
+
+  The point is the third layer: `compatibility_test.go` pins the set of ids, the
+  wire facts each entry has to keep stating, the `file:line` shape of every
+  citation, and the presence of each entry **and its citations** in the README. A
+  deviation can no longer be dropped, hollowed out or reversed without a test
+  failing, and one cannot be added without the README being updated to match — the
+  debt the README's own "hand-maintained and not yet exhaustive" note recorded.
+  Prose is deliberately left free so the test does not become a second copy of the
+  data.
+
+  Eight deviations are registered. Five were not written down anywhere before, and
+  two of them are wire-visible to any client:
+  `password-policy-on-reset-and-change` (the port answers `400 WEAK_PASSWORD` where
+  the reference applies no strength check at all and hashes a two-character
+  password, `auth.router.ts:801-825, 904-932`) and `totp-setup-omits-qrcode` (no
+  `qrCode` data URL, `auth.router.ts:832-835`). The others are
+  `one-time-tokens-are-base64url` (43 base64url characters, not 64 hex,
+  `token.service.ts:270-272`), `advertised-2fa-methods-require-store-support`, and
+  `csrf-cookie-not-reissued-with-tokens`. Nothing here changes behaviour; the
+  register describes the port as it already is.
 - **`delivery_password_email.go`: the same seam for the three §2 routes that could
   not deliver.** `Config.SendPasswordReset`, `Config.SendEmailVerification` and
   `Config.SendEmailChange` (with `auth.WithPasswordResetSender`,
