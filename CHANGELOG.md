@@ -7,8 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Closes the delivery gap the 0.2.0 passwordless routes shipped with: the send
-routes minted and stored a credential that no deployment could actually send.
+## [0.3.0] - 2026-08-15
+
+Makes the 0.2.0 surface actually usable end to end. Two things were missing
+rather than wrong: a password login against a 2FA account was a dead end, and
+every route that mints a credential to mail or text stored it and answered
+success without sending anything. Both are closed, so a client can now complete
+a second factor and a deployment can deliver what it issues.
+
+It also adds the deviation register (`CompatibilityNotes()`), whose README
+section is generated from it, so a deliberate difference from the reference
+cannot quietly stop being documented. Writing it surfaced five differences
+nobody had recorded and removed one that turned out not to be a difference at
+all.
 
 ### Changed
 - **BREAKING — `POST /auth/magic-link/send` and `POST /auth/sms/send` require a
