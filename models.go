@@ -49,8 +49,19 @@ type Tenant struct {
 // adapters may serialise: credential material (password hash, TOTP secret,
 // one-time token hashes and the pending email change) is deliberately absent.
 type PublicUser struct {
-	ID              string         `json:"id"`
-	Email           string         `json:"email"`
+	// Sub is the identifier under the name the reference uses and the shipped
+	// clients require. Both cast it non-nullably — awesome-node-auth-flutter
+	// does `json['sub'] as String` (auth_user.dart:76) and ng-awesome-node-auth
+	// declares `sub: string` (auth.service.ts:10) — so omitting it does not
+	// degrade a client, it throws inside one. It duplicates ID rather than
+	// replacing it because `id` shipped in 0.2.0 and both clients read that as
+	// optional, so emitting both breaks nobody.
+	Sub   string `json:"sub"`
+	ID    string `json:"id"`
+	Email string `json:"email"`
+	// Role is the reference's single-role field, distinct from Roles. Omitted
+	// when empty, which it always is until something writes it.
+	Role            string         `json:"role,omitempty"`
 	TenantID        string         `json:"tenantId,omitempty"`
 	FirstName       string         `json:"firstName,omitempty"`
 	LastName        string         `json:"lastName,omitempty"`
@@ -77,8 +88,10 @@ type PublicTenant struct {
 // NewPublicUser projects a User onto its response-safe representation.
 func NewPublicUser(user User) PublicUser {
 	public := PublicUser{
+		Sub:             user.ID,
 		ID:              user.ID,
 		Email:           user.Email,
+		Role:            user.Role,
 		TenantID:        user.TenantID,
 		FirstName:       user.FirstName,
 		LastName:        user.LastName,
