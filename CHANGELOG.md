@@ -67,17 +67,37 @@ routes minted and stored a credential that no deployment could actually send.
   standing rule (reproduce the reference, quirks included) was set aside.
   `ReferenceRevision` names the revision those citations resolve against.
 
-  The point is the third layer: `compatibility_test.go` pins the set of ids, the
-  wire facts each entry has to keep stating, the `file:line` shape of every
-  citation, and the presence of each entry **and its citations** in the README. A
-  deviation can no longer be dropped, hollowed out or reversed without a test
-  failing, and one cannot be added without the README being updated to match — the
-  debt the README's own "hand-maintained and not yet exhaustive" note recorded.
-  Prose is deliberately left free so the test does not become a second copy of the
-  data.
+  **The register is the single source of truth, and the README section is
+  generated from it.** The README's "Deliberate deviations from the reference" is
+  rendered from `CompatibilityNotes()` by `compatibility_markdown.go` and pinned by
+  `TestREADMEIsGeneratedFromCompatibilityNotes`, which re-renders the register and
+  compares it to the committed file byte for byte. It fails in both directions: a
+  register edit that was not regenerated fails, and a README edit with no register
+  edit behind it fails. Regenerate with
+  `go test -run TestREADMEIsGeneratedFromCompatibilityNotes -update .`, which the
+  section's own header comment says as well. Because the section is generated, the
+  register's prose fields are markdown, and `Deviation` gained `Title` (the section
+  heading) and optional `Notes` (extra labelled paragraphs) so no README content
+  lives outside the register.
 
-  Eight deviations are registered. Five were not written down anywhere before, and
-  two of them are wire-visible to any client:
+  This replaces a mirror test that bound identity only — it asserted that every id
+  and citation appeared *somewhere* in the README. That caught a deletion and
+  nothing else: an entry could be reworded, weakened, or reversed on either side
+  and stay green, and a README line could assert the exact opposite of the data it
+  claimed to mirror. `compatibility_test.go` still pins the set of ids, the
+  `file:line` shape of every citation, and the wire facts each entry has to keep
+  stating — that last one is not redundant with generation, because someone who
+  weakens an entry *and* regenerates gets a consistent README; the pinned claims
+  are what fails then.
+
+  Nine deviations are registered, and `cookie-max-age-follows-configured-ttl` is
+  the newest: this port derives each token cookie's `Max-Age` from the configured
+  TTL (`wire.go`), so `DefaultConfig` emits `Max-Age=2592000` on the refresh
+  cookie, where the reference hardcodes 7 days — `Max-Age=604800` — regardless of
+  its own `refreshTokenExpiresIn` (`token.service.ts:195,199-202`). The access
+  cookie matches at the default (both 15 minutes) and diverges on any custom
+  `AccessTokenTTL`. Five entries were not written down anywhere before, and two of
+  those are wire-visible to any client:
   `password-policy-on-reset-and-change` (the port answers `400 WEAK_PASSWORD` where
   the reference applies no strength check at all and hashes a two-character
   password, `auth.router.ts:801-825, 904-932`) and `totp-setup-omits-qrcode` (no
@@ -118,11 +138,9 @@ routes minted and stored a credential that no deployment could actually send.
   keeps reporting the failure to a direct library caller, and the swallowed failure
   is logged, so an operator whose mail gateway is down still has a signal.
 
-  Recorded as *`forgot-password`: unconditional 200 on delivery failure* under
-  **Deliberate deviations from the reference** in the README, which is the whole
-  register of such deviations for now: the machine-checked `CompatibilityNotes()`
-  that would stop one dropping out of the docs unnoticed is still open as item 6 of
-  issue #22.
+  Recorded as `forgot-password-succeeds-on-delivery-failure` in
+  `CompatibilityNotes()`, and so under **Deliberate deviations from the reference**
+  in the README, which is generated from it.
 - **`delivery.go`: the mail/SMS delivery seam for the passwordless send routes.**
   `Config.SendMagicLink` and `Config.SendSMSCode` (with `auth.WithMagicLinkSender`
   and `auth.WithSMSCodeSender`) receive the credential the route mints, since it
