@@ -61,7 +61,15 @@ type Config struct {
 	EmailChangeTTL        time.Duration
 	TempTokenTTL          time.Duration
 	Require2FA            bool
-	BuildTokenClaims      func(ctx context.Context, user User) (map[string]any, error)
+	// BuildTokenClaims adds claims to every token minted — access, refresh and
+	// the 2FA step-up token — and fills CustomClaims on the enriched profile.
+	// Its result is spread over the six base claims (sub, email, role,
+	// loginProvider, isEmailVerified, isTotpEnabled) and may override them, as
+	// the reference's buildTokenPayload may (auth.router.ts:378-384). The
+	// session claims sid, tid, jti, typ, iss, iat and exp are reserved: they
+	// are written after the merge, so a hook value under one of those names is
+	// discarded rather than minted (see issueToken for why).
+	BuildTokenClaims func(ctx context.Context, user User) (map[string]any, error)
 	// SendMagicLink and SendSMSCode are the delivery seam. Both are optional to
 	// construct a service with and required to use the route that needs them:
 	// leaving one nil is what makes POST <prefix>/magic-link/send answer 500

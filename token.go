@@ -31,6 +31,14 @@ type joseHeader struct {
 	Typ string `json:"typ"`
 }
 
+// issueToken mints one token for user — an access token, a refresh token or the
+// 2FA step-up token, which differ only in typ, sid and lifetime.
+//
+// The payload is assembled in the reference's order: the base claims first,
+// the Config.BuildTokenClaims result spread over them, and the session claims
+// written last (auth.router.ts:378-384 and :433, token.service.ts:19). The
+// order is the guarantee: a hook can rename what the user is, not what the
+// token is.
 func (s *Service) issueToken(ctx context.Context, user User, sessionID, tokenType string, ttl time.Duration) (string, time.Time, error) {
 	now := s.now()
 	expiresAt := now.Add(ttl)
@@ -38,28 +46,17 @@ func (s *Service) issueToken(ctx context.Context, user User, sessionID, tokenTyp
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	claims := tokenClaims{
-		Sub: user.ID,
-		Sid: sessionID,
-		Tid: user.TenantID,
-		Jti: jti,
-		Typ: tokenType,
-		Iss: s.cfg.Issuer,
-		Iat: now.Unix(),
-		Exp: expiresAt.Unix(),
-	}
 
+	// The base claims are the six the reference's buildPayload emits, and they
+	// are the only claims a hook may override: it spreads
+	// config.buildTokenPayload(user) over exactly this object
+	// (auth.router.ts:378-384), so a custom email or role wins here as it does
+	// there. The refresh token carries the same set (token.service.ts:25-29).
 	payloadClaims := map[string]any{
-		"sub":             claims.Sub,
-		"sid":             claims.Sid,
-		"tid":             claims.Tid,
-		"jti":             claims.Jti,
-		"typ":             claims.Typ,
-		"iss":             claims.Iss,
-		"iat":             claims.Iat,
-		"exp":             claims.Exp,
+		"sub":             user.ID,
 		"email":           user.Email,
 		"role":            user.Role,
+		"loginProvider":   user.loginProviderOrLocal(),
 		"isEmailVerified": user.IsEmailVerified,
 		"isTotpEnabled":   user.IsTOTPEnabled,
 	}
@@ -72,6 +69,33 @@ func (s *Service) issueToken(ctx context.Context, user User, sessionID, tokenTyp
 			payloadClaims[key] = value
 		}
 	}
+
+	// The reserved claims are written after the merge so that nothing a hook
+	// returns survives under these names. Each is a fact parseToken or its
+	// callers decide on, and a hook that could set it would be choosing the
+	// outcome rather than describing the user: sid binds the token to its
+	// session (Refresh, Logout and the session check compare it), tid scopes
+	// the user lookup, exp is the lifetime, iss and jti are the issuer check
+	// and the per-token id, iat is when it was minted.
+	//
+	// typ is the one that matters most. It is the only thing telling an access
+	// token, a refresh token and the step-up token apart — tokenTypeTemp is what
+	// keeps a tempToken out of every route behind the access-token gate. A
+	// hook returning {"typ": "access"} would have turned every tempToken handed
+	// out *before* the second factor into a full session credential, which is
+	// exactly the five-minute bypass the typed temp token exists to close (see
+	// the temp-token-is-typed-not-an-access-token deviation). The reference
+	// gets the same guarantee for its own session claims by assigning sid after
+	// the merge (auth.router.ts:433) and stripping iat/exp before signing
+	// (token.service.ts:19).
+	payloadClaims["sid"] = sessionID
+	payloadClaims["tid"] = user.TenantID
+	payloadClaims["jti"] = jti
+	payloadClaims["typ"] = tokenType
+	payloadClaims["iss"] = s.cfg.Issuer
+	payloadClaims["iat"] = now.Unix()
+	payloadClaims["exp"] = expiresAt.Unix()
+
 	token, err := buildHS256JWT(payloadClaims, s.cfg.Secret)
 	if err != nil {
 		return "", time.Time{}, err

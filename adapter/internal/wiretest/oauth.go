@@ -523,6 +523,26 @@ func testOAuthCallback(t *testing.T, mount Mounter) {
 		}
 	})
 
+	// A user the callback creates records the provider that created it, the
+	// way the reference's strategies document creating one
+	// (`userStore.create({ email, loginProvider: 'microsoft' })`,
+	// generic-oauth.strategy.ts:92), and /me reports it under loginProvider —
+	// where a password account says "local" (auth.router.ts:379).
+	t.Run("a user the callback creates reports the provider as loginProvider", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}})
+		location := f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
+		rec := f.callback(t, "c", location.Query().Get("state"))
+		AssertStatus(t, rec, http.StatusFound)
+		if user := f.sessionUser(t, rec); user.LoginProvider != testProvider {
+			t.Fatalf("LoginProvider = %q, want %q", user.LoginProvider, testProvider)
+		}
+		me := f.Do(Replay(httptest.NewRequest(http.MethodGet, f.Config.Prefix()+"/me", nil), rec))
+		AssertStatus(t, me, http.StatusOK)
+		if got := Body(t, me)["loginProvider"]; got != testProvider {
+			t.Fatalf("loginProvider = %v, want %q (body %s)", got, testProvider, me.Body.String())
+		}
+	})
+
 	// The reference's own resolveOAuthRedirect quirks, reproduced rather than
 	// improved on: three shipped clients are built against this Location header.
 	t.Run("the redirect reproduces the reference's base-path handling", func(t *testing.T) {

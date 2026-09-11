@@ -29,6 +29,31 @@ func TestMemoryUserStore_CreateAndGetByID(t *testing.T) {
 	}
 }
 
+// LoginProvider is stored with the rest of the row: an OAuth-created account
+// must still say which provider created it when it is read back, by id and by
+// email alike.
+func TestMemoryUserStore_PersistsLoginProvider(t *testing.T) {
+	store := NewMemoryUserStore()
+	ctx := context.Background()
+	if _, err := store.CreateUser(ctx, User{ID: "u003", Email: "oauth@example.com", TenantID: "t1", LoginProvider: "github"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	byID, err := store.GetUserByID(ctx, "u003", "t1")
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if byID.LoginProvider != "github" {
+		t.Fatalf("LoginProvider by id = %q, want %q", byID.LoginProvider, "github")
+	}
+	byEmail, err := store.GetUserByEmail(ctx, "oauth@example.com", "t1")
+	if err != nil {
+		t.Fatalf("GetUserByEmail: %v", err)
+	}
+	if byEmail.LoginProvider != "github" {
+		t.Fatalf("LoginProvider by email = %q, want %q", byEmail.LoginProvider, "github")
+	}
+}
+
 func TestMemoryUserStore_CreateAndGetByEmail(t *testing.T) {
 	store := NewMemoryUserStore()
 	ctx := context.Background()

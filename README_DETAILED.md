@@ -187,6 +187,7 @@ Called internally; ensures secret length >= 32 and TTLs > 0.
 | `PhoneNumber` | `string` | For SMS OTP |
 | `FirstName`, `LastName` | `string` | Display name |
 | `Role` | `string` | Single role (legacy; prefer Roles slice) |
+| `LoginProvider` | `string` | Provider that created the account (set by `OAuthService.HandleCallback`); empty reads as `"local"` on tokens and `/me` |
 | `IsEmailVerified` | `bool` | |
 | `Require2FA` | `bool` | Per-user 2FA requirement |
 | `IsTOTPEnabled` | `bool` | |

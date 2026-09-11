@@ -4,14 +4,21 @@ import "time"
 
 // User is the canonical identity model.
 type User struct {
-	ID                           string
-	Email                        string
-	PasswordHash                 string
-	TenantID                     string
-	PhoneNumber                  string
-	FirstName                    string
-	LastName                     string
-	Role                         string
+	ID           string
+	Email        string
+	PasswordHash string
+	TenantID     string
+	PhoneNumber  string
+	FirstName    string
+	LastName     string
+	Role         string
+	// LoginProvider names the identity provider that created the account: an
+	// OAuth provider's name for a user OAuthService.HandleCallback created,
+	// empty for one registered with a password. Empty is read as
+	// LoginProviderLocal wherever it reaches the wire — the reference's
+	// `user.loginProvider ?? 'local'` (auth.router.ts:379) — so a store that
+	// never persisted the field needs no migration to keep answering "local".
+	LoginProvider                string
 	IsEmailVerified              bool
 	Require2FA                   bool
 	IsTOTPEnabled                bool
@@ -34,6 +41,19 @@ type User struct {
 	CustomClaims                 map[string]any
 	CreatedAt                    time.Time
 	UpdatedAt                    time.Time
+}
+
+// LoginProviderLocal is the loginProvider a user without a recorded provider is
+// reported under, on tokens and on the profile alike: the reference's
+// `user.loginProvider ?? 'local'` (auth.router.ts:379).
+const LoginProviderLocal = "local"
+
+// loginProviderOrLocal is the loginProvider claim and profile field for u.
+func (u User) loginProviderOrLocal() string {
+	if u.LoginProvider == "" {
+		return LoginProviderLocal
+	}
+	return u.LoginProvider
 }
 
 // Tenant represents an isolated workspace or organization.
@@ -61,7 +81,12 @@ type PublicUser struct {
 	Email string `json:"email"`
 	// Role is the reference's single-role field, distinct from Roles. Omitted
 	// when empty, which it always is until something writes it.
-	Role            string         `json:"role,omitempty"`
+	Role string `json:"role,omitempty"`
+	// LoginProvider is always emitted, LoginProviderLocal when nothing recorded
+	// one: the reference's /me body is its token payload, which carries
+	// `loginProvider: user.loginProvider ?? 'local'` unconditionally
+	// (auth.router.ts:379, :666-668).
+	LoginProvider   string         `json:"loginProvider"`
 	TenantID        string         `json:"tenantId,omitempty"`
 	FirstName       string         `json:"firstName,omitempty"`
 	LastName        string         `json:"lastName,omitempty"`
@@ -92,6 +117,7 @@ func NewPublicUser(user User) PublicUser {
 		ID:              user.ID,
 		Email:           user.Email,
 		Role:            user.Role,
+		LoginProvider:   user.loginProviderOrLocal(),
 		TenantID:        user.TenantID,
 		FirstName:       user.FirstName,
 		LastName:        user.LastName,

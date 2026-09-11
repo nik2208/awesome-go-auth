@@ -337,10 +337,17 @@ func (s *OAuthService) HandleCallback(
 		return User{}, AuthTokens{}, err
 	}
 	now := time.Now()
+	// LoginProvider records which provider created the account, the way the
+	// reference's strategy documents creating one
+	// (`userStore.create({ email, loginProvider: 'microsoft' })`,
+	// generic-oauth.strategy.ts:92; user.model.ts:15). An account the callback
+	// only links — found above by provider id or by email — keeps the provider
+	// it was created with, as the reference's linkAccount changes no user row.
 	newUser, err := authSvc.users.CreateUser(ctx, User{
 		ID:              userID,
 		Email:           info.Email,
 		TenantID:        tenantID,
+		LoginProvider:   info.Provider,
 		IsEmailVerified: true,
 		CreatedAt:       now,
 		UpdatedAt:       now,
