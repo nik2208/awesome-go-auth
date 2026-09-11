@@ -18,29 +18,6 @@ JWKS document, parses PEM keys and mints the reference's RS256 token pair as
 a host-level API.
 
 ### Added
-- **`NewGatewayMailerTransport(MailerConfig)`: a mail transport that speaks the
-  reference's gateway contract.** `POST {endpoint}` with an `X-API-Key` header and
-  the JSON body `{to, subject, html, text, from, fromName, provider}`, delivered on
-  a `2xx` only (`mailer.service.ts:261-291`; config shape
-  `auth-config.model.ts:19-36`). `MailerConfig{Endpoint, APIKey, From, FromName,
-  Provider, DefaultLang}` mirrors the reference's `email.mailer` block, JSON tags
-  included, so a deployment that already holds that block can decode it and hand
-  it over; `Client *http.Client` is the one addition (nil → the 10-second timeout
-  the other HTTP transports use). The constructor refuses an empty or
-  non-absolute endpoint, and a failed send names the status and nothing else —
-  the API key never appears in an error. `MailMessage.Text` (additive) carries
-  the plain-text alternative; left empty, the HTML is sent as the text, as the
-  reference's `sendCustom` does (`text ?? html`). No route changes.
-- **`loginProvider` on every token and on `GET /me`.** `User.LoginProvider`
-  records the provider that created the account: `OAuthService.HandleCallback`
-  sets it to the provider's name on the users it creates, and a password
-  registration leaves it empty. It reaches the wire as the `loginProvider`
-  claim on access, refresh and temp tokens and as the `loginProvider` field of
-  `/me`, always present and `"local"` when nothing recorded one — the
-  reference's `user.loginProvider ?? 'local'` (`auth.router.ts:379`), which
-  its `/me` carries unconditionally. `LoginProviderLocal` names the default.
-  The field is additive: a host store that never persists it keeps answering
-  `"local"`, and `MemoryUserStore` stores it with the rest of the row.
 - **Claim builders — `StaticClaims`, `UserFieldClaims`, `ChainClaims` — and the
   synchronous `ClaimsWebhook`.** `TokenClaimsBuilder` names the type
   `Config.BuildTokenClaims` always had (an alias, so existing literals still
@@ -90,34 +67,6 @@ a host-level API.
   `auth.router.ts:1502-1510`) and the IdP `userinfo` endpoint, whose body the
   hook never contributed to. Nothing changes on the wire. A host that needs the
   hook's result on its own route can call `Auth.Me` from the handler.
-- **Docs — the README parity snapshot now reflects the shipped surface.** It
-  claimed every capability as implemented, including an admin router that does
-  not exist; each row now says what is mounted, what is only a building block,
-  what is absent, and the milestone release that closes the gap.
-
-### Deprecated
-- **`HTTPMailerTransport` and `NewHTTPMailerTransport`.** They POST `MailMessage`
-  as PascalCase JSON under an `X-Mailer-Secret` header, a request of this port's
-  own that no gateway built for the reference accepts. Behaviour is unchanged for
-  the gateways built against it since 0.3.0 — `MailMessage.Text` is `omitempty`
-  there, so a caller that never sets it sends the same bytes as before. Use
-  `NewGatewayMailerTransport` for new deployments; removal is scheduled for
-  v1.0.0.
-
-### Fixed
-- **Security — `Config.BuildTokenClaims` can no longer override the session
-  claims.** The hook's result was merged over the whole payload, so a custom
-  claim named `sid`, `tid`, `jti`, `typ`, `iss`, `iat` or `exp` replaced the
-  session binding, tenant scope, token id, type, issuer or lifetime of every
-  token minted — and a hook returning `typ: "access"` turned the 2FA step-up
-  `tempToken` into a full session credential, reopening the five-minute bypass
-  the typed temp token exists to close. Those seven claims are now written
-  after the merge, on access, refresh and temp tokens alike. The hook still
-  overrides the six base claims (`sub`, `email`, `role`, `loginProvider`,
-  `isEmailVerified`, `isTotpEnabled`), which is the reference's own semantics:
-  it spreads `buildTokenPayload(user)` over exactly those, assigns `sid`
-  afterwards and strips `iat`/`exp` before signing (`auth.router.ts:378-384`,
-  `:433`, `token.service.ts:19`).
 
 ## [0.4.0] - 2026-09-11
 
