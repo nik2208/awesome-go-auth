@@ -50,16 +50,20 @@ import (
 // it has to transmit and no other: no password hash, no TOTP secret, no User.
 // A sender that needs more about the recipient has UserID and TenantID to read
 // it back with.
+//
+// The JSON tags — on this struct and on the four others a sender is handed — are
+// the shape DeliveryWebhook posts (delivery_webhook.go). Nothing else in this
+// package serialises a delivery.
 type MagicLinkDelivery struct {
-	UserID   string
-	TenantID string
-	Email    string
+	UserID   string `json:"userId"`
+	TenantID string `json:"tenantId"`
+	Email    string `json:"email"`
 	// Token is the plaintext token the matching verify route accepts.
-	Token string
+	Token string `json:"token"`
 	// ExpiresAt is the stored expiry, Config.MagicLinkTTL from now. Verification
 	// additionally allows Config.ClockSkew past it, so a message that quotes this
 	// value understates the window slightly rather than overstating it.
-	ExpiresAt time.Time
+	ExpiresAt time.Time `json:"expiresAt"`
 	// LinkBase is the base the link is built under for this request —
 	// "https://app.example.com/auth" — resolved by the adapter from the request's
 	// Origin or Referer against Config.SiteURLs (Auth.ResolveSiteURL, then
@@ -67,12 +71,12 @@ type MagicLinkDelivery struct {
 	// (auth.router.ts:1104/1114 → magic-link.strategy.ts:25). It wins over
 	// MagicLinkMailer.BaseURL when set; empty when no site URL is configured or
 	// the service was called directly, in which case that static base applies.
-	LinkBase string
+	LinkBase string `json:"linkBase,omitempty"`
 	// Lang is the request's emailLang body field, passed through untouched
 	// (auth.router.ts:1080, 1104/1114). "it" and "en" select the built-in
 	// template set over MagicLinkMailer.Locale; anything else, the empty string
 	// included, defers to it (resolveLang, mailer.service.ts:255-259).
-	Lang string
+	Lang string `json:"lang,omitempty"`
 }
 
 // resolveLang is the reference's MailerService.resolveLang
@@ -101,14 +105,14 @@ func linkBaseOr(perRequest, static string) string {
 // SMSCodeDelivery is what an SMSCodeSender is handed. See MagicLinkDelivery for
 // why it carries so little.
 type SMSCodeDelivery struct {
-	UserID   string
-	TenantID string
+	UserID   string `json:"userId"`
+	TenantID string `json:"tenantId"`
 	// Phone is the recipient's stored number. The send route refuses a user
 	// without one before it gets this far (PHONE_NOT_SET), so it is never empty.
-	Phone string
+	Phone string `json:"phone"`
 	// Code is the plaintext one-time code; the store holds only its hash.
-	Code      string
-	ExpiresAt time.Time
+	Code      string    `json:"code"`
+	ExpiresAt time.Time `json:"expiresAt"`
 }
 
 // MagicLinkSender delivers a magic link. An error fails the route with the

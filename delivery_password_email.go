@@ -62,40 +62,40 @@ var ErrDeliveryFailed = errors.New("auth: delivery failed after the credential w
 // anything else back with. No User, no password hash: a sender is host code that
 // may log what it receives.
 type PasswordResetDelivery struct {
-	UserID   string
-	TenantID string
+	UserID   string `json:"userId"`
+	TenantID string `json:"tenantId"`
 	// Email is the stored address of the account the reset was requested for,
 	// not the address as the request spelled it. An unknown address never
 	// reaches a sender at all: the route is silent about who is registered.
-	Email string
+	Email string `json:"email"`
 	// Token is the plaintext token POST <prefix>/reset-password accepts.
-	Token string
+	Token string `json:"token"`
 	// ExpiresAt is the stored expiry, Config.ResetTokenTTL from now (1 hour, as
 	// in the reference). Verification allows Config.ClockSkew past it, so a
 	// message quoting this value understates the window rather than overstating
 	// it.
-	ExpiresAt time.Time
+	ExpiresAt time.Time `json:"expiresAt"`
 	// LinkBase and Lang are what MagicLinkDelivery's are: the base the adapter
 	// resolved for this request (auth.router.ts:785-786) and the request's
 	// emailLang (:779, :788). LinkBase wins over PasswordResetMailer.BaseURL when
 	// set; a Lang of "it" or "en" wins over its Locale.
-	LinkBase string
-	Lang     string
+	LinkBase string `json:"linkBase,omitempty"`
+	Lang     string `json:"lang,omitempty"`
 }
 
 // EmailVerificationDelivery is what an EmailVerificationSender is handed. The
 // route behind it is authenticated, so Email is the caller's own stored address.
 type EmailVerificationDelivery struct {
-	UserID   string
-	TenantID string
-	Email    string
+	UserID   string `json:"userId"`
+	TenantID string `json:"tenantId"`
+	Email    string `json:"email"`
 	// Token is the plaintext token GET <prefix>/verify-email accepts.
-	Token     string
-	ExpiresAt time.Time
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
 	// LinkBase and Lang are what PasswordResetDelivery's are
 	// (auth.router.ts:941, 954-957).
-	LinkBase string
-	Lang     string
+	LinkBase string `json:"linkBase,omitempty"`
+	Lang     string `json:"lang,omitempty"`
 }
 
 // EmailChangeDelivery is what an EmailChangeSender is handed.
@@ -114,17 +114,17 @@ type EmailVerificationDelivery struct {
 // confirm-the-new-address mail, not the notice — so the gap is recorded here
 // rather than filled by inventing one. It belongs with a template addition.
 type EmailChangeDelivery struct {
-	UserID   string
-	TenantID string
+	UserID   string `json:"userId"`
+	TenantID string `json:"tenantId"`
 	// NewEmail is the pending address the message goes to.
-	NewEmail string
+	NewEmail string `json:"newEmail"`
 	// Token is the plaintext token POST <prefix>/change-email/confirm accepts.
-	Token     string
-	ExpiresAt time.Time
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
 	// LinkBase and Lang are what PasswordResetDelivery's are
 	// (auth.router.ts:1025-1028).
-	LinkBase string
-	Lang     string
+	LinkBase string `json:"linkBase,omitempty"`
+	Lang     string `json:"lang,omitempty"`
 }
 
 // PasswordResetSender delivers a password-reset token.
