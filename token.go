@@ -31,6 +31,27 @@ type joseHeader struct {
 	Typ string `json:"typ"`
 }
 
+// reservedClaimNames are the session claims issueToken writes after the
+// Config.BuildTokenClaims merge, so that nothing a hook returns survives under
+// these names. The list exists so that a constructor which knows its claim
+// names in advance — UserFieldClaims — can refuse one of them at startup
+// instead of letting the mapping vanish silently on every mint; the seven
+// assignments in issueToken are the reservation itself, and
+// TestReservedClaimNames_MatchIssueToken pins that the two agree.
+var reservedClaimNames = []string{"sid", "tid", "jti", "typ", "iss", "iat", "exp"}
+
+// isReservedClaim reports whether name is one of reservedClaimNames. The
+// match is exact: claim names are case-sensitive, and "Exp" is a claim of the
+// hook's own that issueToken leaves alone.
+func isReservedClaim(name string) bool {
+	for _, reserved := range reservedClaimNames {
+		if name == reserved {
+			return true
+		}
+	}
+	return false
+}
+
 // issueToken mints one token for user — an access token, a refresh token or the
 // 2FA step-up token, which differ only in typ, sid and lifetime.
 //
@@ -87,7 +108,7 @@ func (s *Service) issueToken(ctx context.Context, user User, sessionID, tokenTyp
 	// the temp-token-is-typed-not-an-access-token deviation). The reference
 	// gets the same guarantee for its own session claims by assigning sid after
 	// the merge (auth.router.ts:433) and stripping iat/exp before signing
-	// (token.service.ts:19).
+	// (token.service.ts:19). These seven names are reservedClaimNames.
 	payloadClaims["sid"] = sessionID
 	payloadClaims["tid"] = user.TenantID
 	payloadClaims["jti"] = jti

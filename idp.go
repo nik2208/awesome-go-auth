@@ -509,7 +509,10 @@ func (idp *IDP) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := strings.TrimPrefix(authHeader, "Bearer ")
-	user, err := idp.authSvc.Me(r.Context(), token)
+	// Authenticate, not Me: the body below is sub, email and name, none of
+	// which Config.BuildTokenClaims contributes, so running the hook here would
+	// cost a relying party a claims round trip per userinfo call for nothing.
+	user, err := idp.authSvc.Authenticate(r.Context(), token)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

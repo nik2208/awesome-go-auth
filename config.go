@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -75,14 +74,20 @@ type Config struct {
 	// sets it.
 	TwoFactorAppName string
 	// BuildTokenClaims adds claims to every token minted — access, refresh and
-	// the 2FA step-up token — and fills CustomClaims on the enriched profile.
+	// the 2FA step-up token — and fills CustomClaims on the profile Me returns.
 	// Its result is spread over the six base claims (sub, email, role,
 	// loginProvider, isEmailVerified, isTotpEnabled) and may override them, as
 	// the reference's buildTokenPayload may (auth.router.ts:378-384). The
 	// session claims sid, tid, jti, typ, iss, iat and exp are reserved: they
 	// are written after the merge, so a hook value under one of those names is
 	// discarded rather than minted (see issueToken for why).
-	BuildTokenClaims func(ctx context.Context, user User) (map[string]any, error)
+	//
+	// It runs at mint time and on Me, and nowhere else: Authenticate, which the
+	// adapters' Middleware calls on every protected request, never runs it. A
+	// hook that cannot answer fails the mint (the route answers 500) and is
+	// merely logged on Me. StaticClaims, UserFieldClaims, ChainClaims and
+	// ClaimsWebhook build one from configuration rather than code.
+	BuildTokenClaims TokenClaimsBuilder
 	// SendMagicLink and SendSMSCode are the delivery seam. Both are optional to
 	// construct a service with and required to use the route that needs them:
 	// leaving one nil is what makes POST <prefix>/magic-link/send answer 500

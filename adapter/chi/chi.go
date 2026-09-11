@@ -29,7 +29,9 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/login", h.Login)
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/refresh", h.Refresh)
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/logout", h.Logout)
-	r.With(csrf, h.Middleware()).MethodFunc(http.MethodGet, prefix+"/me", h.Me)
+	// /me authenticates itself (nethttp's Me) rather than sitting behind the
+	// auth middleware, so the claims hook runs once and the token is verified once.
+	r.With(csrf).MethodFunc(http.MethodGet, prefix+"/me", h.Me)
 	r.With(csrf, h.Middleware()).MethodFunc(http.MethodGet, prefix+"/sessions", h.Sessions)
 	r.With(csrf, h.Middleware()).MethodFunc(http.MethodDelete, prefix+"/sessions/{handle}", h.RevokeSession)
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/sessions/cleanup", h.CleanupSessions)

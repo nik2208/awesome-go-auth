@@ -60,7 +60,7 @@ func main() {
 - User metadata store and service helpers.
 - Multi-tenant in-memory RBAC (`MemoryRolesPermissionsStore`) with roles and permissions.
 - In-memory tenant store (`MemoryTenantStore`) with user↔tenant membership.
-- Custom token claims via `Config.BuildTokenClaims`, also reflected in the enriched profile. The hook may override the reference's six base claims (`sub`, `email`, `role`, `loginProvider`, `isEmailVerified`, `isTotpEnabled`); the session claims `sid`, `tid`, `jti`, `typ`, `iss`, `iat` and `exp` are reserved.
+- Custom token claims via `Config.BuildTokenClaims`, written by hand or built from configuration with `StaticClaims`, `UserFieldClaims`, `ChainClaims` and the synchronous `ClaimsWebhook`; reflected under `customClaims` on `GET /me`. The hook may override the reference's six base claims (`sub`, `email`, `role`, `loginProvider`, `isEmailVerified`, `isTotpEnabled`); the session claims `sid`, `tid`, `jti`, `typ`, `iss`, `iat` and `exp` are reserved. It runs at mint time and on `/me`, never in the adapters' middleware ([Custom Claims](README_DETAILED.md#custom-claims)).
 - API key service and HTTP middleware (`APIKeyService`, `APIKeyMiddleware`).
 - In-process event bus (`EventBus`) for event-driven integrations.
 - Extended storage interfaces and thread-safe in-memory implementations for all the above flows.
@@ -385,7 +385,7 @@ release that closes the gap.
 | Account management | ✅ Implemented | Register, `UpdateProfile`, `DeleteAccount`, password and email lifecycle. | — |
 | OAuth login + account linking | ✅ Implemented | Signed state, PKCE, single-use nonce; Google and GitHub presets, generic providers by hand. No provisioning policy or `profileMap` yet. | v0.6.0 |
 | Dynamic email templates + UI i18n fallback | ✅ Implemented | The reference's six template ids with its en/it built-ins, `TemplateStore` overrides rendered under its `{{T.key}}`/`{{key}}` rule, per-request site-URL links and the old-address notice on `/change-email/confirm`. The `welcome` template renders but `POST /register` does not mail it yet (the reference does, `auth.router.ts:719-724`); UI translations are stored and are read by `GET /ui/config` once the UI router lands (v0.8.0). | — |
-| Custom token claims | ⚠️ Partial | `Config.BuildTokenClaims` hook only; no static claim map, no claims webhook. | v0.5.0 |
+| Custom token claims | ✅ Implemented | `Config.BuildTokenClaims` hook, plus `StaticClaims`/`UserFieldClaims`/`ChainClaims` and the synchronous `ClaimsWebhook` (this port's extension); the hook runs at mint time and on `/me`, never in the middleware. | — |
 | Identity Provider (IdP) mode (RS256 + JWKS + resource-server validation) | ⚠️ Partial | Discovery, authorize, token and userinfo endpoints exist; the signing key, `kid` and published keys are injectable (`IDPConfig.Signer`, `KeyID`, `PublicKeys`, with `ParseRSAPrivateKeyPEM` for the reference's PEM form), authorization codes go through `AuthCodeStore`, and `IssueIdPTokenPair` mints the reference's RS256 pair. Still pending: JWKS is served at `<base>/jwks` rather than `/.well-known/jwks.json`, and there is no RS256 verifier for resource servers. | v0.7.0 |
 | RBAC | ⚠️ Service-level | `RolesPermissionsStore` and service helpers; no HTTP surface (the admin router is absent). | v0.9.0 |
 | Multi-tenancy | ⚠️ Service-level | `TenantStore` and membership helpers; no HTTP surface. | v0.9.0 |

@@ -57,6 +57,11 @@ func MountWithConfig(group gin.IRoutes, a *auth.Auth, cfg auth.HTTPConfig) {
 }
 
 // Middleware validates access tokens and injects the user into the context.
+//
+// It authenticates through Auth.Authenticate, not Auth.Me: the context user
+// carries the stores' enrichment but not CustomClaims, because
+// Config.BuildTokenClaims is a mint-time hook that must not run on every
+// protected request. GET /me is the one route that runs it; see me.
 func (ad *Adapter) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := auth.AccessTokenFromRequest(c.Request)
@@ -65,7 +70,7 @@ func (ad *Adapter) Middleware() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		user, err := ad.auth.Me(c.Request.Context(), token)
+		user, err := ad.auth.Authenticate(c.Request.Context(), token)
 		if err != nil {
 			auth.WriteHTTPError(c.Writer, auth.AccessHTTPError(err))
 			c.Abort()
@@ -83,7 +88,9 @@ func (ad *Adapter) Mount(group gin.IRoutes) {
 	group.POST(prefix+"/login", ad.guard(ad.login))
 	group.POST(prefix+"/refresh", ad.guard(ad.refresh))
 	group.POST(prefix+"/logout", ad.guard(ad.logout))
-	group.GET(prefix+"/me", ad.guard(ad.Middleware()), ad.me)
+	// /me authenticates itself (see me) rather than sitting behind Middleware,
+	// so the token is verified once and the claims hook runs once.
+	group.GET(prefix+"/me", ad.guard(ad.me))
 
 	// Sessions and account management (account.go).
 	group.GET(prefix+"/sessions", ad.guard(ad.Middleware()), ad.sessions)
@@ -219,10 +226,18 @@ func (ad *Adapter) logout(c *gin.Context) {
 	auth.WriteSuccess(c.Writer, http.StatusOK, nil)
 }
 
+// me authenticates through Auth.Me — Authenticate plus Config.BuildTokenClaims
+// — rather than reading the context user, because Middleware skips the hook and
+// this body is the one place its result (customClaims) is rendered.
 func (ad *Adapter) me(c *gin.Context) {
-	user, ok := UserFromContext(c)
-	if !ok {
+	token := auth.AccessTokenFromRequest(c.Request)
+	if token == "" {
 		auth.WriteHTTPError(c.Writer, auth.HTTPErrNoAccessToken)
+		return
+	}
+	user, err := ad.auth.Me(c.Request.Context(), token)
+	if err != nil {
+		auth.WriteHTTPError(c.Writer, auth.AccessHTTPError(err))
 		return
 	}
 	auth.WriteJSON(c.Writer, http.StatusOK, auth.NewPublicUser(user))

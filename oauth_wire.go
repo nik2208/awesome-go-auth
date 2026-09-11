@@ -685,14 +685,17 @@ func (a *Auth) LinkRequest(ctx context.Context, in LinkRequestInput) (LinkReques
 
 	// Identity resolution, in the reference's order: a usable access token wins,
 	// an unusable one is silently ignored, and the conflict stash is the
-	// fallback.
+	// fallback. Authenticate, not Me: only the identity is read off the user,
+	// and the reference reads it off the verified payload without running
+	// buildTokenPayload (auth.router.ts:1502-1510), so the claims hook — and a
+	// ClaimsWebhook behind it — has no business firing on this route.
 	var (
 		userID            string
 		tenantID          = wiring.TenantID
 		providerAccountID string
 	)
 	if token := strings.TrimSpace(in.AccessToken); token != "" {
-		if user, err := a.service.Me(ctx, token); err == nil {
+		if user, err := a.service.Authenticate(ctx, token); err == nil {
 			userID = user.ID
 			tenantID = user.TenantID
 		}
