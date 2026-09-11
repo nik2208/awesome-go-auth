@@ -167,7 +167,7 @@ func headerAlg(rawHeader []byte) (string, bool) {
 }
 
 // buildHS256JWT creates a signed HS256 JWT using only standard library
-// packages, mirroring buildRS256JWT in idp.go.
+// packages, mirroring BuildRS256JWT in jwks.go.
 //
 // The JWS signing input is exactly the ASCII string
 // base64url(header) + "." + base64url(claims), both segments unpadded, as
