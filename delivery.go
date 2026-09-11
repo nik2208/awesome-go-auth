@@ -83,7 +83,7 @@ type MagicLinkDelivery struct {
 // (mailer.service.ts:255-259): "it" and "en" are honoured as given, anything
 // else — including the empty string a request without emailLang produces — is
 // the configured default. fallback stands in for config.defaultLang; an unknown
-// fallback then renders as English in MailTemplater.Render, which is the
+// fallback then renders as English in MailTemplater.RenderMail, which is the
 // reference's `?? 'en'`.
 func resolveLang(lang, fallback string) string {
 	switch lang {
@@ -166,10 +166,12 @@ func SMSCodeMessage(code string) string {
 	return "Your verification code is: " + code
 }
 
-// MagicLinkMailer is the ready-made MagicLinkSender: it renders the built-in
-// magic_link template and hands the result to a MailerTransport. It is the
-// port's equivalent of the reference's config.email.mailer path, where a
-// deployment configures a transport instead of writing a callback.
+// MagicLinkMailer is the ready-made MagicLinkSender: it renders the magic-link
+// template (TemplateMagicLink — the built-in, or a TemplateStore's override)
+// and hands the result to a MailerTransport, text alternative included. It is
+// the port's equivalent of the reference's config.email.mailer path, where a
+// deployment configures a transport instead of writing a callback
+// (mailer.service.ts:190-193).
 //
 // Use it as a sender through its Send method:
 //
@@ -198,12 +200,15 @@ type MagicLinkMailer struct {
 	// and any other Lang defers to this (resolveLang, mailer.service.ts:255-259,
 	// where Locale plays config.defaultLang).
 	Locale string
-	// Templates renders subject and body. NewMagicLinkMailer fills this in.
+	// Templates renders subject and bodies. NewMagicLinkMailer fills this in;
+	// set Templates.Store to render from a TemplateStore outside a service call
+	// (inside one, Config.Templates is found on its own).
 	Templates *MailTemplater
 }
 
 // NewMagicLinkMailer builds a MagicLinkMailer with the built-in templates.
-// appName is the name those templates greet the recipient with.
+// appName is what a template mentioning {{.appName}} shows; the built-ins
+// mention none.
 func NewMagicLinkMailer(transport MailerTransport, appName, baseURL string) *MagicLinkMailer {
 	return &MagicLinkMailer{
 		Transport: transport,
@@ -222,21 +227,21 @@ func (m *MagicLinkMailer) Send(ctx context.Context, delivery MagicLinkDelivery) 
 	if templates == nil {
 		templates = NewMailTemplater("")
 	}
-	// The address stands in for the recipient's name: the delivery carries no
-	// name, and the reference's own magic-link template greets nobody at all.
-	subject, body, err := templates.Render(resolveLang(delivery.Lang, m.Locale), "magic_link", MailTemplateData{
-		UserName: delivery.Email,
-		Token:    delivery.Token,
-		URL:      MagicLinkURL(linkBaseOr(delivery.LinkBase, m.BaseURL), delivery.Token),
+	// link and token are the data the reference's sendMagicLink renders with
+	// (mailer.service.ts:191); a stored template sees exactly those keys.
+	rendered, err := templates.RenderMail(ctx, resolveLang(delivery.Lang, m.Locale), TemplateMagicLink, MailTemplateData{
+		Token: delivery.Token,
+		URL:   MagicLinkURL(linkBaseOr(delivery.LinkBase, m.BaseURL), delivery.Token),
 	})
 	if err != nil {
 		return err
 	}
 	return m.Transport.Send(ctx, MailMessage{
 		To:      delivery.Email,
-		Subject: subject,
-		Body:    body,
+		Subject: rendered.Subject,
+		Body:    rendered.HTML,
 		IsHTML:  true,
+		Text:    rendered.Text,
 	})
 }
 

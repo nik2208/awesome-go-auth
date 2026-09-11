@@ -197,6 +197,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exchanges then return that error before the token endpoint is contacted
   (500 on the callback — a configuration error, not a client one) while the
   other providers keep working. No route changes.
+- **Template store seam: `TemplateStore`, `MemoryTemplateStore`,
+  `WithTemplateStore(TemplateStore) Option` and `Config.Templates`** — the
+  reference's `ITemplateStore` (`template-store.interface.ts:13-43`) and its
+  `MemoryTemplateStore` (`memory-template.store.ts`), `config.templateStore`
+  (`auth-config.model.ts:400`). `MailTemplate{ID, BaseHTML, BaseText,
+  Translations}` and `UITranslation{Page, Translations}` carry the reference's
+  JSON keys (`id, baseHtml, baseText, translations`; `page, translations`).
+  `UpdateMailTemplate(ctx, id, MailTemplatePatch)` upserts from `{id, "", "", {}}`
+  and spreads the patch on top — a nil field keeps the stored one, a supplied
+  `Translations` replaces the whole map (`memory-template.store.ts:16-22`);
+  `UpdateUITranslations` sets a page wholesale (`:33-35`); both return what is
+  stored. Lists come back in insertion order. The UI half is stored now and
+  read by the UI router when it lands. No route was added.
+- **The reference's six template ids and their built-ins.**
+  `TemplatePasswordReset` (`password-reset`), `TemplateMagicLink`,
+  `TemplateWelcome`, `TemplateVerifyEmail`, `TemplateEmailChanged` and
+  `TemplateInvitation` (`mailer.service.ts:186-211`), each with the reference's
+  en and it subject, HTML and text transcribed verbatim (`:19-127`, invitation
+  `:211-225`). `(*MailTemplater).Register(locale, id, subject, html, text)`
+  replaces the unexported `addTemplate`; `(*MailTemplater).RenderMail(ctx,
+  locale, id, data) (MailRendered{Subject, HTML, Text}, error)` is the
+  reference's `render` (`:149-181`): a stored template is used only when both
+  `baseHtml` and `baseText` are non-empty (`:158`), its translations are those
+  for the language, else `en`, else none (`:159`), `{{T.key}}` becomes the
+  translation or `[key]` (`:163`), then `{{key}}` becomes the data value or
+  `[key]` (`:165-168`), and the subject is `translations.subject` or the
+  built-in one (`:172`). Values are substituted raw, HTML included, as the
+  reference substitutes them (`:167`). The data keys are the reference's per
+  id — `link`, `token`; `newEmail`; `loginUrl`, `tempPassword` — and this
+  port's own (`appName`, `name`, `code`, `oldEmail`) only when set, so a stored
+  template sees the keys it sees in the reference; see `MailTemplateData`,
+  which gains `NewEmail` and `OldEmail`. `MailTemplater.Store` names a store; a
+  templater whose `Store` is nil finds `Config.Templates` inside a service call.
+  `Render(locale, id, data) (subject, body, err)` keeps its signature and
+  returns the subject and HTML. The `welcome` id has no sender in this port:
+  the reference mails it from `POST /register` (`auth.router.ts:719-724`),
+  which this port's register route does not do yet — it renders through
+  `RenderMail` only.
+- **`Config.SendEmailChanged EmailChangedSender`, `WithEmailChangedSender`,
+  `EmailChangedDelivery{UserID, TenantID, OldEmail, NewEmail, Lang}` and
+  `NewEmailChangedMailer(transport, appName)`** — the reference's
+  `config.email.sendEmailChanged` (`auth-config.model.ts:252-257`): the notice
+  `POST /change-email/confirm` mails to the OLD address once the change is
+  applied (`auth.router.ts:1056-1066`). `Service.ConfirmEmailChange` fires it
+  after the address has moved and the token is cleared; a failing sender is the
+  reference's generic 500 with the change already committed — its call sits
+  inside the route's `try` (`:1068-1069`) — and a nil sender is silence. The
+  route passes no language, as the reference passes none;
+  `ConfirmEmailChangeInput.Lang` exists for a caller driving the service
+  directly. The wiretest suite records the notice on all four adapters.
+- **The ready-made mailers send the text alternative.** `MagicLinkMailer`,
+  `PasswordResetMailer`, `EmailVerificationMailer`, `EmailChangeMailer` and the
+  new `EmailChangedMailer` fill `MailMessage.Text` with the rendered text body,
+  so the gateway payload's `text` is the reference's text template rather than
+  a copy of the HTML. Under the deprecated `HTTPMailerTransport` this adds a
+  `Text` key to what these mailers send; a caller building its own
+  `MailMessage` is unchanged.
 
 ### Changed
 - **Tests — the wiretest OpenAPI check can express conditional route sets.**
@@ -241,6 +298,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Authenticator apps read both forms identically; the `secret` is unchanged and
   existing enrolments are unaffected. `algorithm`, `digits` and `period` stay
   spelled out, which otplib omits at its defaults — see `totpProvisioningURI`.
+- **The built-in mail templates are the reference's now**
+  (`mailer.service.ts:19-127`). Subjects lose the `<appName> - ` prefix and
+  read `Reset your password`, `Your magic sign-in link`, `Verify your email
+  address` and their Italian counterparts; the bodies are the reference's
+  paragraphs, greeting nobody, with the link written out in full and a text
+  alternative beside the HTML. `EmailChangeMailer` mails the verify-email
+  template under the change-email confirmation link, which is what the
+  reference's `/change-email/request` sends (`auth.router.ts:1027-1032`). A
+  deployment that wants its previous wording registers it with
+  `(*MailTemplater).Register` or stores an override. The wire is untouched:
+  only mail bodies differ.
+- **`MailTemplater` carries a mutex now**, which is what makes `Register`,
+  `RenderMail` and `Render` safe to call concurrently. Use it through the
+  pointer `NewMailTemplater` returns, never by value: a copy trips `go vet`'s
+  copylocks check.
 
 ### Deprecated
 - **`HTTPMailerTransport` and `NewHTTPMailerTransport`.** They POST `MailMessage`
@@ -250,6 +322,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there, so a caller that never sets it sends the same bytes as before. Use
   `NewGatewayMailerTransport` for new deployments; removal is scheduled for
   v1.0.0.
+- **The template ids `reset_password`, `magic_link`, `verify_email` and
+  `email_change`.** They are aliases — the first three of
+  `TemplatePasswordReset`, `TemplateMagicLink` and `TemplateVerifyEmail`;
+  `email_change` of `TemplateVerifyEmail` too, since the reference has no
+  separate template for that mail. `Render`, `RenderMail` and `Register` accept
+  them unchanged, and a store is asked for the id they alias; removal is
+  scheduled for v1.0.0.
 
 ### Fixed
 - **Security — `Config.BuildTokenClaims` can no longer override the session

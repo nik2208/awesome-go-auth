@@ -134,6 +134,8 @@ type Config struct {
     SendPasswordReset     PasswordResetSender           // optional; POST /auth/forgot-password
     SendEmailVerification EmailVerificationSender       // optional; POST /auth/send-verification-email
     SendEmailChange       EmailChangeSender             // optional; POST /auth/change-email/request
+    SendEmailChanged      EmailChangedSender            // optional; the notice POST /auth/change-email/confirm mails to the old address
+    Templates             TemplateStore                 // optional; run-time overrides of the built-in mail templates — see Mailer
     SiteURLs              []string                      // first = canonical link base; all = origin allowlist — see Delivery
     Logger                func(format string, args ...any)
 }
@@ -344,6 +346,8 @@ Pass to `auth.New(...)`:
 | `WithPasswordResetSender(PasswordResetSender)` | Deliver password-reset tokens — see [Delivery](#delivery) |
 | `WithEmailVerificationSender(EmailVerificationSender)` | Deliver email-verification tokens — see [Delivery](#delivery) |
 | `WithEmailChangeSender(EmailChangeSender)` | Deliver email-change tokens to the new address — see [Delivery](#delivery) |
+| `WithEmailChangedSender(EmailChangedSender)` | Deliver the email-changed notice to the old address — see [The email-changed notice](#the-email-changed-notice) |
+| `WithTemplateStore(TemplateStore)` | Run-time overrides of the built-in mail templates — see [`TemplateStore` interface](#templatestore-interface) |
 | `WithSiteURLs(urls ...string)` | Front-end base URLs: the first is the canonical link base, all are the origin allowlist — see [Per-request link base and language](#per-request-link-base-and-language) |
 | `WithLogger(func)` | Logging callback |
 
@@ -698,15 +702,170 @@ scheduled for removal in v1.0.0; use `NewGatewayMailerTransport`.
 
 ### `NewMailTemplater(appName string) *MailTemplater`
 
-Returns a templater with built-in **English** and **Italian** templates for:
-- `reset_password`
-- `magic_link`
-- `verify_email`
-- `email_change`
+Returns a templater holding the reference's six built-in templates, in **English**
+and **Italian**, transcribed from `awesome-node-auth`
+`src/services/mailer.service.ts:19-127` (invitation: `:211-225`) — subject, HTML
+and text for each. `appName` is what a template mentioning `{{.appName}}` shows;
+the built-ins mention none.
 
-### `(*MailTemplater).Render(locale, name string, data MailTemplateData) (subject, body string, err error)`
+| Constant | Id | Data the ready-made mailer supplies | Reference |
+|----------|----|-------------------------------------|-----------|
+| `TemplatePasswordReset` | `password-reset` | `link`, `token` | `mailer.service.ts:186` |
+| `TemplateMagicLink` | `magic-link` | `link`, `token` | `:191` |
+| `TemplateWelcome` | `welcome` | `loginUrl`, `tempPassword` — sent by the reference's `POST /register` (`auth.router.ts:719-724`: `sendWelcome(user.email, {loginUrl: <siteUrl>/login})`, or the deployment's own `config.email.sendWelcome(user.email, data)`); **this port's `POST /register` mails nothing yet**, so the id is reachable only through `RenderMail` | `:196`, `:61-89` |
+| `TemplateVerifyEmail` | `verify-email` | `link`, `token` | `:201` |
+| `TemplateEmailChanged` | `email-changed` | `newEmail` | `:206` |
+| `TemplateInvitation` | `invitation` | `link` — no ready-made mailer, and no route in the reference calls its `sendInvitation` either | `:211` |
 
-Falls back to `en/` templates when locale template is not found.
+The 0.3.x ids `reset_password`, `magic_link`, `verify_email` and `email_change` are
+**deprecated aliases**: the first three of the matching constant, `email_change` of
+`TemplateVerifyEmail`, because the reference mails its verification template on
+`/change-email/request` (`auth.router.ts:1027-1032`) and has no separate one. They
+work everywhere an id is accepted and go away in v1.0.0.
+
+### `(*MailTemplater).Register(locale, id, subject, html, text string)`
+
+Adds or replaces the template rendered for `id` in `locale`. The three parts are Go
+templates over the keys of `MailTemplateData` — `{{.link}}`, `{{.appName}}` … —
+`html/template` for the HTML body (contextual escaping applies), `text/template` for
+the subject and the text. This is how a deployment replaces a built-in, adds a
+locale, or adds an id of its own without a store; a part that does not parse is
+reported by the next render of that `(locale, id)`. An alias id registers under the
+id it aliases.
+
+### `(*MailTemplater).RenderMail(ctx, locale, id string, data MailTemplateData) (MailRendered, error)`
+
+The reference's `MailerService.render` (`mailer.service.ts:149-181`), returning
+`MailRendered{Subject, HTML, Text}`:
+
+1. A stored template is looked up — through `MailTemplater.Store`, or the store the
+   service put on `ctx` (`Config.Templates`) — and used only when both its
+   `BaseHTML` and `BaseText` are non-empty (`:158`). A store error is returned.
+2. Its translations are those for `locale`, else for `en`, else none (`:159`).
+   Every `{{T.key}}` becomes `translations[key]`, or `[key]` when that is missing or
+   empty (`:163`); then every remaining `{{key}}` becomes the data value for `key`,
+   or `[key]` when there is none (`:165-168`) — the reference's keys per id
+   (`link`, `token`; `newEmail`; `loginUrl`, `tempPassword`), plus this port's own
+   only when a caller sets them; see `MailTemplateData`. The subject is
+   `translations["subject"]`, else the built-in subject for the language, and is
+   interpolated the same way (`:172-177`). Values are substituted raw, the HTML
+   body included — no escaping, as the reference does none (`:167`). `BaseHTML` is
+   your markup, but `newEmail` is what the user typed (lowercased and trimmed,
+   nothing more) and `Extra` is whatever the caller passed: a stored template that
+   shows them mails them verbatim, exactly as the reference's does; the built-ins,
+   rendered by `html/template`, escape them.
+3. Otherwise the registered template for `locale` renders — the built-in unless
+   `Register` replaced it — falling back to `en`.
+
+`locale` is used as given; the ready-made mailers pass what `resolveLang` picked
+(`it`, `en`, or their `Locale`). An id with neither a usable stored template nor a
+registered one is an error.
+
+### `(*MailTemplater).Render(locale, id string, data MailTemplateData) (subject, body string, err error)`
+
+`RenderMail` without a context and without the text body: `body` is the HTML. It
+sees `MailTemplater.Store` but not a store carried by a service call.
+
+### `MailTemplateData`
+
+```go
+type MailTemplateData struct {
+    AppName  string         // appName, when non-empty — set by the templater (this port's key)
+    UserName string         // name (this port's key)
+    Token    string         // token
+    URL      string         // link — or loginUrl when the id is welcome, the name its template reads
+    Code     string         // code (this port's key)
+    NewEmail string         // newEmail
+    OldEmail string         // oldEmail (this port's key)
+    Extra    map[string]any // any other key, formatted with fmt.Sprint — tempPassword, for instance
+}
+```
+
+A registered template reads them as `{{.link}}`, `{{.token}}` …; a stored one as
+`{{link}}`, `{{token}}` …. An empty field is left out rather than set to `""`, so a
+stored template naming a key the mailer did not supply shows `[key]`, as it would in
+the reference. The keys marked *this port's* — `appName`, `name`, `code`, `oldEmail`
+— and `Extra` are never passed by the reference and are absent here too until set,
+so a stored template written for it sees exactly the keys it sees there:
+`{link, token}` for `password-reset`, `magic-link` and `verify-email`, `{link}` for
+`invitation`, `{newEmail}` for `email-changed`, `{loginUrl, tempPassword}` for
+`welcome`. A `{{loginUrl}}` in a password-reset template, or an `{{appName}}` when
+the templater has no app name, renders `[loginUrl]` / `[appName]` here as there.
+
+### `TemplateStore` interface
+
+The reference's `ITemplateStore` (`src/interfaces/template-store.interface.ts:13-43`;
+`config.templateStore`, `auth-config.model.ts:400`): run-time overrides of the
+built-in mail templates, plus the UI translations the reference's UI router reads.
+
+```go
+type TemplateStore interface {
+    GetMailTemplate(ctx context.Context, id string) (MailTemplate, bool, error)       // false: not stored — the reference's null
+    ListMailTemplates(ctx context.Context) ([]MailTemplate, error)
+    UpdateMailTemplate(ctx context.Context, id string, patch MailTemplatePatch) (MailTemplate, error) // upsert
+    GetUITranslations(ctx context.Context, page string) (UITranslation, bool, error)
+    ListUITranslations(ctx context.Context) ([]UITranslation, error)
+    UpdateUITranslations(ctx context.Context, page string, translations map[string]map[string]string) (UITranslation, error) // set
+}
+
+type MailTemplate struct {
+    ID           string                       `json:"id"`
+    BaseHTML     string                       `json:"baseHtml"`
+    BaseText     string                       `json:"baseText"`
+    Translations map[string]map[string]string `json:"translations"` // lang -> key -> value; "subject" is the subject
+}
+
+type UITranslation struct {
+    Page         string                       `json:"page"`
+    Translations map[string]map[string]string `json:"translations"`
+}
+
+type MailTemplatePatch struct {
+    BaseHTML     *string                      // nil keeps the stored body; a pointer to "" clears it
+    BaseText     *string
+    Translations map[string]map[string]string // nil keeps every language; non-nil replaces the whole map
+}
+```
+
+`UpdateMailTemplate` is the reference's upsert: a missing id starts as
+`{id, "", "", {}}` and the patch is spread on top (`memory-template.store.ts:16-22`)
+— which is why a supplied `Translations` replaces the map rather than merging into
+it; read the template and send the map back whole to change one language.
+`UpdateUITranslations` sets a page wholesale (`:33-35`). Both return what is stored
+afterwards. Placeholders in `BaseHTML` are substituted without HTML escaping — see
+step 2 of `RenderMail` for what that means for `newEmail` and `Extra`.
+
+`MemoryTemplateStore` (`NewMemoryTemplateStore()`) is the in-memory implementation:
+safe for concurrent use, copies in and out, lists in insertion order.
+
+### `WithTemplateStore(store TemplateStore) Option` / `Config.Templates`
+
+Wires the store once. Every sender the service calls receives a context carrying
+it, and a `MailTemplater` whose `Store` is nil — the ready-made mailers' — reads it
+from there; a `MailTemplater.Store` set by hand wins, and is the way to render from
+a store outside a service call.
+
+```go
+store := auth.NewMemoryTemplateStore()
+html := `<h1>{{T.title}}</h1><p><a href="{{link}}">{{T.cta}}</a></p>`
+text := `{{T.title}}: {{link}}`
+_, _ = store.UpdateMailTemplate(ctx, auth.TemplatePasswordReset, auth.MailTemplatePatch{
+    BaseHTML: &html,
+    BaseText: &text,
+    Translations: map[string]map[string]string{
+        "en": {"subject": "Reset your {{appName}} password", "title": "Password reset", "cta": "Choose a new password"},
+        "it": {"subject": "Reimposta la password", "title": "Reimposta la password", "cta": "Scegli una nuova password"},
+    },
+})
+a, err := auth.New(
+    auth.WithTemplateStore(store),
+    auth.WithPasswordResetSender(auth.NewPasswordResetMailer(transport, "Example App", "https://app.example.com/auth").Send),
+)
+```
+
+With that, `POST /auth/forgot-password` mails the stored template; clear either body
+and the built-in is back. The UI half of the store is written through the same
+interface and served once the UI router lands.
 
 ---
 
@@ -778,8 +937,9 @@ a, err := auth.New(
 
 | Helper | Purpose |
 |--------|---------|
-| `NewMagicLinkMailer(MailerTransport, appName, baseURL) *MagicLinkMailer` | Renders the built-in `magic_link` template and sends it; `.Locale` selects `en` (default) or `it` |
-| `NewPasswordResetMailer(…)`, `NewEmailVerificationMailer(…)`, `NewEmailChangeMailer(…)` | The same shape for `reset_password`, `verify_email` and `email_change`; use through `.Send` with `WithPasswordResetSender`, `WithEmailVerificationSender`, `WithEmailChangeSender` |
+| `NewMagicLinkMailer(MailerTransport, appName, baseURL) *MagicLinkMailer` | Renders the `magic-link` template (built-in or stored) and sends it, HTML and text; `.Locale` selects `en` (default) or `it` |
+| `NewPasswordResetMailer(…)`, `NewEmailVerificationMailer(…)`, `NewEmailChangeMailer(…)` | The same shape for `password-reset`, `verify-email` and — as the reference does on `/change-email/request` — `verify-email` again under the confirmation link; use through `.Send` with `WithPasswordResetSender`, `WithEmailVerificationSender`, `WithEmailChangeSender` |
+| `NewEmailChangedMailer(MailerTransport, appName) *EmailChangedMailer` | Renders the `email-changed` template with the new address and mails it to the old one; use through `.Send` with `WithEmailChangedSender` — see [The email-changed notice](#the-email-changed-notice) |
 | `MagicLinkURL(base, token) string` | The link shape the verify route and every family client expect: `<base>/magic-link/verify?token=<token>` |
 | `PasswordResetURL`, `EmailVerificationURL`, `EmailChangeConfirmURL(base, token) string` | Likewise `<base>/reset-password?token=…`, `<base>/verify-email?token=…`, `<base>/change-email/confirm?token=…` |
 | `SMSTransportSender(SMSTransport) SMSCodeSender` | Adapts a transport, formatting the code with `SMSCodeMessage` |
@@ -799,6 +959,35 @@ type SMSTransport interface {
 > strings reach access logs and proxies. The fix belongs at the gateway; until then,
 > `WithSMSCodeSender` takes any sender, so a deployment whose provider accepts a
 > safer shape supplies its own transport and never constructs this one.
+
+### The email-changed notice
+
+`POST /auth/change-email/confirm` applies the pending address, clears the token and
+then mails the **old** address a notice — the reference's
+`config.email.sendEmailChanged(oldEmail, newEmail)` (`auth.router.ts:1056-1066`,
+`auth-config.model.ts:252-257`). The sender is optional and carries no credential:
+
+```go
+type EmailChangedSender func(ctx context.Context, delivery EmailChangedDelivery) error
+
+type EmailChangedDelivery struct {
+    UserID   string `json:"userId"`
+    TenantID string `json:"tenantId"`
+    OldEmail string `json:"oldEmail"` // the recipient: the address the account had until now
+    NewEmail string `json:"newEmail"` // what the notice reports
+    Lang     string `json:"lang"`     // "" from the route — the reference passes no language on confirm
+}
+```
+
+Two things differ from the token senders above. There is no link, so
+`NewEmailChangedMailer(transport, appName)` takes no base URL; and a failing sender
+answers the generic `500` **with the change already applied** — the reference's call
+sits inside the route's `try` block after `updateEmail`, so a throwing mailer reaches
+`handleError` (`:1068-1069`) and nothing is rolled back. That is reproduced, not
+softened: the token is spent and the address has moved when the 500 goes out.
+Without a sender the route mails nothing and answers `200`, like the three token
+routes. `ConfirmEmailChangeInput.Lang` exists for a caller driving the service
+directly; the adapters leave it empty, as the reference's route reads only `token`.
 
 ### Mail gateway contract
 

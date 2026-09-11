@@ -469,16 +469,24 @@ func testEmailVerificationDelivery(t *testing.T, mount Mounter) {
 // -----------------------------------------------------------------------------
 
 func testEmailChangeDelivery(t *testing.T, mount Mounter) {
-	// The round trip, ending at /change-email/confirm. It also pins the recipient:
-	// this mail goes to the NEW address, because it is a verification of the new
-	// mailbox (auth.router.ts:1027-1032). The reference's notice to the *old*
-	// address belongs to /change-email/confirm and has no sender in this port.
+	// The round trip, ending at /change-email/confirm. It also pins the recipient
+	// of each mail: the request's goes to the NEW address, because it is a
+	// verification of the new mailbox (auth.router.ts:1027-1032); the confirm's
+	// is the notice to the OLD address, sent once the change is applied
+	// (:1060-1066), with no language — the reference's route passes none
+	// (:1062, :1065).
 	t.Run("delivers the token /change-email/confirm accepts, to the new address", func(t *testing.T) {
 		delivered := &Deliveries{}
-		env, store := senderEnv(t, mount, auth.WithEmailChangeSender(func(_ context.Context, d auth.EmailChangeDelivery) error {
-			delivered.EmailChanges = append(delivered.EmailChanges, d)
-			return nil
-		}))
+		env, store := senderEnv(t, mount,
+			auth.WithEmailChangeSender(func(_ context.Context, d auth.EmailChangeDelivery) error {
+				delivered.EmailChanges = append(delivered.EmailChanges, d)
+				return nil
+			}),
+			auth.WithEmailChangedSender(func(_ context.Context, d auth.EmailChangedDelivery) error {
+				delivered.EmailChanged = append(delivered.EmailChanged, d)
+				return nil
+			}),
+		)
 		user, tokens := env.Seed("changedelivery@example.com")
 
 		rec := env.Do(bearer(env.Request(http.MethodPost, "/change-email/request", map[string]string{
@@ -503,10 +511,112 @@ func testEmailChangeDelivery(t *testing.T, mount Mounter) {
 		assertTTL(t, "delivered email-change token", &got.ExpiresAt, emailChangeTokenTTL)
 		assertBodyHidesToken(t, rec, got.Token)
 
+		if len(delivered.EmailChanged) != 0 {
+			t.Fatalf("the notice went out before the change was confirmed: %+v", delivered.EmailChanged)
+		}
 		spend := env.Do(env.Request(http.MethodPost, "/change-email/confirm", map[string]string{"token": got.Token}))
 		assertSuccessBody(t, spend)
 		if stored := storedUser(t, store, user); stored.Email != "changedelivered@example.com" {
 			t.Errorf("address = %q, want changedelivered@example.com", stored.Email)
+		}
+
+		if len(delivered.EmailChanged) != 1 {
+			t.Fatalf("delivered %d notices, want 1", len(delivered.EmailChanged))
+		}
+		notice := delivered.EmailChanged[0]
+		if notice.OldEmail != "changedelivery@example.com" {
+			t.Errorf("notice mailed to %q, want the old address changedelivery@example.com", notice.OldEmail)
+		}
+		if notice.NewEmail != "changedelivered@example.com" {
+			t.Errorf("notice reports %q, want the new address changedelivered@example.com", notice.NewEmail)
+		}
+		if notice.UserID != user.ID || notice.TenantID != testTenant {
+			t.Errorf("notice = %+v, want %s/%s", notice, user.ID, testTenant)
+		}
+		if notice.Lang != "" {
+			t.Errorf("notice Lang = %q, want none: the reference passes no language on confirm", notice.Lang)
+		}
+	})
+
+	// The reference writes the new address and clears the token before it mails
+	// the notice (auth.router.ts:1058-1059 then :1061-1066), so a sender that
+	// reads the account back sees the change already in place.
+	t.Run("the notice goes out after the change is applied", func(t *testing.T) {
+		var sawEmail, sawHash string
+		store := auth.NewMemoryUserStore()
+		env := NewEnvWithoutDelivery(t, mount, auth.DefaultHTTPConfig(),
+			auth.WithUserStore(store),
+			auth.WithEmailChangedSender(func(ctx context.Context, d auth.EmailChangedDelivery) error {
+				stored, err := store.GetUserByID(ctx, d.UserID, d.TenantID)
+				if err != nil {
+					t.Errorf("read back the user from inside the sender: %v", err)
+					return nil
+				}
+				sawEmail, sawHash = stored.Email, stored.EmailChangeTokenHash
+				return nil
+			}))
+		user, _ := env.Seed("noticeorder@example.com")
+		token, err := env.Auth.Service().RequestEmailChange(context.Background(), auth.ChangeEmailRequestInput{
+			UserID: user.ID, TenantID: testTenant, NewEmail: "noticeordered@example.com",
+		})
+		if err != nil {
+			t.Fatalf("mint a token to spend: %v", err)
+		}
+		assertSuccessBody(t, env.Do(env.Request(http.MethodPost, "/change-email/confirm", map[string]string{"token": token})))
+		if sawEmail != "noticeordered@example.com" {
+			t.Errorf("address at notice time = %q, want the new one already applied", sawEmail)
+		}
+		if sawHash != "" {
+			t.Error("the token was still stored when the notice went out; the reference clears it first")
+		}
+	})
+
+	// sendEmailChanged sits inside the route's try block after the change is
+	// written (auth.router.ts:1058-1066), so a throwing mailer reaches
+	// handleError (:1068-1069): the generic 500, for a change that stays
+	// applied. Reproduced rather than softened — rolling the address back
+	// would be an invention, and so would a 200.
+	t.Run("a failing notice sender gets the generic 500 with the change already applied", func(t *testing.T) {
+		env, store := senderEnv(t, mount, auth.WithEmailChangedSender(
+			func(context.Context, auth.EmailChangedDelivery) error { return errTransportDown },
+		))
+		user, _ := env.Seed("noticefailed@example.com")
+		token, err := env.Auth.Service().RequestEmailChange(context.Background(), auth.ChangeEmailRequestInput{
+			UserID: user.ID, TenantID: testTenant, NewEmail: "noticefaileddelivery@example.com",
+		})
+		if err != nil {
+			t.Fatalf("mint a token to spend: %v", err)
+		}
+		rec := env.Do(env.Request(http.MethodPost, "/change-email/confirm", map[string]string{"token": token}))
+		AssertError(t, rec, http.StatusInternalServerError, "Internal server error", "")
+
+		stored := storedUser(t, store, user)
+		if stored.Email != "noticefaileddelivery@example.com" {
+			t.Errorf("address = %q, want the new one: the change is committed before the notice", stored.Email)
+		}
+		if stored.EmailChangeTokenHash != "" || stored.PendingEmail != "" {
+			t.Error("the spent token or the pending address survived the failed notice")
+		}
+		// The token is spent: a retry cannot re-apply or re-notify.
+		AssertError(t, env.Do(env.Request(http.MethodPost, "/change-email/confirm", map[string]string{"token": token})),
+			http.StatusBadRequest, "Invalid email-change token", "")
+	})
+
+	t.Run("no notice sender still gets 200 and applies the change", func(t *testing.T) {
+		env, store := senderEnv(t, mount)
+		user, _ := env.Seed("noticeunconfigured@example.com")
+		token, err := env.Auth.Service().RequestEmailChange(context.Background(), auth.ChangeEmailRequestInput{
+			UserID: user.ID, TenantID: testTenant, NewEmail: "noticeunconfigured2@example.com",
+		})
+		if err != nil {
+			t.Fatalf("mint a token to spend: %v", err)
+		}
+		assertSuccessBody(t, env.Do(env.Request(http.MethodPost, "/change-email/confirm", map[string]string{"token": token})))
+		if stored := storedUser(t, store, user); stored.Email != "noticeunconfigured2@example.com" {
+			t.Errorf("address = %q, want noticeunconfigured2@example.com", stored.Email)
+		}
+		if len(env.Delivered.EmailChanged) != 0 {
+			t.Errorf("an unconfigured deployment delivered something: %+v", env.Delivered.EmailChanged)
 		}
 	})
 

@@ -39,6 +39,9 @@ type Deliveries struct {
 	PasswordResets     []auth.PasswordResetDelivery
 	EmailVerifications []auth.EmailVerificationDelivery
 	EmailChanges       []auth.EmailChangeDelivery
+	// EmailChanged is the notice /change-email/confirm sends to the OLD
+	// address once the change is applied (auth.router.ts:1060-1066).
+	EmailChanged []auth.EmailChangedDelivery
 }
 
 func (d *Deliveries) senderOptions() []auth.Option {
@@ -61,6 +64,10 @@ func (d *Deliveries) senderOptions() []auth.Option {
 		}),
 		auth.WithEmailChangeSender(func(_ context.Context, delivery auth.EmailChangeDelivery) error {
 			d.EmailChanges = append(d.EmailChanges, delivery)
+			return nil
+		}),
+		auth.WithEmailChangedSender(func(_ context.Context, delivery auth.EmailChangedDelivery) error {
+			d.EmailChanged = append(d.EmailChanged, delivery)
 			return nil
 		}),
 	}

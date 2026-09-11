@@ -615,7 +615,7 @@ func openAPIPaths(prefix string) map[string]any {
 		prefix + "/change-email/confirm": map[string]any{
 			"post": map[string]any{
 				"summary":     "Confirm an email-address change",
-				"description": "No auth gate, and therefore no CSRF check: the confirmation token is the credential.",
+				"description": "No auth gate, and therefore no CSRF check: the confirmation token is the credential. Once the change is applied, the previous address is mailed a notice through the configured email-changed sender; a deployment without one mails nothing and still answers 200.",
 				"operationId": "changeEmailConfirm",
 				"tags":        []string{"Email"},
 				"requestBody": body(inline([]string{"token"}, map[string]any{"token": str})),

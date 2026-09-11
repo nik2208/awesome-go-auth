@@ -236,7 +236,7 @@ func WithSMSCodeSender(sender SMSCodeSender) Option {
 // no email block does — see delivery_password_email.go.
 //
 // Pass a callback to send the mail yourself, or PasswordResetMailer.Send to use
-// the built-in reset_password template over a MailerTransport.
+// the built-in password-reset template over a MailerTransport.
 func WithPasswordResetSender(sender PasswordResetSender) Option {
 	return func(b *authBuilder) error {
 		if sender == nil {
@@ -251,7 +251,7 @@ func WithPasswordResetSender(sender PasswordResetSender) Option {
 // <prefix>/send-verification-email. Without it the route mails nothing and still
 // answers 200.
 //
-// Pass a callback, or EmailVerificationMailer.Send for the built-in verify_email
+// Pass a callback, or EmailVerificationMailer.Send for the built-in verify-email
 // template.
 func WithEmailVerificationSender(sender EmailVerificationSender) Option {
 	return func(b *authBuilder) error {
@@ -267,14 +267,49 @@ func WithEmailVerificationSender(sender EmailVerificationSender) Option {
 // The message goes to the *new* address: it is a verification of the new mailbox.
 // Without it the route mails nothing and still answers 200.
 //
-// Pass a callback, or EmailChangeMailer.Send for the built-in email_change
-// template.
+// Pass a callback, or EmailChangeMailer.Send for the built-in verify-email
+// template, which is what the reference mails here.
 func WithEmailChangeSender(sender EmailChangeSender) Option {
 	return func(b *authBuilder) error {
 		if sender == nil {
 			return errors.New("auth: email change sender is required")
 		}
 		b.cfg.SendEmailChange = sender
+		return nil
+	}
+}
+
+// WithEmailChangedSender wires the notice POST <prefix>/change-email/confirm
+// mails to the OLD address once the change is applied — the reference's
+// config.email.sendEmailChanged (auth.router.ts:1060-1066). Without it the route
+// mails nothing and still answers 200. A failing sender answers the generic 500
+// with the change already committed, as the reference does.
+//
+// Pass a callback, or EmailChangedMailer.Send for the built-in email-changed
+// template.
+func WithEmailChangedSender(sender EmailChangedSender) Option {
+	return func(b *authBuilder) error {
+		if sender == nil {
+			return errors.New("auth: email changed sender is required")
+		}
+		b.cfg.SendEmailChanged = sender
+		return nil
+	}
+}
+
+// WithTemplateStore sets Config.Templates: the store whose mail templates
+// override the built-ins for every ready-made mailer the service calls — the
+// reference's config.templateStore (mailer.service.ts:146, 156-179). See
+// TemplateStore and MailTemplater.RenderMail for the rendering rule.
+//
+//	store := auth.NewMemoryTemplateStore()
+//	auth.WithTemplateStore(store)
+func WithTemplateStore(store TemplateStore) Option {
+	return func(b *authBuilder) error {
+		if store == nil {
+			return errors.New("auth: template store is required")
+		}
+		b.cfg.Templates = store
 		return nil
 	}
 }
