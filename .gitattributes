@@ -1,0 +1,15 @@
+# Default: let git normalise text in the repo, check out native on the host.
+* text=auto
+
+# Anything read or executed inside a Linux container must keep LF: a script
+# checked out with CRLF dies with "bad interpreter", and gofmt over a CRLF
+# checkout reports every file as unformatted, which makes the CI gate
+# impossible to reproduce on a Windows host.
+*.go text eol=lf
+*.sh text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Makefile text eol=lf
+Dockerfile* text eol=lf
