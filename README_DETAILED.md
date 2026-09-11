@@ -809,11 +809,119 @@ wires anything. The function it returns fills everything but `Provider`.
 
 ### `(*OAuthService).HandleCallback(ctx, authSvc, linkedAccounts, info, tenantID, linkToUserID) (User, AuthTokens, error)`
 
-Resolves or creates a user from OAuth user info:
-1. If `linkToUserID` non-empty: links provider to existing account
-2. If existing link found: returns existing user
-3. If email match found: auto-links and returns existing user
-4. Otherwise: creates new user
+Resolves or creates a user from OAuth user info under the default provisioning
+policy. It is `HandleCallbackWithPolicy` with `DefaultOAuthProvisioning()`.
+
+### `(*OAuthService).HandleCallbackWithPolicy(ctx, authSvc, linkedAccounts, info, tenantID, linkToUserID, policy) (User, AuthTokens, error)`
+
+The same, under an explicit `OAuthProvisioning`:
+
+1. The policy gate — `RequireVerifiedEmail`, then `AllowedEmailDomains` — runs
+   before anything is read or written, so a refused identity leaves no trace and
+   an account that was linked under a looser policy is refused too.
+2. If `linkToUserID` non-empty: links provider to existing account.
+3. If an existing `(provider, providerAccountId)` link is found: returns that
+   user. This is the only identification the reference's own store
+   documentation considers safe (`user-store.interface.ts:105-119`).
+4. If an account already holds the profile address: `OnEmailMatch` decides —
+   link it (the default), raise an account conflict, or refuse.
+5. Otherwise: creates a new user, if `AutoCreate` allows it.
+
+### `OAuthProvisioning`
+
+```go
+type OAuthProvisioning struct {
+    AutoCreate           bool
+    AllowedEmailDomains  []string
+    RequireVerifiedEmail bool
+    OnEmailMatch         string // "link" | "conflict" | "reject"
+    FieldMap             map[string]string
+}
+```
+
+The declarative replacement for the abstract `findOrCreateUser(profile, state)`
+the reference makes every integrator write
+(`generic-oauth.strategy.ts:169-172`). Set it on `OAuthWiring.Provisioning`,
+which is a **pointer**: `nil` means `DefaultOAuthProvisioning()` —
+`AutoCreate: true`, `OnEmailMatch: "link"`, no domain list, no verification
+demand — which is what the callback did before the policy existed, so a
+deployment that sets nothing is unchanged. A policy given explicitly is taken as
+written, `AutoCreate: false` included; the one field whose empty value still
+means a default is `OnEmailMatch`.
+
+- **`AutoCreate`** — false answers `403 OAUTH_USER_NOT_PROVISIONED` instead of
+  creating an account for an identity nothing here knows.
+- **`AllowedEmailDomains`** — empty allows every address. An entry is a bare
+  domain (`"example.com"`, or `"@example.com"`), matched case-insensitively
+  against the part after the last `@`, with no subdomain matching. A profile
+  with no address is refused whenever the list is non-empty. Refusal is
+  `403 OAUTH_EMAIL_DOMAIN_NOT_ALLOWED`.
+- **`RequireVerifiedEmail`** — refuses `403 OAUTH_EMAIL_NOT_VERIFIED` unless the
+  provider positively asserted the address. Most providers assert nothing, so
+  turning this on for one of them refuses every login through it.
+- **`OnEmailMatch`** — what happens when the provider account is unknown but
+  some account already holds the address. `"link"` links it and signs that
+  account in (the default, and the account-takeover shape the reference's store
+  interface warns about); `"conflict"` raises the reference's
+  `OAUTH_ACCOUNT_CONFLICT` and starts the account-conflict flow below;
+  `"reject"` answers `403 OAUTH_USER_NOT_PROVISIONED`, the same refusal
+  `AutoCreate: false` gives, because both mean the deployment will not
+  provision this identity.
+- **`FieldMap`** — further `User` fields to fill from the raw profile when the
+  callback **creates** an account; an account it only links is never rewritten.
+  The keys are the fields it may write — `firstName`, `lastName`,
+  `phoneNumber`, `role`, and nothing else — and the values are expressions in
+  the `ProfileMap` grammar above, evaluated against the same userinfo document:
+  `"$.given_name"`, `"$.name.first ?? $.given_name"`, `"$.roles[0]"`,
+  `` `$.dept ?? "unassigned"` ``. The fields the profile itself owns are
+  deliberately not targets: `id` and `email` come from `OAuthUserInfo` (map
+  them with `ProfileMap`), `tenantId` comes from the wiring, `loginProvider` is
+  the provider, and `isEmailVerified` is the policy's business. An expression
+  that resolves to nothing leaves its field alone; one that resolves to an
+  object or an array fails the callback.
+
+`OAuthProvisioning.Validate()` reports an unknown `OnEmailMatch`, an empty
+domain entry, an unknown `FieldMap` target or a `FieldMap` expression that does
+not compile. `WithOAuth` runs it, so an invalid policy fails at construction
+rather than at the first login; it is exported so a policy loaded from
+configuration can be checked before anything is wired.
+
+An account the callback creates records `LoginProvider = <provider>` and takes
+`IsEmailVerified` from the provider's claim: true when the provider said
+nothing — the common case, and what this port has always done — and false only
+when the provider positively said so.
+
+### The account-conflict flow
+
+With `OnEmailMatch: "conflict"`, a provider account asserting an address another
+account holds produces `*OAuthAccountConflictError` (it unwraps to
+`ErrOAuthAccountConflict` and carries `Provider`, `Email` and
+`ProviderAccountID`, the reference's `AuthError` data). On the callback route
+that becomes the reference's answer (`auth.router.ts:1346-1355`):
+
+1. The pair is stashed through `PendingLinkStore.Save` under
+   `pending-link:<email>|<provider>`, carrying the provider account id and the
+   callback's tenant, for `LinkTokenTTL` (1 hour by default). Like the
+   reference's `stash`, this is best effort: a store failure is logged and the
+   redirect is sent anyway.
+2. The browser gets a `302` to
+   `HTTPConfig.AccountConflictLink(siteURL, provider, email)` —
+   `<siteURL><prefix>/account-conflict?provider=<p>&code=OAUTH_ACCOUNT_CONFLICT[&email=<e>]`,
+   or `<siteURL><prefix>/ui/account-conflict?…` under `HTTPConfig.UIEnabled`.
+   `siteURL` is the origin the signed state resolved to, the same value a
+   successful login is redirected to. No session is issued and no link is
+   written.
+3. The front-end reads `provider` and `email` off that query and posts them to
+   `POST <prefix>/link-request`, which resolves the identity from the stash
+   rather than from a credential, and mails a verification link.
+4. `POST <prefix>/link-verify` completes the link under the **stashed**
+   `providerAccountId` and consumes both the token and the stash. With
+   `loginAfterLinking` it issues the session as well.
+
+The stash key has no tenant segment — the reference's shape, reproduced — and
+`/link-request` takes the tenant from the entry it finds, so two tenants holding
+one address share one slot. A multi-tenant deployment whose tenants share
+addresses should not enable the conflict flow across them.
 
 ### `OAuthUserInfo`
 
@@ -825,9 +933,10 @@ type OAuthUserInfo struct {
 }
 ```
 
-`EmailVerified` is the reference profile's `emailVerified?`. `HandleCallback`
-does not read it yet: an account the callback creates is marked verified as
-before.
+`EmailVerified` is the reference profile's `emailVerified?`. The provisioning
+policy reads it twice: `RequireVerifiedEmail` refuses a callback with no
+positive claim, and an account the callback creates is verified unless the
+provider positively said otherwise.
 
 ### `LinkedAccountStore` interface
 
@@ -846,7 +955,10 @@ In-memory `LinkedAccountStore`. Create with `NewMemoryLinkedAccounts()`.
 
 ### `PendingLinkStore` interface
 
-For storing OAuth state between redirect and callback.
+The stash. It holds three kinds of single-use entry, all keyed by an opaque
+string: the in-flight OAuth state nonce (`oauth-state:`), the account-link token
+issued by `/link-request` (`link-token:`, keyed by hash), and the
+account-conflict pair the callback parks for the link flow (`pending-link:`).
 
 ---
 

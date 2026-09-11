@@ -49,6 +49,20 @@ const (
 	CodeInvalidLinkToken       = "INVALID_LINK_TOKEN"
 	CodeLinkTokenExpired       = "LINK_TOKEN_EXPIRED"
 	CodeUnauthorized           = "UNAUTHORIZED"
+
+	// CodeOAuthAccountConflict is the reference's own literal, and the only one
+	// of these four that reaches a client the reference also sends it to: it
+	// travels in the query of the /account-conflict redirect rather than in an
+	// error body (auth.router.ts:1346-1355).
+	CodeOAuthAccountConflict = "OAUTH_ACCOUNT_CONFLICT"
+
+	// The three provisioning refusals. They have no reference counterpart —
+	// the reference has no provisioning at all — and are registered in
+	// compatibility.go; none of them can be emitted by a deployment that
+	// configures no OAuthProvisioning.
+	CodeOAuthEmailNotVerified      = "OAUTH_EMAIL_NOT_VERIFIED"
+	CodeOAuthEmailDomainNotAllowed = "OAUTH_EMAIL_DOMAIN_NOT_ALLOWED"
+	CodeOAuthUserNotProvisioned    = "OAUTH_USER_NOT_PROVISIONED"
 )
 
 // The error catalog for this group. Messages are the reference's strings where
@@ -77,6 +91,15 @@ var (
 	// PendingLinkStore, so an absent store answers NOT_IMPLEMENTED before
 	// identity resolution is ever attempted.
 	HTTPErrLinkUnauthorized = HTTPError{Status: http.StatusUnauthorized, Message: "Authentication required or no pending link found", Code: CodeUnauthorized}
+
+	// The provisioning refusals, all on the callback and all JSON rather than a
+	// redirect — the reference's own choice for everything on that route that is
+	// not the account conflict (wire-contract.md §4, gap 5). 403 rather than 401:
+	// the provider did authenticate somebody, and the deployment will not admit
+	// them, so repeating the flow cannot help.
+	HTTPErrOAuthEmailNotVerified      = HTTPError{Status: http.StatusForbidden, Message: "OAuth email address is not verified", Code: CodeOAuthEmailNotVerified}
+	HTTPErrOAuthEmailDomainNotAllowed = HTTPError{Status: http.StatusForbidden, Message: "OAuth email domain is not allowed", Code: CodeOAuthEmailDomainNotAllowed}
+	HTTPErrOAuthUserNotProvisioned    = HTTPError{Status: http.StatusForbidden, Message: "No account is provisioned for this OAuth identity", Code: CodeOAuthUserNotProvisioned}
 )
 
 // Flow sentinels. They stay unexported: the exported surface a caller needs is
@@ -94,6 +117,13 @@ var (
 	errLinkTokenExpired   = errors.New("auth: account-link token has expired")
 	errLinkUnauthorized   = errors.New("auth: authentication required or no pending link found")
 	errTargetUserNotFound = errors.New("auth: target user not found")
+
+	// The provisioning refusals (oauth_provisioning.go). errOAuthUserNotProvisioned
+	// answers both halves of "this deployment will not provision this identity":
+	// AutoCreate false, and OnEmailMatch reject.
+	errOAuthEmailNotVerified      = errors.New("auth: oauth email address is not verified")
+	errOAuthEmailDomainNotAllowed = errors.New("auth: oauth email domain is not allowed")
+	errOAuthUserNotProvisioned    = errors.New("auth: no account is provisioned for this oauth identity")
 )
 
 // oauthNotConfiguredError names the provider so the 404 stub can carry the
@@ -127,6 +157,11 @@ func providerLabel(provider string) string {
 // OAuthHTTPError maps a flow failure from this file onto the wire envelope.
 // Routes call it instead of WriteServiceError because every literal here is
 // route-specific: HTTPErrorFor would turn each of them into a 500.
+//
+// *OAuthAccountConflictError is deliberately absent: the reference answers that
+// one with a 302 to /account-conflict, not with an error body
+// (auth.router.ts:1346-1355), so the callback handles it before it gets here
+// and anything else that reaches this function with it has lost the redirect.
 func OAuthHTTPError(err error) HTTPError {
 	var notConfigured oauthNotConfiguredError
 	switch {
@@ -155,6 +190,12 @@ func OAuthHTTPError(err error) HTTPError {
 		return HTTPErrLinkUnauthorized
 	case errors.Is(err, errTargetUserNotFound):
 		return HTTPErrTargetUserNotFound
+	case errors.Is(err, errOAuthEmailNotVerified):
+		return HTTPErrOAuthEmailNotVerified
+	case errors.Is(err, errOAuthEmailDomainNotAllowed):
+		return HTTPErrOAuthEmailDomainNotAllowed
+	case errors.Is(err, errOAuthUserNotProvisioned):
+		return HTTPErrOAuthUserNotProvisioned
 	default:
 		return HTTPErrorFor(err)
 	}
@@ -195,6 +236,16 @@ type OAuthWiring struct {
 	SiteURL string
 	// TenantID scopes users created or resolved by the callback.
 	TenantID string
+	// Provisioning is the policy the callback resolves an identity under — the
+	// declarative stand-in for the abstract findOrCreateUser the reference makes
+	// every integrator write (generic-oauth.strategy.ts:169-172). It is a
+	// pointer so that nil means DefaultOAuthProvisioning: a deployment that
+	// leaves it unset keeps exactly the behaviour it had before the policy
+	// existed (create missing accounts, link a matching address), and one that
+	// sets it is taken at its word, AutoCreate false included. WithOAuth
+	// validates it, so an unknown OnEmailMatch or a FieldMap that does not
+	// compile fails at construction.
+	Provisioning *OAuthProvisioning
 	// StateTTL bounds how long a signed state stays acceptable. Default 10m.
 	StateTTL time.Duration
 	// LinkTokenTTL bounds the /link-request token. Default 1h, as the reference.
@@ -232,10 +283,34 @@ func (w *OAuthWiring) linkTokenTTL() time.Duration {
 	return time.Hour
 }
 
+// provisioning is the policy this wiring resolves callbacks under: the one it
+// carries, or the default when it carries none.
+func (w *OAuthWiring) provisioning() OAuthProvisioning {
+	if w.Provisioning == nil {
+		return DefaultOAuthProvisioning()
+	}
+	return w.Provisioning.normalized()
+}
+
 // WithOAuth wires the OAuth service and the linking stores.
+//
+// A Provisioning policy is validated here, so a deployment whose configuration
+// names an unknown OnEmailMatch mode or a FieldMap target that does not exist
+// fails at construction rather than at the first login.
 func WithOAuth(wiring OAuthWiring) Option {
 	return func(b *authBuilder) error {
 		clone := wiring
+		if wiring.Provisioning != nil {
+			if err := wiring.Provisioning.Validate(); err != nil {
+				return err
+			}
+			// The struct is copied so that a caller which goes on editing the
+			// policy it passed in cannot change how callbacks resolve; the slice
+			// and the map inside it are shared, as every other member of the
+			// wiring is.
+			policy := *wiring.Provisioning
+			clone.Provisioning = &policy
+		}
 		b.oauth = &clone
 		return nil
 	}
@@ -566,11 +641,69 @@ func (a *Auth) OAuthComplete(ctx context.Context, in OAuthCompleteInput) (OAuthC
 	// through the provider account, exactly as the reference does. Nothing on the
 	// initiating request may influence which account the provider identity lands
 	// on — see OAuthBeginInput.
-	user, tokens, err := wiring.Service.HandleCallback(ctx, a.service, wiring.LinkedAccounts, info, meta.TenantID, "")
+	user, tokens, err := wiring.Service.HandleCallbackWithPolicy(ctx, a.service, wiring.LinkedAccounts, info, meta.TenantID, "", wiring.provisioning())
 	if err != nil {
+		a.stashAccountConflict(ctx, wiring, in.Provider, meta.TenantID, err)
 		return OAuthCompleteResult{RedirectTo: redirectTo}, err
 	}
 	return OAuthCompleteResult{User: user, Tokens: tokens, RedirectTo: redirectTo}, nil
+}
+
+// stashAccountConflict parks an account conflict for the link flow to pick up,
+// the way the reference's pendingLinkStore.stash(email, provider,
+// providerAccountId) does (auth.router.ts:1349-1351). Like the reference it is
+// best effort and conditional on the same three things — a store, an address
+// and a provider account — because the redirect is sent either way; a front-end
+// that lands on /account-conflict with nothing stashed simply finds
+// /link-request unwilling to resolve an identity.
+//
+// The entry is the one the conflict flow already reads (LinkRequest), under the
+// key it already uses. It is also the first thing in this port to write that
+// namespace, which makes the tenant term real: the key has no tenant segment
+// (reference-issues G18), so the entry carries the tenant the callback
+// resolved and LinkRequest takes the tenant from the entry. Two tenants holding
+// one address therefore share one stash slot — the reference's shape,
+// reproduced, and the reason a multi-tenant deployment should not leave the
+// conflict flow enabled across tenants that share addresses.
+func (a *Auth) stashAccountConflict(ctx context.Context, wiring *OAuthWiring, provider, tenantID string, err error) {
+	var conflict *OAuthAccountConflictError
+	if !errors.As(err, &conflict) || wiring.PendingLinks == nil {
+		return
+	}
+	if conflict.Email == "" || conflict.ProviderAccountID == "" {
+		return
+	}
+	ttl := wiring.linkTokenTTL()
+	if saveErr := wiring.PendingLinks.Save(ctx, pendingLinkKey(conflict.Email, provider), OAuthPendingMeta{
+		Provider:          provider,
+		TenantID:          tenantID,
+		Email:             normalizeEmail(conflict.Email),
+		ProviderAccountID: conflict.ProviderAccountID,
+		ExpiresAt:         time.Now().Add(ttl),
+	}, ttl); saveErr != nil {
+		// console.error in the reference, which redirects regardless.
+		a.service.logf("auth: oauth conflict stash failed for provider %q: %v", provider, saveErr)
+	}
+}
+
+// AccountConflictLink is the Location the callback answers an account conflict
+// with: the reference's buildUiLink(siteUrl, "/account-conflict?…")
+// (auth.router.ts:261-271, :1352-1354). siteURL is the origin the state
+// resolved to — OAuthCompleteResult.RedirectTo, which is the same
+// resolveOAuthRedirect value the reference passes — and the query is its
+// literal one, provider first, then code, then the address when there is one.
+//
+// The escaping is Go's url.QueryEscape where the reference calls
+// encodeURIComponent. The two agree on every character an address or a provider
+// name can hold in practice; they differ on a space (+ against %20) and on
+// !~*'(), which QueryEscape percent-encodes and encodeURIComponent leaves
+// alone. Both forms decode to the same string.
+func (c HTTPConfig) AccountConflictLink(siteURL, provider, email string) string {
+	path := "/account-conflict?provider=" + url.QueryEscape(provider) + "&code=" + CodeOAuthAccountConflict
+	if email != "" {
+		path += "&email=" + url.QueryEscape(email)
+	}
+	return c.UILink(siteURL, path)
 }
 
 // ── linked accounts ──────────────────────────────────────────────────────────

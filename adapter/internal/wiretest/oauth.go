@@ -59,6 +59,11 @@ type fakeOAuthProvider struct {
 // and reaches OAuthUserInfo.EmailVerified.
 const flatProfile = `{"sub":"acme-1","email":"oauth@example.com","email_verified":true,"name":"OAuth User"}`
 
+// unverifiedProfile is flatProfile with the email_verified claim taken away —
+// the common case, since most providers send nothing. It is what
+// RequireVerifiedEmail refuses.
+const unverifiedProfile = `{"sub":"acme-1","email":"oauth@example.com","name":"OAuth User"}`
+
 // nestedProfile is a document whose identity is buried the way Microsoft
 // Graph or a bespoke identity provider buries it: the id two levels down and
 // numeric, the address split over mail (null here) and userPrincipalName, the
@@ -176,6 +181,10 @@ type fixtureOptions struct {
 	// profileMap is the provider's declarative profile mapping. nil keeps the
 	// default mapping.
 	profileMap map[string]string
+	// provisioning is the callback's provisioning policy. nil is the wiring's
+	// own default — create, link by address — which is what every case written
+	// before the policy existed runs under.
+	provisioning *auth.OAuthProvisioning
 }
 
 const fixtureSiteURL = "https://app.example.com"
@@ -211,6 +220,7 @@ func newOAuthFixture(t *testing.T, mount Mounter, opts fixtureOptions) *oauthFix
 		SiteURL:        siteURL,
 		TenantID:       "t1",
 		StateTTL:       opts.stateTTL,
+		Provisioning:   opts.provisioning,
 		DeliverLinkToken: func(_ context.Context, delivery auth.LinkTokenDelivery) error {
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
@@ -575,8 +585,9 @@ func testOAuthCallback(t *testing.T, mount Mounter) {
 	// The fake profile carries email_verified, as Google's userinfo does. The
 	// claim is mapped onto OAuthUserInfo.EmailVerified and must not disturb the
 	// login: the callback still issues the session for the profile's address, and
-	// the created account is verified exactly as before — the provisioning policy
-	// that will read the claim is a later change.
+	// the created account is verified. Under the default policy a claim of false
+	// would be believed (D-11) and a missing claim still means verified, which is
+	// what this deployment — one that configures no provisioning — always got.
 	t.Run("a profile carrying email_verified still logs in", func(t *testing.T) {
 		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}})
 		location := f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
@@ -706,6 +717,209 @@ func testOAuthCallback(t *testing.T, mount Mounter) {
 		AssertError(t, rec, http.StatusUnauthorized, "Failed to get OAuth user profile", auth.CodeOAuthProfileFailed)
 		if _, err := f.users.GetUserByEmail(context.Background(), "oauth@example.com", "t1"); err == nil {
 			t.Fatal("a user was created for a profile that failed to map")
+		}
+	})
+
+	testOAuthProvisioning(t, mount)
+}
+
+// ── the provisioning policy ──────────────────────────────────────────────────
+
+// conflictPolicy is the policy the account-conflict cases run under: the
+// reference's outcome for a provider account asserting an address that already
+// belongs to somebody.
+func conflictPolicy() *auth.OAuthProvisioning {
+	policy := auth.DefaultOAuthProvisioning()
+	policy.OnEmailMatch = auth.OAuthEmailMatchConflict
+	return &policy
+}
+
+// conflictStashKey is the reference's (email, provider) stash key, spelled out
+// rather than built, so the cases pin the key a host store has to index.
+const conflictStashKey = "pending-link:oauth@example.com|acme"
+
+// testOAuthProvisioning covers the callback outcomes the provisioning policy
+// adds: the reference's account-conflict redirect, and the three refusals that
+// are this port's own (compatibility.go). Everything before this ran under the
+// default policy, which is what the port did before the policy existed.
+func testOAuthProvisioning(t *testing.T, mount Mounter) {
+	// The reference's conflict: stash (email, provider, providerAccountId) and
+	// redirect to buildUiLink(siteUrl, "/account-conflict?…")
+	// (auth.router.ts:1346-1355). No session, no link row, and the query the
+	// front-end reads is the reference's exactly.
+	t.Run("an address another account holds redirects to the conflict page", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}, provisioning: conflictPolicy()})
+		f.Seed("oauth@example.com")
+		location := f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
+		rec := f.callback(t, "c", location.Query().Get("state"))
+
+		AssertStatus(t, rec, http.StatusFound)
+		want := fixtureSiteURL + f.Config.Prefix() +
+			"/account-conflict?provider=acme&code=OAUTH_ACCOUNT_CONFLICT&email=oauth%40example.com"
+		if got := rec.Header().Get("Location"); got != want {
+			t.Fatalf("Location = %q, want %q", got, want)
+		}
+		AssertNoCookie(t, rec, hostAccess)
+		AssertNoCookie(t, rec, hostRefresh)
+		if _, err := f.links.FindByProvider(context.Background(), testProvider, "acme-1"); err == nil {
+			t.Fatal("the conflict linked the provider account it refused to link")
+		}
+
+		meta, err := f.pending.Get(context.Background(), conflictStashKey)
+		if err != nil {
+			t.Fatalf("nothing was stashed under %q: %v", conflictStashKey, err)
+		}
+		if meta.ProviderAccountID != "acme-1" || meta.Provider != testProvider || meta.TenantID != "t1" {
+			t.Fatalf("stash = %+v, want the provider account, the provider and the callback tenant", meta)
+		}
+	})
+
+	// The whole reference story, end to end and for the first time: the stash
+	// the callback parked is what lets an unauthenticated /link-request resolve
+	// an identity, and /link-verify then makes the link under the stashed
+	// provider account id rather than under the address.
+	t.Run("the stash completes through link-request and link-verify", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}, provisioning: conflictPolicy()})
+		holder, holderTokens := f.Seed("oauth@example.com")
+
+		location := f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
+		rec := f.callback(t, "c", location.Query().Get("state"))
+		AssertStatus(t, rec, http.StatusFound)
+
+		// The front-end reads provider and email off the redirect query, which is
+		// the only reason they are in it.
+		conflictURL, err := url.Parse(rec.Header().Get("Location"))
+		if err != nil {
+			t.Fatalf("parse the conflict redirect: %v", err)
+		}
+		query := conflictURL.Query()
+		if query.Get("code") != auth.CodeOAuthAccountConflict {
+			t.Fatalf("code = %q, want %q", query.Get("code"), auth.CodeOAuthAccountConflict)
+		}
+
+		req := csrfPair(f.Request(http.MethodPost, "/link-request", map[string]any{
+			"email": query.Get("email"), "provider": query.Get("provider"),
+		}))
+		AssertStatus(t, f.Do(req), http.StatusOK)
+		token := f.lastDelivery(t).Token
+		AssertStatus(t, f.Do(f.Request(http.MethodPost, "/link-verify", map[string]any{"token": token})), http.StatusOK)
+
+		entries := f.linkedAccountEntries(t, holderTokens.AccessToken)
+		if len(entries) != 1 {
+			t.Fatalf("linkedAccounts = %v, want the one the conflict flow made", entries)
+		}
+		entry, _ := entries[0].(map[string]any)
+		if entry["providerAccountId"] != "acme-1" {
+			t.Fatalf("providerAccountId = %v, want the stashed %q", entry["providerAccountId"], "acme-1")
+		}
+
+		// The stash is consumed with the token it authorised.
+		if _, err := f.pending.Get(context.Background(), conflictStashKey); err == nil {
+			t.Fatal("the stash survived the link it authorised")
+		}
+
+		// And the provider account is now known, so the same callback is an
+		// ordinary login rather than a conflict.
+		location = f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
+		rec = f.callback(t, "c", location.Query().Get("state"))
+		AssertStatus(t, rec, http.StatusFound)
+		if got := rec.Header().Get("Location"); got != fixtureSiteURL {
+			t.Fatalf("Location = %q, want the ordinary login redirect %q", got, fixtureSiteURL)
+		}
+		if got := f.sessionUser(t, rec).ID; got != holder.ID {
+			t.Fatalf("the callback issued a session for %q, want the linked holder %q", got, holder.ID)
+		}
+	})
+
+	// The three refusals, all JSON on the callback — the reference's own choice
+	// for everything on this route that is not the account conflict — and none
+	// of them leaving an account or a link behind.
+	t.Run("refusals", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			policy  func(*auth.OAuthProvisioning)
+			profile string
+			seed    bool
+			status  int
+			message string
+			code    string
+		}{
+			{
+				name:    "the provider asserted nothing about the address",
+				policy:  func(p *auth.OAuthProvisioning) { p.RequireVerifiedEmail = true },
+				profile: unverifiedProfile,
+				status:  http.StatusForbidden,
+				message: "OAuth email address is not verified",
+				code:    auth.CodeOAuthEmailNotVerified,
+			},
+			{
+				name:    "the address is outside the allowed domains",
+				policy:  func(p *auth.OAuthProvisioning) { p.AllowedEmailDomains = []string{"acme.example"} },
+				status:  http.StatusForbidden,
+				message: "OAuth email domain is not allowed",
+				code:    auth.CodeOAuthEmailDomainNotAllowed,
+			},
+			{
+				name:    "the deployment does not create accounts",
+				policy:  func(p *auth.OAuthProvisioning) { p.AutoCreate = false },
+				status:  http.StatusForbidden,
+				message: "No account is provisioned for this OAuth identity",
+				code:    auth.CodeOAuthUserNotProvisioned,
+			},
+			{
+				name:    "the address belongs to an account and linking is refused",
+				policy:  func(p *auth.OAuthProvisioning) { p.OnEmailMatch = auth.OAuthEmailMatchReject },
+				seed:    true,
+				status:  http.StatusForbidden,
+				message: "No account is provisioned for this OAuth identity",
+				code:    auth.CodeOAuthUserNotProvisioned,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				policy := auth.DefaultOAuthProvisioning()
+				tc.policy(&policy)
+				f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}, provisioning: &policy})
+				if tc.profile != "" {
+					f.provider.setProfile(tc.profile)
+				}
+				if tc.seed {
+					f.Seed("oauth@example.com")
+				}
+				location := f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
+				rec := f.callback(t, "c", location.Query().Get("state"))
+
+				AssertError(t, rec, tc.status, tc.message, tc.code)
+				AssertNoCookie(t, rec, hostAccess)
+				if location := rec.Header().Get("Location"); location != "" {
+					t.Fatalf("a refusal redirected to %q; the reference answers JSON here", location)
+				}
+				if _, err := f.links.FindByProvider(context.Background(), testProvider, "acme-1"); err == nil {
+					t.Fatal("a refused callback wrote a link row")
+				}
+				if !tc.seed {
+					if _, err := f.users.GetUserByEmail(context.Background(), "oauth@example.com", "t1"); err == nil {
+						t.Fatal("a refused callback created the account anyway")
+					}
+				}
+			})
+		}
+	})
+
+	// The other side of RequireVerifiedEmail: the fake profile does carry
+	// email_verified, so a provider that asserts the address is admitted and the
+	// account it creates is verified.
+	t.Run("an asserted address passes RequireVerifiedEmail", func(t *testing.T) {
+		policy := auth.DefaultOAuthProvisioning()
+		policy.RequireVerifiedEmail = true
+		policy.AllowedEmailDomains = []string{"Example.com"}
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}, provisioning: &policy})
+		location := f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
+		rec := f.callback(t, "c", location.Query().Get("state"))
+
+		AssertStatus(t, rec, http.StatusFound)
+		user := f.sessionUser(t, rec)
+		if user.Email != "oauth@example.com" || !user.IsEmailVerified {
+			t.Fatalf("user = %+v, want the profile address, verified", user)
 		}
 	})
 }

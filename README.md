@@ -366,6 +366,50 @@ revision the whole contract was extracted from.
   way, so a client that reads it per request — as all three family clients do —
   cannot tell the difference.
 
+### OAuth provisioning is a configured policy, with three refusals the reference has no counterpart for
+
+`oauth-provisioning-is-a-policy-not-a-function`
+
+- **Surface**: `GET <prefix>/oauth/{provider}/callback`.
+- **This port**: Resolves the callback under `OAuthWiring.Provisioning`
+  (`OAuthProvisioning{AutoCreate, AllowedEmailDomains, RequireVerifiedEmail, OnEmailMatch, FieldMap}`).
+  Three of its outcomes are refusals with no reference counterpart, all `403`
+  JSON on the callback: `OAUTH_EMAIL_NOT_VERIFIED` when `RequireVerifiedEmail`
+  is set and the provider asserted nothing, `OAUTH_EMAIL_DOMAIN_NOT_ALLOWED`
+  when the address is outside `AllowedEmailDomains`, and
+  `OAUTH_USER_NOT_PROVISIONED` when the identity is unknown and `AutoCreate` is
+  false, or when the address belongs to an account and `OnEmailMatch` is
+  `reject`. The fourth, `OnEmailMatch: "conflict"`, is the reference's own
+  `OAUTH_ACCOUNT_CONFLICT`: the stash and the 302 to `/account-conflict`, sent
+  exactly as the reference sends them. An account the callback creates records
+  the provider as `loginProvider`, takes `isEmailVerified` from the provider's
+  claim — true when the provider said nothing, which is the common case — and
+  fills further columns from `FieldMap`.
+- **The reference**: Has no provisioning at all:
+  `findOrCreateUser(profile, state)` is an abstract method the integrator
+  implements, and the library knows only two outcomes from it — a user, which
+  becomes a session, or an `AuthError` coded `OAUTH_ACCOUNT_CONFLICT`, which
+  becomes the stash and the redirect. Anything else that function throws reaches
+  `handleError`, which answers `500` unless it is an `AuthError` carrying its
+  own status (`generic-oauth.strategy.ts:169-172`, `google.strategy.ts:67`,
+  `github.strategy.ts:78`, `auth.router.ts:1346-1355`).
+- **Why**: This port's consumer configures the library from a file; it cannot
+  subclass a strategy, so a policy expressed as configuration is the only form
+  the reference's function can take here. The refusals are what that policy
+  needs to say and the reference never had to: its integrator would have thrown
+  whatever they liked. Defaults reproduce what this port did before the policy
+  existed — `AutoCreate` true, `OnEmailMatch` `link`, no domain list, no
+  verification demand — so a deployment that configures nothing cannot see any
+  of the three codes. `OnEmailMatch` exists because linking by address across
+  providers is the account-takeover shape the reference's own store interface
+  warns about (`findByProviderAccount`, `user-store.interface.ts:105-119`), and
+  the port's default is the unsafe one only because changing it silently would
+  lock accounts out of deployments that rely on it.
+- **Matching the reference exactly**: Leave `OAuthWiring.Provisioning` nil. The
+  callback then behaves as it always has, no refusal is reachable, and the only
+  policy-driven answer that can appear is the reference's own account conflict —
+  which needs `OnEmailMatch: "conflict"` and so cannot appear either.
+
 ### Cookie `Max-Age` follows the configured TTL, not a hardcoded 7 days
 
 `cookie-max-age-follows-configured-ttl`
@@ -540,7 +584,7 @@ release that closes the gap.
 | Stateful sessions | ✅ Implemented | Revocation, rotation, `Config.SessionCheckOn` (`allcalls`/`refresh`/`none`). | — |
 | CSRF protection | ✅ Implemented | `CSRFMiddleware`, double-submit cookie + header, exemption table pinned to the reference. | — |
 | Account management | ✅ Implemented | Register, `UpdateProfile`, `DeleteAccount`, password and email lifecycle. | — |
-| OAuth login + account linking | ✅ Implemented | Signed state, PKCE, single-use nonce; Google and GitHub presets, generic providers by hand. No provisioning policy or `profileMap` yet. | v0.6.0 |
+| OAuth login + account linking | ✅ Implemented | Signed state, PKCE, single-use nonce; Google and GitHub presets, `AdditionalAuthParams` and declarative `ProfileMap`/`MapProfile` for generic providers; `OAuthProvisioning` replaces the reference's abstract `findOrCreateUser` (auto-create, domain allowlist, verified-address demand, `FieldMap`), and the account-conflict flow is complete — stash, the reference's `/account-conflict` redirect, then `/link-request` and `/link-verify`. | — |
 | Dynamic email templates + UI i18n fallback | ✅ Implemented | The reference's six template ids with its en/it built-ins, `TemplateStore` overrides rendered under its `{{T.key}}`/`{{key}}` rule, per-request site-URL links and the old-address notice on `/change-email/confirm`. The `welcome` template renders but `POST /register` does not mail it yet (the reference does, `auth.router.ts:719-724`); UI translations are stored and are read by `GET /ui/config` once the UI router lands (v0.8.0). | — |
 | Custom token claims | ✅ Implemented | `Config.BuildTokenClaims` hook, plus `StaticClaims`/`UserFieldClaims`/`ChainClaims` and the synchronous `ClaimsWebhook` (this port's extension); the hook runs at mint time and on `/me`, never in the middleware. | — |
 | Identity Provider (IdP) mode (RS256 + JWKS + resource-server validation) | ⚠️ Partial | Discovery, authorize, token and userinfo endpoints exist; the signing key, `kid` and published keys are injectable (`IDPConfig.Signer`, `KeyID`, `PublicKeys`, with `ParseRSAPrivateKeyPEM` for the reference's PEM form), authorization codes go through `AuthCodeStore`, and `IssueIdPTokenPair` mints the reference's RS256 pair. Both halves of the JWKS contract are in: `auth.WithIDP` makes all four adapters serve the document at `<prefix>/.well-known/jwks.json` (`IDPConfig.JWKSPath`) with the reference's `Cache-Control` and CORS headers, with `<base>/jwks` kept as a deprecated alias through the 0.x line and removed in v1.0.0; and on the consuming side `JWKSClient` caches a remote JWKS with stale-while-revalidate, `VerifyRS256` verifies a bearer token against it (RS256 pinned before the key lookup, `kid` rotation retried once and rate-limited, `iss` checked), `ResourceServerMiddleware` is wired on all four adapters — bearer against the JWKS, cookie against the local HS256 secret, neither path reading a store — and `HTTPConfig.ResourceServer` unmounts the credential routes. What keeps this ⚠️: the OIDC endpoints themselves are mounted by `(*IDP).RegisterHandlers` on the host's own mux rather than by the four adapters, so they are outside the wiretest conformance suite. | v0.7.0 |

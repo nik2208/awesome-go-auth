@@ -188,6 +188,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absent; gating all of them is the new
   `resource-server-gates-all-credential-routes` deviation. See
   README_DETAILED.md, "Resource server mode".
+- **OAuth provisioning policy and the account-conflict flow.**
+  `OAuthWiring.Provisioning *OAuthProvisioning` is the declarative stand-in for
+  the abstract `findOrCreateUser` the reference makes every integrator write
+  (`generic-oauth.strategy.ts:169-172`): `AutoCreate` gates creating an account
+  for an unknown identity, `AllowedEmailDomains` restricts which addresses may
+  sign in at all, `RequireVerifiedEmail` demands that the provider actually
+  asserted the address, `OnEmailMatch` (`"link"`, `"conflict"`, `"reject"`)
+  decides what happens when the address already belongs to an account, and
+  `FieldMap` fills `firstName`, `lastName`, `phoneNumber` and `role` from the
+  raw profile with `ProfileMap` expressions. `nil` means
+  `DefaultOAuthProvisioning()` — create, link by address — so a deployment that
+  sets nothing is unchanged; `WithOAuth` runs `OAuthProvisioning.Validate()`, so
+  an unknown mode or an unknown `FieldMap` target fails at construction rather
+  than at the first login. `OAuthService.HandleCallbackWithPolicy` is
+  `HandleCallback` with the policy as its last argument; the old signature is
+  unchanged and now delegates with the default policy.
+- **The reference's account-conflict story, end to end.** Under
+  `OnEmailMatch: "conflict"` a provider account asserting an address another
+  account holds raises `*OAuthAccountConflictError` (which unwraps to
+  `ErrOAuthAccountConflict` and carries the reference's `{email,
+  providerAccountId}`), the callback stashes it under the `pending-link:` key
+  the linking routes already read, and the browser gets a `302` to
+  `HTTPConfig.AccountConflictLink(...)` —
+  `<siteUrl><prefix>[/ui]/account-conflict?provider=<p>&code=OAUTH_ACCOUNT_CONFLICT[&email=<e>]`,
+  the reference's own query (`auth.router.ts:1346-1355`). `POST /link-request`
+  then resolves the identity from that stash and `POST /link-verify` completes
+  the link under the stashed `providerAccountId`. Nothing wrote that stash
+  before, so the flow the port already had readers for is reachable for the
+  first time. `CodeOAuthAccountConflict = "OAUTH_ACCOUNT_CONFLICT"`.
+- **Three provisioning refusals on the callback**, all `403` JSON, all
+  unreachable without a configured policy, and all registered as deviations:
+  `OAUTH_EMAIL_NOT_VERIFIED` (`HTTPErrOAuthEmailNotVerified`),
+  `OAUTH_EMAIL_DOMAIN_NOT_ALLOWED` (`HTTPErrOAuthEmailDomainNotAllowed`) and
+  `OAUTH_USER_NOT_PROVISIONED` (`HTTPErrOAuthUserNotProvisioned`, answered both
+  by `AutoCreate: false` and by `OnEmailMatch: "reject"`).
 
 ### Changed
 - **BREAKING (minor surface): `(*Auth).TwoFactorPolicy()` is now
@@ -217,6 +252,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written there can hand a principal to a handler an adapter mounted.
   `nethttp.UserFromContext` is unchanged for callers — same signature, same
   behaviour — and now delegates.
+- **An account the OAuth callback creates is verified only when the provider
+  did not say otherwise.** `IsEmailVerified` is now
+  `EmailVerified == nil || *EmailVerified`: silence still means verified, which
+  is what the port has always done and what most providers send, but a provider
+  that positively reports `email_verified: false` is believed instead of being
+  ignored. `RequireVerifiedEmail` is how a deployment refuses silence as well.
 
 ### Deprecated
 - **`<base>/jwks`, the alias `(*IDP).RegisterHandlers` mounts alongside the

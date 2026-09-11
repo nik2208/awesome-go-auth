@@ -73,8 +73,10 @@ type OAuthUserInfo struct {
 	AvatarURL  string
 	// EmailVerified is the provider's email_verified claim, or for GitHub the
 	// verified flag of the address picked from /user/emails. nil means the
-	// provider said nothing, the reference's `emailVerified: undefined`; the
-	// callback's provisioning does not read it yet.
+	// provider said nothing, the reference's `emailVerified: undefined`. The
+	// provisioning policy reads it twice: RequireVerifiedEmail refuses a
+	// callback that has no positive claim, and an account the callback creates
+	// is verified unless the provider positively said otherwise (D-11).
 	EmailVerified *bool
 	Raw           map[string]any
 }
@@ -536,7 +538,41 @@ func (s *OAuthService) githubEmailFallback(ctx context.Context, p OAuthProvider,
 	return chosen.Email, &verified
 }
 
-// HandleCallback resolves/creates a user after OAuth callback.
+// ErrOAuthAccountConflict is the sentinel every account conflict unwraps to,
+// so a caller can test for the outcome with errors.Is without naming the type.
+// The details — which address, which provider account — are on
+// OAuthAccountConflictError, which errors.As recovers.
+var ErrOAuthAccountConflict = errors.New("auth: oauth account conflict")
+
+// OAuthAccountConflictError is the outcome the reference's
+// AuthError("...", "OAUTH_ACCOUNT_CONFLICT") carries, with the same two data
+// fields (auth.router.ts:1346-1355): the address the provider asserted and the
+// provider account that asserted it. The callback answers it the way the
+// reference does — it stashes the pair and redirects the browser to
+// /account-conflict — rather than as a JSON error, which is why nothing maps it
+// in OAuthHTTPError.
+//
+// It is raised only under OnEmailMatch = OAuthEmailMatchConflict: a provider
+// account nobody has linked, asserting an address some account already holds.
+type OAuthAccountConflictError struct {
+	Provider          string
+	Email             string
+	ProviderAccountID string
+}
+
+func (e *OAuthAccountConflictError) Error() string {
+	return fmt.Sprintf("auth: oauth account conflict: provider %q account %q claims %q, which belongs to another account",
+		e.Provider, e.ProviderAccountID, e.Email)
+}
+
+func (e *OAuthAccountConflictError) Unwrap() error { return ErrOAuthAccountConflict }
+
+// HandleCallback resolves/creates a user after OAuth callback under the default
+// provisioning policy (DefaultOAuthProvisioning): accounts are created when the
+// provider identity is unknown, and an address some account already holds is
+// linked to it. It is HandleCallbackWithPolicy with that policy, kept as it was
+// so an embedder driving the service directly is unaffected by the policy.
+//
 // If linkToUserID is non-empty the provider is linked to that existing account.
 func (s *OAuthService) HandleCallback(
 	ctx context.Context,
@@ -546,6 +582,45 @@ func (s *OAuthService) HandleCallback(
 	tenantID string,
 	linkToUserID string,
 ) (User, AuthTokens, error) {
+	return s.HandleCallbackWithPolicy(ctx, authSvc, linkedAccounts, info, tenantID, linkToUserID, DefaultOAuthProvisioning())
+}
+
+// HandleCallbackWithPolicy is HandleCallback under an explicit provisioning
+// policy — the whole of what the reference leaves to the integrator's
+// findOrCreateUser (generic-oauth.strategy.ts:169-172). The order is the
+// reference's resolution order with the policy's terms in it:
+//
+//  1. The policy gate: the provider must have asserted the address when
+//     RequireVerifiedEmail is set, and the address must be in an admitted
+//     domain. Both refuse before anything is read or written, so a refused
+//     identity leaves no trace.
+//  2. linkToUserID, when the caller named an account to link to.
+//  3. The existing (provider, providerAccountId) link, which is the only
+//     identification the reference's own store documentation considers safe
+//     (user-store.interface.ts:105-119).
+//  4. An account already holding the address: linked, refused as a conflict or
+//     refused outright, per OnEmailMatch.
+//  5. Creation, when AutoCreate allows it.
+//
+// The conflict outcome is *OAuthAccountConflictError; the three refusals are
+// this port's own and reach the wire as 403s with the codes in oauth_wire.go.
+func (s *OAuthService) HandleCallbackWithPolicy(
+	ctx context.Context,
+	authSvc *Service,
+	linkedAccounts LinkedAccountStore,
+	info OAuthUserInfo,
+	tenantID string,
+	linkToUserID string,
+	policy OAuthProvisioning,
+) (User, AuthTokens, error) {
+	policy = policy.normalized()
+	// Before the identity is resolved, so that a refusal is the same whether or
+	// not the deployment already knows this provider account: an unverified or
+	// off-domain address must not be able to sign in through a link it made
+	// while the policy was looser.
+	if err := policy.admit(info); err != nil {
+		return User{}, AuthTokens{}, err
+	}
 	if linkToUserID != "" {
 		linkID, err := newID("lnk")
 		if err != nil {
@@ -581,10 +656,25 @@ func (s *OAuthService) HandleCallback(
 		return user, tokens, err
 	}
 
-	// Try by email
+	// Try by email. Matching an address across providers is the account-takeover
+	// shape the reference's own store interface warns about
+	// (user-store.interface.ts:105-119), so what happens here is the policy's
+	// decision rather than a fixed behaviour.
 	if info.Email != "" {
 		user, err := authSvc.users.GetUserByEmail(ctx, info.Email, tenantID)
 		if err == nil {
+			switch policy.OnEmailMatch {
+			case OAuthEmailMatchConflict:
+				// The reference's AuthError, with its two data fields. The route
+				// stashes them and redirects; nothing is written here.
+				return User{}, AuthTokens{}, &OAuthAccountConflictError{
+					Provider:          info.Provider,
+					Email:             info.Email,
+					ProviderAccountID: info.ProviderID,
+				}
+			case OAuthEmailMatchReject:
+				return User{}, AuthTokens{}, errOAuthUserNotProvisioned
+			}
 			linkID, _ := newID("lnk")
 			// The reference's linkAccount always carries the callback profile's
 			// email (auth.router.ts:1336-1343), which is what GET /linked-accounts
@@ -601,6 +691,13 @@ func (s *OAuthService) HandleCallback(
 	}
 
 	// Create new user
+	if !policy.AutoCreate {
+		return User{}, AuthTokens{}, errOAuthUserNotProvisioned
+	}
+	setters, err := compileUserFieldMap(policy.FieldMap)
+	if err != nil {
+		return User{}, AuthTokens{}, err
+	}
 	userID, err := newID("usr")
 	if err != nil {
 		return User{}, AuthTokens{}, err
@@ -612,15 +709,23 @@ func (s *OAuthService) HandleCallback(
 	// generic-oauth.strategy.ts:92; user.model.ts:15). An account the callback
 	// only links — found above by provider id or by email — keeps the provider
 	// it was created with, as the reference's linkAccount changes no user row.
-	newUser, err := authSvc.users.CreateUser(ctx, User{
+	//
+	// IsEmailVerified follows the provider's claim when it made one and is true
+	// when it said nothing (D-11, emailVerifiedOnCreate); RequireVerifiedEmail
+	// is what refuses silence, and it has already run.
+	draft := User{
 		ID:              userID,
 		Email:           info.Email,
 		TenantID:        tenantID,
 		LoginProvider:   info.Provider,
-		IsEmailVerified: true,
+		IsEmailVerified: emailVerifiedOnCreate(info),
 		CreatedAt:       now,
 		UpdatedAt:       now,
-	})
+	}
+	if err := applyUserFieldMap(setters, info.Raw, &draft); err != nil {
+		return User{}, AuthTokens{}, err
+	}
+	newUser, err := authSvc.users.CreateUser(ctx, draft)
 	if err != nil {
 		return User{}, AuthTokens{}, fmt.Errorf("auth: create oauth user: %w", err)
 	}

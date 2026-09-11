@@ -1,6 +1,7 @@
 package nethttp
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -105,7 +106,10 @@ func (a *Adapter) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 //
 // Failures answer with JSON rather than a redirect, which is the reference's
 // own choice here (§4: "handleError returns JSON, not a redirect") even though
-// it strands a browser on a raw JSON page.
+// it strands a browser on a raw JSON page. The one exception is the reference's
+// own: an account conflict is a 302 to /account-conflict carrying the provider,
+// the code and the address, so the front-end can drive the link flow
+// (auth.router.ts:1346-1355).
 func (a *Adapter) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	provider := providerSegment(r, a.cfg.Prefix(), "oauth")
 	if provider == "" {
@@ -119,6 +123,17 @@ func (a *Adapter) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		State:    query.Get("state"),
 	})
 	if err != nil {
+		// The conflict is the reference's redirect, not an error body: the state
+		// stash was written by OAuthComplete and the browser is sent to the page
+		// that drives /link-request. result.RedirectTo is the same
+		// resolveOAuthRedirect value the reference passes to buildUiLink there
+		// (auth.router.ts:1347), so a rejected state origin lands on the default
+		// site url exactly as a successful login would.
+		var conflict *auth.OAuthAccountConflictError
+		if errors.As(err, &conflict) {
+			http.Redirect(w, r, a.cfg.AccountConflictLink(result.RedirectTo, provider, conflict.Email), http.StatusFound)
+			return
+		}
 		auth.WriteHTTPError(w, auth.OAuthHTTPError(err))
 		return
 	}

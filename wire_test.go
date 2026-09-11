@@ -239,12 +239,19 @@ func TestUnmappedSentinelsAreDeliberate(t *testing.T) {
 		// Admin-router routes, which emit plain {"error": …} bodies.
 		ErrTenantNotFound: "wire-contract §5 tenants",
 		ErrRoleNotFound:   "wire-contract §5 roles",
+		// The OAuth callback answers this one with a 302 to /account-conflict,
+		// not with an error body (auth.router.ts:1346-1355), so there is no
+		// envelope for HTTPErrorFor to map it to. The route recognises it before
+		// any error mapping runs; reaching a mapper with it means the redirect
+		// was lost, and the 500 that follows is the right complaint.
+		ErrOAuthAccountConflict: "wire-contract §4 OAuth callback, a redirect rather than a body",
 	}
 	all := []error{
 		ErrInvalidCredentials, ErrUserExists, ErrInvalidToken, ErrSessionNotFound,
 		ErrSessionRevoked, ErrWeakPassword, ErrFeatureNotSupported, ErrEmailNotVerified,
 		ErrInvalidCode, ErrTwoFactorRequired, ErrAlreadyExists, ErrTenantNotFound,
 		ErrRoleNotFound, ErrEmailNotConfigured, ErrSMSNotConfigured,
+		ErrOAuthAccountConflict,
 	}
 	for _, err := range all {
 		mapped := HTTPErrorFor(err) != HTTPErrInternal
