@@ -282,8 +282,12 @@ func (m TokenMailer) send(ctx context.Context, template, to, token, link string)
 //
 // Use it as a sender through its Send method:
 //
+//	mailer, err := auth.NewGatewayMailerTransport(auth.MailerConfig{
+//		Endpoint: endpoint, APIKey: apiKey, From: "noreply@example.com",
+//	})
+//	// handle err
 //	auth.WithPasswordResetSender(auth.NewPasswordResetMailer(
-//		auth.NewHTTPMailerTransport(endpoint, secret),
+//		mailer,
 //		"Example App",
 //		"https://app.example.com/auth",
 //	).Send)

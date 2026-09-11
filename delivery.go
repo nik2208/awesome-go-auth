@@ -132,8 +132,12 @@ func SMSCodeMessage(code string) string {
 //
 // Use it as a sender through its Send method:
 //
+//	mailer, err := auth.NewGatewayMailerTransport(auth.MailerConfig{
+//		Endpoint: endpoint, APIKey: apiKey, From: "noreply@example.com",
+//	})
+//	// handle err
 //	auth.WithMagicLinkSender(auth.NewMagicLinkMailer(
-//		auth.NewHTTPMailerTransport(endpoint, secret),
+//		mailer,
 //		"Example App",
 //		"https://app.example.com/auth",
 //	).Send)

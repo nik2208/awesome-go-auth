@@ -38,8 +38,11 @@ func main() {
 		// answer 500 EMAIL_NOT_CONFIGURED / SMS_NOT_CONFIGURED. These log instead
 		// of sending; in production use a transport:
 		//
+		//	mailer, err := auth.NewGatewayMailerTransport(auth.MailerConfig{
+		//		Endpoint: endpoint, APIKey: apiKey, From: "noreply@example.com",
+		//	})
 		//	auth.WithMagicLinkSender(auth.NewMagicLinkMailer(
-		//		auth.NewHTTPMailerTransport(endpoint, secret),
+		//		mailer,
 		//		"My App", "https://api.example.com/auth",
 		//	).Send),
 		auth.WithMagicLinkSender(func(_ context.Context, d auth.MagicLinkDelivery) error {

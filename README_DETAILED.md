@@ -486,11 +486,39 @@ Filter by `UserID`, `TenantID`, `EventName`, `Since`, `Until`, `Limit`.
 type MailerTransport interface {
     Send(ctx context.Context, msg MailMessage) error
 }
+
+type MailMessage struct {
+    To, Subject string
+    Body        string // HTML when IsHTML is set, plain text otherwise
+    IsHTML      bool
+    Text        string // plain-text alternative of an HTML Body; empty → the HTML is sent as the text
+}
 ```
 
-### `NewHTTPMailerTransport(endpointURL, secret string) *HTTPMailerTransport`
+### `NewGatewayMailerTransport(cfg MailerConfig) (MailerTransport, error)`
 
-POSTs a JSON-encoded `MailMessage` to any HTTP endpoint. Sets `X-Mailer-Secret` header if secret is provided.
+The transport for the family's mail gateway — the request the reference's built-in
+mailer sends. The contract is spelled out under
+[Mail gateway contract](#mail-gateway-contract) in the Delivery section.
+
+```go
+type MailerConfig struct {
+    Endpoint    string       `json:"endpoint"`              // absolute http(s) URL; anything else is a constructor error
+    APIKey      string       `json:"apiKey"`                // sent as X-API-Key
+    From        string       `json:"from"`
+    FromName    string       `json:"fromName,omitempty"`
+    Provider    string       `json:"provider,omitempty"`
+    DefaultLang string       `json:"defaultLang,omitempty"` // carried, not read: locale is the mailers' knob
+    Client      *http.Client `json:"-"`                     // nil → a client with a 10-second timeout
+}
+```
+
+### `NewHTTPMailerTransport(endpointURL, secret string) *HTTPMailerTransport` — deprecated
+
+POSTs a JSON-encoded `MailMessage` (PascalCase) to any HTTP endpoint with an
+`X-Mailer-Secret` header — a request of this port's own that no gateway built for
+the reference accepts. Kept unchanged for gateways built against it since 0.3.0 and
+scheduled for removal in v1.0.0; use `NewGatewayMailerTransport`.
 
 ### `NewMailTemplater(appName string) *MailTemplater`
 
@@ -550,9 +578,19 @@ is unguessable and expires on its own.
 ### Built-in senders
 
 ```go
+mailer, err := auth.NewGatewayMailerTransport(auth.MailerConfig{
+    Endpoint: "https://mail.example.com/send",
+    APIKey:   apiKey,
+    From:     "noreply@example.com",
+    FromName: "Example App",
+})
+if err != nil {
+    log.Fatal(err) // empty or non-absolute endpoint
+}
+
 a, err := auth.New(
     auth.WithMagicLinkSender(auth.NewMagicLinkMailer(
-        auth.NewHTTPMailerTransport("https://mail.example.com/send", secret),
+        mailer,
         "Example App",                       // greets the recipient in the template
         "https://app.example.com/auth",      // link base; see MagicLinkURL
     ).Send),
@@ -568,6 +606,7 @@ a, err := auth.New(
 | `MagicLinkURL(base, token) string` | The link shape the verify route and every family client expect: `<base>/magic-link/verify?token=<token>` |
 | `SMSTransportSender(SMSTransport) SMSCodeSender` | Adapts a transport, formatting the code with `SMSCodeMessage` |
 | `SMSCodeMessage(code) string` | The family's handset text: `Your verification code is: <code>` |
+| `NewGatewayMailerTransport(MailerConfig) (MailerTransport, error)` | `POST` mail gateway with the reference's JSON body and `X-API-Key` — see [Mail gateway contract](#mail-gateway-contract) |
 | `NewHTTPSMSTransport(endpoint, apiKey, username, password) *HTTPSMSTransport` | `GET` gateway with credentials as query parameters and `X-API-Key` — see the caveat below |
 
 ```go
@@ -581,6 +620,41 @@ type SMSTransport interface {
 > strings reach access logs and proxies. The fix belongs at the gateway; until then,
 > `WithSMSCodeSender` takes any sender, so a deployment whose provider accepts a
 > safer shape supplies its own transport and never constructs this one.
+
+### Mail gateway contract
+
+`NewGatewayMailerTransport` sends exactly what the reference's built-in mailer sends
+(`awesome-node-auth` `src/services/mailer.service.ts:261-291`; payload
+`mailer.service.ts:133-141`; config shape `src/models/auth-config.model.ts:19-36`):
+
+```http
+POST {endpoint}
+Content-Type: application/json
+X-API-Key: {apiKey}
+
+{"to": "…", "subject": "…", "html": "…", "text": "…", "from": "…", "fromName": "…", "provider": "…"}
+```
+
+- The endpoint's own path and query are kept, and the header is sent even when the
+  key is blank — the reference always sets it.
+- `to`, `subject`, `html`, `text` and `from` are always present. `fromName` and
+  `provider` are optional in the reference and are absent, not blank, when unset.
+- `html` is `MailMessage.Body` when `IsHTML` is set and `text` is `MailMessage.Text`;
+  an empty `Text` sends the HTML as the text, as the reference's `sendCustom` does
+  (`text ?? html`, `mailer.service.ts:246`). A plain-text `Body` goes out as `text`
+  with an empty `html` — the reference has no text-only path.
+- Only a `2xx` is delivered (`mailer.service.ts:280-284`). Anything else fails the
+  send with an error that names the status and nothing else: the response body is
+  discarded unread and the API key never appears in an error.
+- The request is bounded by a 10-second client unless `MailerConfig.Client` is set.
+
+`MailerConfig` carries the reference's key names as JSON tags, so a deployment that
+already holds an `email.mailer` block for the reference can decode it and hand it
+over. `DefaultLang` is carried but not read by the transport: which template set a
+mail is rendered from is the mailers' `Locale`.
+
+The older `HTTPMailerTransport` (0.3.0) sends a different body under
+`X-Mailer-Secret` and is deprecated; it keeps working for gateways built against it.
 
 ### Locale
 
