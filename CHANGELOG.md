@@ -45,44 +45,6 @@ a host-level API.
   session check, loads the user and fills the optional stores' metadata, roles,
   permissions and tenants, but never calls `Config.BuildTokenClaims`, so
   `CustomClaims` is nil. `Me` is now `Authenticate` plus the hook.
-
-### Changed
-- **The adapters' `Middleware()` no longer runs `Config.BuildTokenClaims`.** All
-  four (net/http, chi, gin, echo) authenticate through `Auth.Authenticate`
-  instead of `Auth.Me`, so the user a protected route reads from
-  `UserFromContext` carries the stores' enrichment as before but `CustomClaims`
-  is nil where it used to be the hook's fresh result. The hook is a mint-time
-  hook and, with a `ClaimsWebhook` behind it, a network round trip: running it
-  on every request would make each protected route pay for a claim set nothing
-  reads, when the claims are already inside the token the request carried.
-  This is where the reference draws the line too: its `authMiddleware`
-  verifies the token and hands the route the payload as `req.user`, without
-  `buildTokenPayload` (`auth.middleware.ts:44-61`); only its `/me` calls
-  `buildPayload` again.
-  `GET /me` still runs it — exactly once per call, and now authenticates itself
-  rather than sitting behind the middleware — so `customClaims` on `/me` is
-  unchanged. The two other places that verified a token only to read an
-  identity off it follow: `POST /link-request` with a credential (the reference
-  reads `payload.sub` there without `buildTokenPayload`,
-  `auth.router.ts:1502-1510`) and the IdP `userinfo` endpoint, whose body the
-  hook never contributed to. Nothing changes on the wire. A host that needs the
-  hook's result on its own route can call `Auth.Me` from the handler.
-
-## [0.4.0] - 2026-09-11
-
-The email-flows milestone, plus the first steps of the ones after it. Links in
-auth mail are now built from the request that asked for them, against a site
-URL allowlist, and rendered from a template store with the reference's six
-template ids and its en/it built-ins; a gateway transport speaks the
-reference's mailer contract and a delivery webhook can replace mail and SMS
-altogether. On the way: the session claims can no longer be overridden by a
-claims hook (a security fix), loginProvider joins the payload, the TOTP
-issuer is configurable with two registered deviations, OAuth providers gain
-additional auth params, the GitHub email fallback and a declarative
-profileMap, the IdP keeps its authorization codes in a store, and the
-wiretest harness can express conditional route sets.
-
-### Added
 - **IdP signing key injection, `kid`, and the RS256/JWKS building blocks
   exported.** `IDPConfig.Signer crypto.Signer` is the key every RS256 token is
   signed with and the key the JWKS document publishes: an `*rsa.PrivateKey` —
@@ -116,6 +78,61 @@ wiretest harness can express conditional route sets.
   session lifetime. A host-level API as in the reference, where nothing calls it
   (reference-issues N35): `/login`, `/refresh` and the OIDC `/token` still issue
   the HS256 session pair.
+
+### Changed
+- **The adapters' `Middleware()` no longer runs `Config.BuildTokenClaims`.** All
+  four (net/http, chi, gin, echo) authenticate through `Auth.Authenticate`
+  instead of `Auth.Me`, so the user a protected route reads from
+  `UserFromContext` carries the stores' enrichment as before but `CustomClaims`
+  is nil where it used to be the hook's fresh result. The hook is a mint-time
+  hook and, with a `ClaimsWebhook` behind it, a network round trip: running it
+  on every request would make each protected route pay for a claim set nothing
+  reads, when the claims are already inside the token the request carried.
+  This is where the reference draws the line too: its `authMiddleware`
+  verifies the token and hands the route the payload as `req.user`, without
+  `buildTokenPayload` (`auth.middleware.ts:44-61`); only its `/me` calls
+  `buildPayload` again.
+  `GET /me` still runs it — exactly once per call, and now authenticates itself
+  rather than sitting behind the middleware — so `customClaims` on `/me` is
+  unchanged. The two other places that verified a token only to read an
+  identity off it follow: `POST /link-request` with a credential (the reference
+  reads `payload.sub` there without `buildTokenPayload`,
+  `auth.router.ts:1502-1510`) and the IdP `userinfo` endpoint, whose body the
+  hook never contributed to. Nothing changes on the wire. A host that needs the
+  hook's result on its own route can call `Auth.Me` from the handler.
+- **The IdP's `kid` defaults to `provisioner-key-1` instead of a random
+  per-process value, and `jwks` serves `(*IDP).JWKS()`** — the same JSON shape
+  as before for the signer's key, followed by `IDPConfig.PublicKeys`. Leaving
+  `IDPConfig.Signer` nil still generates an ephemeral RSA-2048 key per `NewIDP`,
+  and now logs the reference's warning once (`token.service.ts:52-57`) through
+  `IDPConfig.Logger` or the Service's `Config.Logger`: `auth: IdP mode: no
+  Signer configured — auto-generating an ephemeral RSA keypair. All tokens will
+  be invalidated on restart. Set IDPConfig.Signer in production.`
+
+### Fixed
+- **The OIDC `/token` endpoint reports `expires_in` as the lifetime of the
+  access token it returns.** The body carries the HS256 session access token,
+  whose lifetime is `Config.AccessTokenTTL`, but `expires_in` was
+  `IDPConfig.AccessTokenTTL` raw — `0` when unset, and with that field now the
+  IdP pair's 30-day lifetime, a number describing no token in the response. It
+  is now `Config.AccessTokenTTL` in seconds; `IDPConfig.AccessTokenTTL` governs
+  only `IssueIdPTokenPair`.
+
+## [0.4.0] - 2026-09-11
+
+The email-flows milestone, plus the first steps of the ones after it. Links in
+auth mail are now built from the request that asked for them, against a site
+URL allowlist, and rendered from a template store with the reference's six
+template ids and its en/it built-ins; a gateway transport speaks the
+reference's mailer contract and a delivery webhook can replace mail and SMS
+altogether. On the way: the session claims can no longer be overridden by a
+claims hook (a security fix), loginProvider joins the payload, the TOTP
+issuer is configurable with two registered deviations, OAuth providers gain
+additional auth params, the GitHub email fallback and a declarative
+profileMap, the IdP keeps its authorization codes in a store, and the
+wiretest harness can express conditional route sets.
+
+### Added
 - **`NewGatewayMailerTransport(MailerConfig)`: a mail transport that speaks the
   reference's gateway contract.** `POST {endpoint}` with an `X-API-Key` header and
   the JSON body `{to, subject, html, text, from, fromName, provider}`, delivered on
@@ -364,14 +381,6 @@ wiretest harness can express conditional route sets.
   `MailMessage` is unchanged.
 
 ### Changed
-- **The IdP's `kid` defaults to `provisioner-key-1` instead of a random
-  per-process value, and `jwks` serves `(*IDP).JWKS()`** — the same JSON shape
-  as before for the signer's key, followed by `IDPConfig.PublicKeys`. Leaving
-  `IDPConfig.Signer` nil still generates an ephemeral RSA-2048 key per `NewIDP`,
-  and now logs the reference's warning once (`token.service.ts:52-57`) through
-  `IDPConfig.Logger` or the Service's `Config.Logger`: `auth: IdP mode: no
-  Signer configured — auto-generating an ephemeral RSA keypair. All tokens will
-  be invalidated on restart. Set IDPConfig.Signer in production.`
 - **Tests — the wiretest OpenAPI check can express conditional route sets.**
   `documentedRoutes` stays the unconditional base; a `conditionalRouteSet`
   registered in `conditionalRoutes` names the configuration that mounts extra
@@ -447,13 +456,6 @@ wiretest harness can express conditional route sets.
   scheduled for v1.0.0.
 
 ### Fixed
-- **The OIDC `/token` endpoint reports `expires_in` as the lifetime of the
-  access token it returns.** The body carries the HS256 session access token,
-  whose lifetime is `Config.AccessTokenTTL`, but `expires_in` was
-  `IDPConfig.AccessTokenTTL` raw — `0` when unset, and with that field now the
-  IdP pair's 30-day lifetime, a number describing no token in the response. It
-  is now `Config.AccessTokenTTL` in seconds; `IDPConfig.AccessTokenTTL` governs
-  only `IssueIdPTokenPair`.
 - **Security — `Config.BuildTokenClaims` can no longer override the session
   claims.** The hook's result was merged over the whole payload, so a custom
   claim named `sid`, `tid`, `jti`, `typ`, `iss`, `iat` or `exp` replaced the
