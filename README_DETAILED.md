@@ -616,6 +616,7 @@ a, err := auth.New(
 | `SMSCodeMessage(code) string` | The family's handset text: `Your verification code is: <code>` |
 | `NewGatewayMailerTransport(MailerConfig) (MailerTransport, error)` | `POST` mail gateway with the reference's JSON body and `X-API-Key` — see [Mail gateway contract](#mail-gateway-contract) |
 | `NewHTTPSMSTransport(endpoint, apiKey, username, password) *HTTPSMSTransport` | `GET` gateway with credentials as query parameters and `X-API-Key` — see the caveat below |
+| `NewDeliveryWebhook(url, secret) (*DeliveryWebhook, error)` | One sender for every seam, over HTTP — see [Delivery webhook](#delivery-webhook) |
 
 ```go
 type SMSTransport interface {
@@ -663,6 +664,88 @@ mail is rendered from is the mailers' `Locale`.
 
 The older `HTTPMailerTransport` (0.3.0) sends a different body under
 `X-Mailer-Secret` and is deprecated; it keeps working for gateways built against it.
+
+### Delivery webhook
+
+`DeliveryWebhook` is one sender for all five seams. Instead of rendering a template
+and handing mail to a transport, it `POST`s the delivery itself — credential
+included — to a URL you own, and whatever answers there decides how the message
+reaches the recipient. It exists for a transport that is neither mail nor SMS, or
+that is not reachable from this process; the consumer's `email.deliveryWebhook.url`
+knob points at it.
+
+```go
+hook, err := auth.NewDeliveryWebhook("https://hooks.example.com/auth-delivery", secret)
+a, err := auth.New(
+    auth.WithMagicLinkSender(hook.SendMagicLink),
+    auth.WithPasswordResetSender(hook.SendPasswordReset),
+    auth.WithEmailVerificationSender(hook.SendEmailVerification),
+    auth.WithEmailChangeSender(hook.SendEmailChange),
+    auth.WithSMSCodeSender(hook.SendSMSCode),
+)
+```
+
+```go
+type DeliveryWebhook struct {
+    URL     string        // absolute http(s) URL; NewDeliveryWebhook validates it
+    Secret  string        // signs the body when set; never sent
+    Timeout time.Duration // per request, through ctx; NewDeliveryWebhook sets 5s
+    Client  *http.Client  // nil = http.DefaultClient
+}
+```
+
+> **This request shape is this port's own.** The reference's send callbacks
+> (`config.email.sendMagicLink`, `sendPasswordReset`, …) are in-process functions
+> that never cross HTTP, so there is no reference wire to reproduce: the body below
+> is an invention of this port. The envelope — headers and signature — is borrowed
+> from the family's outbound-webhook convention
+> (`src/tools/webhook-sender.ts:24-33`, `54-56`), so a receiver that already
+> verifies the tools router's webhooks verifies these the same way.
+
+One request per delivery: `POST <URL>` with `Content-Type: application/json` and
+
+| Header | Value |
+|--------|-------|
+| `X-Webhook-Event` | `delivery.<kind>` — `delivery.magic-link`, `delivery.sms-code`, … |
+| `X-Webhook-Delivery` | a fresh UUID per request |
+| `X-Webhook-Timestamp` | when it was sent: ISO 8601, UTC, milliseconds — `2026-09-11T10:00:00.000Z` |
+| `X-Webhook-Signature` | `sha256=<hex HMAC-SHA256 of the raw body, keyed by Secret>` — only when `Secret` is set |
+
+The body is `{"kind": "<kind>", "delivery": {…}}`, where `delivery` is the matching
+delivery struct in camelCase, fields in this order:
+
+| `kind` | `delivery` |
+|--------|------------|
+| `magic-link` | `userId`, `tenantId`, `email`, `token`, `expiresAt` |
+| `password-reset` | `userId`, `tenantId`, `email`, `token`, `expiresAt` |
+| `email-verification` | `userId`, `tenantId`, `email`, `token`, `expiresAt` |
+| `email-change` | `userId`, `tenantId`, `newEmail`, `token`, `expiresAt` — addressed to the new mailbox |
+| `sms-code` | `userId`, `tenantId`, `phone`, `code`, `expiresAt` |
+
+The four link-carrying kinds also carry `linkBase` and `lang` when the request
+resolved them (see "Per-request link base and language" below); both are omitted
+when empty, so a receiver must not rely on their presence.
+
+```json
+{"kind":"magic-link","delivery":{"userId":"usr_…","tenantId":"t1","email":"ada@example.com","token":"…","expiresAt":"2026-09-11T10:15:00Z"}}
+```
+
+`token` and `code` are the plaintext credential — the store holds only its hash — so
+the receiver is trusted exactly as a sender callback is: set a `Secret` and verify
+the signature before acting, with `VerifyWebhookSignature(secret, rawBody,
+r.Header.Get("X-Webhook-Signature"))` in Go. `expiresAt` is RFC 3339. The
+`DeliveryKind*` constants and `DeliveryWebhookRequest{Kind string; Delivery
+json.RawMessage}` name the same vocabulary for a receiver written in Go: decode the
+envelope, switch on `Kind`, unmarshal `Delivery` into the matching struct.
+
+Any `2xx` answer is delivered. Anything else, a transport failure or the timeout is
+an error, and the route then behaves per the seam it was wired to — the generic
+`500` on `/magic-link/send`, `/sms/send`, `/send-verification-email` and
+`/change-email/request`; the unconditional `200` on `/forgot-password`. There is no
+retry: a route is waiting on the answer, and the stored credential expires on its
+own. The error names the kind, the status and, for mail, the recipient's domain; it
+never carries the token, the code, the full address or the secret, because it is
+logged and inspected further than the request ever travels.
 
 ### Per-request link base and language
 

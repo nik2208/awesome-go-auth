@@ -70,6 +70,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `/me` carries unconditionally. `LoginProviderLocal` names the default.
   The field is additive: a host store that never persists it keeps answering
   `"local"`, and `MemoryUserStore` stores it with the rest of the row.
+- **`DeliveryWebhook`: one HTTP sender for every delivery seam.**
+  `NewDeliveryWebhook(url, secret)` returns a value whose `SendMagicLink`,
+  `SendPasswordReset`, `SendEmailVerification`, `SendEmailChange` and
+  `SendSMSCode` methods have the five sender signatures, so a deployment whose
+  transport is neither mail nor SMS — or is not reachable from this process —
+  wires the one value to `WithMagicLinkSender(hook.SendMagicLink)` and the rest.
+  It is what the consumer's `email.deliveryWebhook.url` knob points at. Each
+  delivery is `POST`ed once as
+  `{"kind": "<magic-link|password-reset|email-verification|email-change|sms-code>",
+  "delivery": {…camelCase…}}` with the family's outbound-webhook headers —
+  `X-Webhook-Event: delivery.<kind>`, `X-Webhook-Delivery` (a fresh UUID),
+  `X-Webhook-Timestamp` (ISO 8601) — and, when a secret is set,
+  `X-Webhook-Signature: sha256=<hex HMAC-SHA256 of the body>`, which
+  `VerifyWebhookSignature` already checks (`src/tools/webhook-sender.ts:24-33,
+  54-56`). A non-2xx answer, a transport failure or the timeout (5 s by default,
+  `Timeout` to change it, `Client` to supply your own) is an error, which the
+  route it is wired to handles as it already does; the error names the kind, the
+  status and the recipient's domain, never the token, the code, the full address
+  or the secret. **The body shape is this port's own**: the reference's send
+  callbacks never cross HTTP, so there is no wire to reproduce, and
+  README_DETAILED.md "Delivery webhook" documents it as such. The five delivery
+  structs gained camelCase JSON tags for it (additive; nothing serialised them
+  before), and `DeliveryKind*` / `DeliveryWebhookRequest` name the vocabulary for
+  a receiver written in Go.
 
 ### Changed
 - **Docs — the README parity snapshot now reflects the shipped surface.** It
