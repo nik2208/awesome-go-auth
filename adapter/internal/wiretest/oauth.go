@@ -48,11 +48,27 @@ type fakeOAuthProvider struct {
 	tokenForm     url.Values
 	tokenStatus   int
 	profileStatus int
+	// profile is the userinfo document; setProfile swaps it for a case that
+	// needs another shape.
+	profile string
 }
+
+// flatProfile is the default userinfo document: sub rather than id, so the
+// default mapping's second candidate is what the wire exercises;
+// email_verified is what a Google-shaped userinfo carries (google.strategy.ts:57)
+// and reaches OAuthUserInfo.EmailVerified.
+const flatProfile = `{"sub":"acme-1","email":"oauth@example.com","email_verified":true,"name":"OAuth User"}`
+
+// nestedProfile is a document whose identity is buried the way Microsoft
+// Graph or a bespoke identity provider buries it: the id two levels down and
+// numeric, the address split over mail (null here) and userPrincipalName, the
+// verified flag as text, the picture inside an array. Only a ProfileMap can
+// read it.
+const nestedProfile = `{"data":{"user":{"id":7001,"mail":null,"userPrincipalName":"nested@example.com","verified":"true","profile":{"displayName":"Nested User","photos":[{"url":"https://img.example.com/n.png"}]}}}}`
 
 func newFakeOAuthProvider(t *testing.T) *fakeOAuthProvider {
 	t.Helper()
-	p := &fakeOAuthProvider{tokenStatus: http.StatusOK, profileStatus: http.StatusOK}
+	p := &fakeOAuthProvider{tokenStatus: http.StatusOK, profileStatus: http.StatusOK, profile: flatProfile}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -71,6 +87,7 @@ func newFakeOAuthProvider(t *testing.T) *fakeOAuthProvider {
 	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, _ *http.Request) {
 		p.mu.Lock()
 		status := p.profileStatus
+		profile := p.profile
 		p.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -78,10 +95,7 @@ func newFakeOAuthProvider(t *testing.T) *fakeOAuthProvider {
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
-		// sub rather than id, so the default mapping's second candidate is what
-		// the wire exercises; email_verified is what a Google-shaped userinfo
-		// carries (google.strategy.ts:57) and reaches OAuthUserInfo.EmailVerified.
-		_, _ = w.Write([]byte(`{"sub":"acme-1","email":"oauth@example.com","email_verified":true,"name":"OAuth User"}`))
+		_, _ = w.Write([]byte(profile))
 	})
 	p.server = httptest.NewServer(mux)
 	t.Cleanup(p.server.Close)
@@ -106,6 +120,12 @@ func (p *fakeOAuthProvider) failToken() {
 	p.tokenStatus = http.StatusUnauthorized
 }
 
+func (p *fakeOAuthProvider) setProfile(doc string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.profile = doc
+}
+
 // expiringPendingLinks is a PendingLinkStore that keeps every entry forever and
 // backdates the deadline the caller recorded on it.
 //
@@ -128,6 +148,7 @@ func (s expiringPendingLinks) Save(ctx context.Context, key string, meta auth.OA
 type oauthFixture struct {
 	*Env
 	provider *fakeOAuthProvider
+	users    *auth.MemoryUserStore
 	links    *auth.MemoryLinkedAccounts
 	pending  *auth.MemoryPendingLinks
 
@@ -152,6 +173,9 @@ type fixtureOptions struct {
 	siteURL string
 	// stateTTL bounds the signed state. Zero means the 10-minute default.
 	stateTTL time.Duration
+	// profileMap is the provider's declarative profile mapping. nil keeps the
+	// default mapping.
+	profileMap map[string]string
 }
 
 const fixtureSiteURL = "https://app.example.com"
@@ -161,6 +185,7 @@ func newOAuthFixture(t *testing.T, mount Mounter, opts fixtureOptions) *oauthFix
 	provider := newFakeOAuthProvider(t)
 	fixture := &oauthFixture{
 		provider: provider,
+		users:    auth.NewMemoryUserStore(),
 		links:    auth.NewMemoryLinkedAccounts(),
 		pending:  auth.NewMemoryPendingLinks(),
 	}
@@ -178,6 +203,7 @@ func newOAuthFixture(t *testing.T, mount Mounter, opts fixtureOptions) *oauthFix
 			TokenURL:     provider.server.URL + "/token",
 			UserInfoURL:  provider.server.URL + "/userinfo",
 			Scopes:       []string{"openid", "email"},
+			ProfileMap:   opts.profileMap,
 		}),
 		LinkedAccounts: fixture.links,
 		PendingLinks:   fixture.pending,
@@ -202,7 +228,7 @@ func newOAuthFixture(t *testing.T, mount Mounter, opts fixtureOptions) *oauthFix
 	if opts.expiringPending {
 		wiring.PendingLinks = expiringPendingLinks{MemoryPendingLinks: fixture.pending}
 	}
-	fixture.Env = NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithOAuth(wiring))
+	fixture.Env = NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithUserStore(fixture.users), auth.WithOAuth(wiring))
 	return fixture
 }
 
@@ -622,6 +648,65 @@ func testOAuthCallback(t *testing.T, mount Mounter) {
 		f.provider.failProfile()
 		rec := f.callback(t, "c", location.Query().Get("state"))
 		AssertError(t, rec, http.StatusUnauthorized, "Failed to get OAuth user profile", auth.CodeOAuthProfileFailed)
+	})
+
+	// The declarative counterpart of the reference's mapProfile hook
+	// (generic-oauth.strategy.ts:71-77, applied :151-153) over a userinfo
+	// document the default mapping cannot read: the session is issued for the
+	// address the map resolved, and the provider account is linked under the
+	// id it resolved — a JSON number, rendered as JavaScript would.
+	t.Run("a ProfileMap maps a nested userinfo document", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{
+			allowed: []string{fixtureSiteURL},
+			profileMap: map[string]string{
+				"id":            "$.data.user.id",
+				"email":         "$.data.user.mail ?? $.data.user.userPrincipalName",
+				"emailVerified": "$.data.user.verified",
+				"name":          "$.data.user.profile.displayName",
+				"picture":       "$.data.user.profile.photos[0].url",
+			},
+		})
+		f.provider.setProfile(nestedProfile)
+		location := f.begin(t, "?return_path=/dashboard", map[string]string{"Origin": fixtureSiteURL})
+		rec := f.callback(t, "c", location.Query().Get("state"))
+		AssertStatus(t, rec, http.StatusFound)
+		if got := rec.Header().Get("Location"); got != fixtureSiteURL+"/dashboard" {
+			t.Fatalf("Location = %q, want %q", got, fixtureSiteURL+"/dashboard")
+		}
+		user := f.sessionUser(t, rec)
+		if user.Email != "nested@example.com" {
+			t.Fatalf("the callback issued a session for %q, want the mapped %q", user.Email, "nested@example.com")
+		}
+		if user.LoginProvider != testProvider {
+			t.Fatalf("LoginProvider = %q, want %q", user.LoginProvider, testProvider)
+		}
+		link, err := f.links.FindByProvider(context.Background(), testProvider, "7001")
+		if err != nil {
+			t.Fatalf("provider account 7001 was not linked: %v", err)
+		}
+		if link.Email != "nested@example.com" {
+			t.Fatalf("link email = %q, want the mapped %q", link.Email, "nested@example.com")
+		}
+		if _, err := f.links.FindByProvider(context.Background(), testProvider, "acme-1"); err == nil {
+			t.Fatal("the default mapping's subject was linked as well")
+		}
+	})
+
+	// The map is the whole mapping: a document it cannot resolve an id from is
+	// a profile failure on the wire, the reference's OAUTH_PROFILE_FAILED, and
+	// no user is created for it.
+	t.Run("a ProfileMap that resolves no id is a profile failure", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{
+			allowed:    []string{fixtureSiteURL},
+			profileMap: map[string]string{"id": "$.data.user.id", "email": "$.email"},
+		})
+		// The default flat document has an email but no data.user.id.
+		location := f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
+		rec := f.callback(t, "c", location.Query().Get("state"))
+		AssertError(t, rec, http.StatusUnauthorized, "Failed to get OAuth user profile", auth.CodeOAuthProfileFailed)
+		if _, err := f.users.GetUserByEmail(context.Background(), "oauth@example.com", "t1"); err == nil {
+			t.Fatal("a user was created for a profile that failed to map")
+		}
 	})
 }
 

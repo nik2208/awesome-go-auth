@@ -368,6 +368,8 @@ type OAuthProvider struct {
     Scopes                                    []string
     AdditionalAuthParams                      map[string]string // extra authorize-query params
     GitHubEmailsURL                           string            // "github" only; "" = UserInfoURL + "/emails"
+    MapProfile func(raw map[string]any) (OAuthUserInfo, error)  // replaces the default profile mapping
+    ProfileMap map[string]string                                // declarative MapProfile; see Profile mapping
 }
 ```
 
@@ -379,6 +381,17 @@ the PKCE `code_challenge`/`code_challenge_method` pair this port adds) always
 wins over an entry.
 
 ### `NewOAuthService(providers ...OAuthProvider) *OAuthService`
+
+### `NewOAuthServiceWithConfig(providers ...OAuthProvider) (*OAuthService, error)`
+
+`NewOAuthService` with the configuration validated: every provider's
+`ProfileMap` is compiled and the errors — one per broken provider, each naming
+the provider and the expression — come back joined, with no service, so a
+deployment fails at start-up rather than at the first login. `NewOAuthService`
+keeps its signature and never panics: a map that does not compile is recorded
+against its provider, whose `ExchangeCode` calls return that error before the
+token endpoint is contacted (a 500 on the callback — a configuration error,
+not a client one) while the other providers keep working.
 
 ### `GoogleProvider(clientID, clientSecret, redirectURL) OAuthProvider`
 ### `GitHubProvider(clientID, clientSecret, redirectURL) OAuthProvider`
@@ -405,7 +418,103 @@ Exchanges an authorization code for normalized user info. For a provider that
 is neither `google` nor `github` the subject id is `id`, then `sub` — the
 reference's `String(raw.id ?? raw.sub ?? '')` (`generic-oauth.strategy.ts:155`)
 — then `user_id`, this port's extra last resort; a numeric id is stringified.
-`email_verified` fills `EmailVerified` when it is a boolean.
+`email_verified` fills `EmailVerified` when it is a boolean. A provider with a
+`MapProfile` or a `ProfileMap` (next section) gets that mapping instead.
+
+### Profile mapping: `MapProfile` and `ProfileMap`
+
+The reference's `mapProfile` hook (`generic-oauth.strategy.ts:71-77`) turns the
+raw userinfo document into the `{id, email, emailVerified?, name?, picture?}`
+profile, and when it is set it is what `getUserProfile` returns, in place of
+the default mapping (`:151-153`). This port offers it in two forms on
+`OAuthProvider`:
+
+- **`MapProfile func(raw map[string]any) (OAuthUserInfo, error)`** — the hook
+  itself. It replaces the whole mapping for that provider, the `github`
+  preset's `/user/emails` fallback included. Fill `ProviderID`, `Email`,
+  `Name`, `AvatarURL` and `EmailVerified`; the service sets `Provider`, and
+  `Raw` when the hook left it nil. An error fails the exchange on the
+  profile-failed path: 401 `OAUTH_PROFILE_FAILED` on the callback.
+- **`ProfileMap map[string]string`** — the declarative form for a provider
+  loaded from configuration, compiled by `NewOAuthService` and validated by
+  `NewOAuthServiceWithConfig`. `nil` or empty means the default mapping.
+
+`MapProfile` wins when both are set; the `ProfileMap` is still compiled, so a
+broken one is still reported.
+
+#### `ProfileMap` grammar
+
+The keys are `id`, `email`, `emailVerified`, `name` and `picture`; `id` is
+required and any other key is an error. Each value is an expression in this
+grammar, which is this port's own (the reference takes a function):
+
+```
+expr    = alt ("??" alt)*
+alt     = path | literal
+path    = "$" ("." key | "[" index "]")+
+key     = one or more ASCII letters, digits, "_" or "-"
+index   = one or more decimal digits
+literal = a double-quoted string, allowed only as the last alternative
+```
+
+Whitespace around an alternative is ignored. Anything else — `$` alone, a
+single-quoted literal, a wildcard (`$.*`, `$[*]`), a filter (`$[?(...)]`), a
+slice, a function call, a quoted key — is a compile error naming the
+expression. A literal has no escapes, so it cannot contain a double quote.
+
+Evaluation follows JavaScript's `??`: the alternatives are tried in order and
+the first path that resolves to a value that is neither missing nor `null`
+wins, so an empty string, `false` or `0` is a value and stops the chain; a
+literal always resolves. A string is taken as is, a number is rendered as
+JavaScript's `String()` renders it (`7001` is `"7001"`, `1.5` is `"1.5"`,
+`1e21` is `"1e+21"`), a boolean becomes `"true"` or `"false"`; a value that is
+an object or an array is an evaluation error. `emailVerified` must resolve to
+a boolean or the strings `"true"`/`"false"` (a literal that is neither is
+refused at compile time). `id` must resolve to a non-empty string; the other
+four stay empty (`EmailVerified` nil) when nothing resolves. An evaluation
+error takes the profile-failed path, 401 `OAUTH_PROFILE_FAILED`.
+
+```go
+// Microsoft Graph: /v1.0/me answers {id, displayName, mail, userPrincipalName},
+// and mail is null for an account without a mailbox.
+microsoft := auth.OAuthProvider{
+    Name:         "microsoft",
+    ClientID:     os.Getenv("MS_CLIENT_ID"),
+    ClientSecret: os.Getenv("MS_CLIENT_SECRET"),
+    RedirectURL:  "https://api.example.com/auth/oauth/microsoft/callback",
+    AuthURL:      "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+    TokenURL:     "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    UserInfoURL:  "https://graph.microsoft.com/v1.0/me",
+    Scopes:       []string{"openid", "email", "profile"},
+    ProfileMap: map[string]string{
+        "id":    "$.id",
+        "email": "$.mail ?? $.userPrincipalName",
+        "name":  "$.displayName",
+    },
+}
+
+// A provider that wraps the profile:
+// {"data":{"user":{"id":7001,"mail":null,"userPrincipalName":"…","verified":"true",
+//                  "profile":{"displayName":"…","photos":[{"url":"…"}]}}}}
+nested := auth.OAuthProvider{
+    // …
+    ProfileMap: map[string]string{
+        "id":            "$.data.user.id", // 7001 becomes "7001"
+        "email":         "$.data.user.mail ?? $.data.user.userPrincipalName",
+        "emailVerified": `$.data.user.verified ?? "false"`,
+        "name":          "$.data.user.profile.displayName",
+        "picture":       "$.data.user.profile.photos[0].url",
+    },
+}
+
+svc, err := auth.NewOAuthServiceWithConfig(microsoft, nested) // a bad expression fails here
+```
+
+#### `CompileProfileMap(m map[string]string) (func(map[string]any) (OAuthUserInfo, error), error)`
+
+The compiler behind `ProfileMap`, exported so a deployment can validate a map
+it loaded from configuration — or build a `MapProfile` from one — before it
+wires anything. The function it returns fills everything but `Provider`.
 
 ### `(*OAuthService).HandleCallback(ctx, authSvc, linkedAccounts, info, tenantID, linkToUserID) (User, AuthTokens, error)`
 

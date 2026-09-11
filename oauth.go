@@ -3,10 +3,12 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +41,24 @@ type OAuthProvider struct {
 	// https://api.github.com/user/emails for the preset; a test points it at a
 	// fake. Only the "github" provider reads it.
 	GitHubEmailsURL string
+	// MapProfile replaces the default mapping of the userinfo document for
+	// this provider — the reference's mapProfile hook
+	// (generic-oauth.strategy.ts:71-77), which getUserProfile returns as the
+	// profile whenever it is set (:151-153). It replaces the whole mapping,
+	// the github preset's /user/emails fallback included. The service fills
+	// Provider, and Raw when the hook left it nil; an error fails the exchange
+	// on the profile-failed path (401 OAUTH_PROFILE_FAILED on the wire). When
+	// both MapProfile and ProfileMap are set, MapProfile wins.
+	MapProfile func(raw map[string]any) (OAuthUserInfo, error)
+	// ProfileMap is the declarative form of MapProfile for a provider loaded
+	// from configuration: the keys id, email, emailVerified, name and picture
+	// (id required) mapped to expressions such as "$.data.user.id" or
+	// "$.mail ?? $.userPrincipalName". CompileProfileMap documents the grammar.
+	// NewOAuthService compiles it: a map that does not compile is recorded
+	// against the provider, whose exchanges then fail with that error before
+	// contacting the provider (500 on the wire); NewOAuthServiceWithConfig
+	// reports it at start-up instead. nil or empty means the default mapping.
+	ProfileMap map[string]string
 }
 
 // OAuthUserInfo is the normalized profile returned after token exchange — the
@@ -113,16 +133,83 @@ type LinkedAccountStore interface {
 type OAuthService struct {
 	providers map[string]OAuthProvider
 	client    *http.Client
+	// profileMaps holds each provider's compiled ProfileMap; providerErrs the
+	// compile error recorded for a provider whose map did not compile, which
+	// ExchangeCodePKCE answers instead of contacting that provider.
+	profileMaps  map[string]func(map[string]any) (OAuthUserInfo, error)
+	providerErrs map[string]error
 }
 
-// NewOAuthService creates an OAuthService for the given providers.
+// NewOAuthService creates an OAuthService for the given providers. A
+// ProfileMap that does not compile is not fatal here: the error is recorded
+// and every exchange through that provider returns it, while the other
+// providers keep working. NewOAuthServiceWithConfig surfaces it at start-up.
 func NewOAuthService(providers ...OAuthProvider) *OAuthService {
-	m := make(map[string]OAuthProvider, len(providers))
-	for _, p := range providers {
-		m[p.Name] = p
-	}
-	return &OAuthService{providers: m, client: &http.Client{Timeout: 10 * time.Second}}
+	s, _ := newOAuthService(providers)
+	return s
 }
+
+// NewOAuthServiceWithConfig is NewOAuthService with the configuration
+// validated: it returns the ProfileMap compile errors of every provider that
+// has one — joined, each naming its provider and the expression — and no
+// service, so a deployment fails at start-up rather than at the first login.
+func NewOAuthServiceWithConfig(providers ...OAuthProvider) (*OAuthService, error) {
+	s, err := newOAuthService(providers)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func newOAuthService(providers []OAuthProvider) (*OAuthService, error) {
+	s := &OAuthService{
+		providers:    make(map[string]OAuthProvider, len(providers)),
+		client:       &http.Client{Timeout: 10 * time.Second},
+		profileMaps:  make(map[string]func(map[string]any) (OAuthUserInfo, error)),
+		providerErrs: make(map[string]error),
+	}
+	for _, p := range providers {
+		// A later provider with the same name replaces an earlier one entirely,
+		// its compiled map and any recorded error included.
+		s.providers[p.Name] = p
+		delete(s.profileMaps, p.Name)
+		delete(s.providerErrs, p.Name)
+		if len(p.ProfileMap) == 0 {
+			continue
+		}
+		mapper, err := CompileProfileMap(p.ProfileMap)
+		if err != nil {
+			s.providerErrs[p.Name] = providerConfigError{provider: p.Name, err: err}
+			continue
+		}
+		s.profileMaps[p.Name] = mapper
+	}
+	// The errors that survived replacement, in name order so the message is
+	// stable.
+	names := make([]string, 0, len(s.providerErrs))
+	for name := range s.providerErrs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	errs := make([]error, 0, len(names))
+	for _, name := range names {
+		errs = append(errs, s.providerErrs[name])
+	}
+	return s, errors.Join(errs...)
+}
+
+// providerConfigError is a ProfileMap compile error recorded against the
+// provider it belongs to. It unwraps to the CompileProfileMap error.
+type providerConfigError struct {
+	provider string
+	err      error
+}
+
+func (e providerConfigError) Error() string {
+	return fmt.Sprintf("auth: oauth provider %q: %s", e.provider, strings.TrimPrefix(e.err.Error(), "auth: "))
+}
+
+func (e providerConfigError) Unwrap() error { return e.err }
 
 // GoogleProvider builds a pre-configured Google OAuth2 provider — the
 // reference's GoogleStrategy (google.strategy.ts:23-33, :53). The authorization
@@ -211,6 +298,13 @@ func (s *OAuthService) ExchangeCodePKCE(ctx context.Context, providerName, code,
 	if !ok {
 		return OAuthUserInfo{}, fmt.Errorf("auth: unknown oauth provider %q", providerName)
 	}
+	// A provider whose ProfileMap did not compile can never produce a profile,
+	// so the exchange is refused before the code is spent on the token
+	// endpoint. The error is the one NewOAuthServiceWithConfig would have
+	// returned at start-up.
+	if err := s.providerErrs[providerName]; err != nil {
+		return OAuthUserInfo{}, err
+	}
 
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
@@ -278,7 +372,49 @@ func (s *OAuthService) ExchangeCodePKCE(ctx context.Context, providerName, code,
 	if err := json.Unmarshal(uBody, &raw); err != nil {
 		return OAuthUserInfo{}, fmt.Errorf("%w: %v", errOAuthProfile, err)
 	}
+	info, err := s.mapProfile(ctx, p, tok.AccessToken, raw)
+	if err != nil {
+		return OAuthUserInfo{}, fmt.Errorf("%w: %v", errOAuthProfile, err)
+	}
+	return info, nil
+}
 
+// mapProfile turns the userinfo document into the normalized profile in the
+// order of the reference's getUserProfile (generic-oauth.strategy.ts:151-160):
+// the mapProfile hook when the provider has one, else the default mapping.
+// This port has two forms of the hook — MapProfile, the function, and
+// ProfileMap, the declarative map compiled at construction — and the function
+// wins when both are set. Provider is always set here, and Raw when the hook
+// left it nil, so a hook only has to produce the five profile fields.
+func (s *OAuthService) mapProfile(ctx context.Context, p OAuthProvider, accessToken string, raw map[string]any) (OAuthUserInfo, error) {
+	var (
+		info OAuthUserInfo
+		err  error
+	)
+	switch {
+	case p.MapProfile != nil:
+		if info, err = p.MapProfile(raw); err != nil {
+			return OAuthUserInfo{}, fmt.Errorf("map profile: %w", err)
+		}
+	case s.profileMaps[p.Name] != nil:
+		if info, err = s.profileMaps[p.Name](raw); err != nil {
+			return OAuthUserInfo{}, err
+		}
+	default:
+		info = s.defaultProfile(ctx, p, accessToken, raw)
+	}
+	info.Provider = p.Name
+	if info.Raw == nil {
+		info.Raw = raw
+	}
+	return info, nil
+}
+
+// defaultProfile is the mapping a provider without a hook gets: the two
+// hard-coded strategies for google and github, the reference's generic
+// default for everything else.
+func (s *OAuthService) defaultProfile(ctx context.Context, p OAuthProvider, accessToken string, raw map[string]any) OAuthUserInfo {
+	providerName := p.Name
 	info := OAuthUserInfo{Provider: providerName, Raw: raw}
 	switch providerName {
 	case "google":
@@ -301,7 +437,7 @@ func (s *OAuthService) ExchangeCodePKCE(ctx context.Context, providerName, code,
 		}
 		info.AvatarURL, _ = raw["avatar_url"].(string)
 		if info.Email == "" {
-			info.Email, info.EmailVerified = s.githubEmailFallback(ctx, p, tok.AccessToken)
+			info.Email, info.EmailVerified = s.githubEmailFallback(ctx, p, accessToken)
 		}
 	default:
 		// The reference's default mapping, id ?? sub (generic-oauth.strategy.ts:
@@ -319,7 +455,7 @@ func (s *OAuthService) ExchangeCodePKCE(ctx context.Context, providerName, code,
 		info.Name, _ = raw["name"].(string)
 		info.AvatarURL, _ = raw["avatar_url"].(string)
 	}
-	return info, nil
+	return info
 }
 
 // subjectID renders a provider's subject the way the reference's
