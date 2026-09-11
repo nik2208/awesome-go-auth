@@ -4,7 +4,52 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 )
+
+// MemoryAuthCodeStore is an in-process implementation of AuthCodeStore. It is
+// the IDP's default and is correct only while /authorize and /token are served
+// by the same process; see IDPConfig.Codes.
+//
+// A single mutex covers both methods, so ConsumeCode's lookup-and-delete is
+// atomic and exactly one of any number of concurrent consumers receives the
+// record. Expired entries are dropped on the next SaveCode so a flow the user
+// abandoned does not pin memory until restart.
+type MemoryAuthCodeStore struct {
+	mu    sync.Mutex
+	codes map[string]AuthCode
+}
+
+func NewMemoryAuthCodeStore() *MemoryAuthCodeStore {
+	return &MemoryAuthCodeStore{codes: make(map[string]AuthCode)}
+}
+
+func (s *MemoryAuthCodeStore) SaveCode(_ context.Context, code AuthCode) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for hash, existing := range s.codes {
+		if now.After(existing.ExpiresAt) {
+			delete(s.codes, hash)
+		}
+	}
+	s.codes[code.CodeHash] = code
+	return nil
+}
+
+func (s *MemoryAuthCodeStore) ConsumeCode(_ context.Context, codeHash string) (AuthCode, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	code, ok := s.codes[codeHash]
+	if !ok {
+		return AuthCode{}, ErrInvalidCode
+	}
+	delete(s.codes, codeHash)
+	if time.Now().After(code.ExpiresAt) {
+		return AuthCode{}, ErrInvalidCode
+	}
+	return code, nil
+}
 
 // MemoryMetadataStore is an in-memory implementation of UserMetadataStore.
 type MemoryMetadataStore struct {
