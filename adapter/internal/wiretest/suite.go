@@ -76,6 +76,7 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("PasswordAndEmail", func(t *testing.T) { testPasswordAndEmail(t, mount) })
 	t.Run("PasswordEmailDelivery", func(t *testing.T) { testPasswordEmailDelivery(t, mount) })
 	t.Run("JWKS", func(t *testing.T) { testJWKS(t, mount) })
+	t.Run("ResourceServerGating", func(t *testing.T) { testResourceServerGating(t, mount) })
 	t.Run("OpenAPI", func(t *testing.T) { testOpenAPI(t, mount) })
 }
 
@@ -179,24 +180,39 @@ type conditionalRouteSet struct {
 	// prefix and in the shape of documentedRoutes. A route already in the base
 	// set cannot be listed here: it would be conditional in name only.
 	routes map[string]string
+	// removes is the inverse: the operations the configuration *unmounts*, so
+	// the comparison for this set is documentedRoutes ∪ routes − removes. Each
+	// entry must be in documentedRoutes with the same method — a configuration
+	// can only take away a route the base set has — and no route may be in both
+	// routes and removes.
+	//
+	// It exists because resource-server mode is a route set that subtracts:
+	// HTTPConfig.ResourceServer leaves the credential routes unregistered. A
+	// set may declare routes, removes, or both, and must declare at least one.
+	removes map[string]string
 	// spec returns the OpenAPIInfo whose flags make GenerateOpenAPISpec include
-	// routes. APIPrefix is filled in by the harness.
+	// routes and omit removes. APIPrefix is filled in by the harness.
 	spec func() auth.OpenAPIInfo
 }
 
 // conditionalRoutes is the registry of route sets that exist only under a
-// configuration. testOpenAPI holds each registered set to three things: with
+// configuration. testOpenAPI holds each registered set to four things: with
 // the set configured, the spec generated from set.spec() and the mounted
-// routes agree in both directions on documentedRoutes ∪ set.routes; without
-// it, the base spec and mount still agree on documentedRoutes alone; and every
-// route of the set answers 404 or 405 in that base env, so a route cannot
-// quietly become unconditional without moving to documentedRoutes.
+// routes agree in both directions on documentedRoutes ∪ set.routes −
+// set.removes, and every route in set.removes answers 404 or 405; without it,
+// the base spec and mount still agree on documentedRoutes alone, and every
+// route of set.routes answers 404 or 405 there, so a route cannot quietly
+// become unconditional without moving to documentedRoutes.
 //
-// The first registered set is JWKS, switched on by auth.WithIDP and documented
-// by OpenAPIInfo.IDProvider; see jwks.go. The docs, UI, admin and tools sets
-// join it as those routers land. suite_test.go drives the mechanism itself with
-// a fake set it passes in, so it stays independent of what is registered here.
-var conditionalRoutes = []conditionalRouteSet{jwksRouteSet()}
+// Two sets are registered, one of each direction. JWKS adds: it is switched on
+// by auth.WithIDP and documented by OpenAPIInfo.IDProvider; see jwks.go.
+// Resource-server mode subtracts: HTTPConfig.ResourceServer leaves the
+// credential routes unregistered and OpenAPIInfo.ResourceServer takes them out
+// of the spec; see resource_server.go. The docs, UI, admin and tools sets join
+// the additive half as those routers land. suite_test.go drives the mechanism
+// itself with fake sets it passes in, so it stays independent of what is
+// registered here.
+var conditionalRoutes = []conditionalRouteSet{jwksRouteSet(), resourceServerRouteSet()}
 
 // failureReporter is the slice of testing.T the OpenAPI checks report through.
 // It is an interface so suite_test.go can record failures instead of raising
@@ -291,7 +307,7 @@ func runOpenAPI(t *testing.T, h openAPIHarness) {
 
 	for _, set := range sets {
 		t.Run(set.name, func(t *testing.T) {
-			want := unionRoutes(documentedRoutes, set.routes)
+			want := minusRoutes(unionRoutes(documentedRoutes, set.routes), set.removes)
 			for _, prefix := range openAPIPrefixes {
 				t.Run(openAPIPrefixName(prefix), func(t *testing.T) {
 					report := h.reporter(t)
@@ -306,6 +322,7 @@ func runOpenAPI(t *testing.T, h openAPIHarness) {
 					info := set.spec()
 					info.APIPrefix = prefix
 					checkOpenAPI(report, env, h.generate(info), want, &set)
+					checkRemoved(report, env, set)
 				})
 			}
 		})
@@ -337,12 +354,24 @@ func wellFormedSets(report failureReporter, sets []conditionalRouteSet) []condit
 		if set.spec == nil {
 			fail("conditional set %q has no spec hook", set.name)
 		}
-		if len(set.routes) == 0 {
+		if len(set.routes) == 0 && len(set.removes) == 0 {
 			fail("conditional set %q declares no routes", set.name)
 		}
 		for route := range set.routes {
 			if _, base := documentedRoutes[route]; base {
 				fail("conditional set %q redeclares %q, which is already in documentedRoutes", set.name, route)
+			}
+		}
+		for route, method := range set.removes {
+			base, inBase := documentedRoutes[route]
+			switch {
+			case !inBase:
+				fail("conditional set %q removes %q, which is not in documentedRoutes — a set can only unmount a route the base configuration mounts", set.name, route)
+			case base != method:
+				fail("conditional set %q removes %q as %s, but documentedRoutes has it as %s", set.name, route, method, base)
+			}
+			if _, added := set.routes[route]; added {
+				fail("conditional set %q both adds and removes %q", set.name, route)
 			}
 		}
 		if ok {
@@ -356,6 +385,15 @@ func unionRoutes(base, extra map[string]string) map[string]string {
 	out := make(map[string]string, len(base)+len(extra))
 	maps.Copy(out, base)
 	maps.Copy(out, extra)
+	return out
+}
+
+func minusRoutes(base, gone map[string]string) map[string]string {
+	out := make(map[string]string, len(base))
+	maps.Copy(out, base)
+	for route := range gone {
+		delete(out, route)
+	}
 	return out
 }
 
@@ -442,6 +480,26 @@ func checkUnconfigured(report failureReporter, env *Env, set conditionalRouteSet
 		case http.StatusNotFound, http.StatusMethodNotAllowed:
 		default:
 			report.Errorf("%s %s of conditional set %q is reachable (%d) without the set configured — a conditional route must answer 404 or 405 in the base configuration; if it is unconditional now, move it to documentedRoutes", method, probe, set.name, rec.Code)
+		}
+	}
+}
+
+// checkRemoved is the mirror of checkUnconfigured for a set that subtracts: in
+// an env built *with* the configure hook, each route in set.removes must answer
+// 404 or 405. Without it a set could declare a route unmounted, drop it from
+// the spec, and leave the adapter serving it — which is the whole failure
+// resource-server gating exists to prevent.
+//
+// Only the status is asserted, not the body: an unregistered route is answered
+// by the router, and net/http, chi, gin and echo each write their own 404.
+func checkRemoved(report failureReporter, env *Env, set conditionalRouteSet) {
+	for route, method := range set.removes {
+		probe, req := openAPIProbe(method, env.Config.Prefix()+route)
+		rec := env.Do(req)
+		switch rec.Code {
+		case http.StatusNotFound, http.StatusMethodNotAllowed:
+		default:
+			report.Errorf("%s %s is still reachable (%d) with conditional set %q configured — the set declares it unmounted, so the adapter must not register it", method, probe, rec.Code, set.name)
 		}
 	}
 }

@@ -59,9 +59,11 @@ var wantDeviationIDs = []string{
 	"csrf-cookie-not-reissued-with-tokens",
 	"forgot-password-succeeds-on-delivery-failure",
 	"jwks-cors-wildcard-string-form",
+	"jwks-unknown-kid-refetch-is-rate-limited",
 	"link-request-exempts-bearer-from-csrf",
 	"one-time-tokens-are-base64url",
 	"password-policy-on-reset-and-change",
+	"resource-server-gates-all-credential-routes",
 	"temp-token-is-typed-not-an-access-token",
 	"totp-accepts-one-step-of-skew",
 	"totp-issuer-defaults-to-config-issuer",
@@ -85,7 +87,16 @@ var wantClaims = map[string][]string{
 	"one-time-tokens-are-base64url":                {"43", "64", "base64url"},
 	"advertised-2fa-methods-require-store-support": {"available2faMethods", "501"},
 	"config-require2fa-is-a-system-policy-term":    {"Config.Require2FA", "2FA_REQUIRED", "403", "200", "AuthConfig"},
-	"csrf-cookie-not-reissued-with-tokens":         {"Set-Cookie", "setTokenCookies"},
+	"resource-server-gates-all-credential-routes": {
+		"404", "isResourceServer", "/magic-link/send", "/reset-password", "HTTPConfig.ResourceServer",
+		// The kept set is store-dependent. The entry once claimed the opposite,
+		// so the correction is pinned rather than left to the prose.
+		"user store",
+	},
+	"jwks-unknown-kid-refetch-is-rate-limited": {
+		"MinRefreshInterval", "invalidateCache", "RS256", "401",
+	},
+	"csrf-cookie-not-reissued-with-tokens": {"Set-Cookie", "setTokenCookies"},
 	"cookie-max-age-follows-configured-ttl": {
 		"Max-Age=2592000", "Max-Age=604800", "RefreshTokenTTL", "refreshTokenExpiresIn",
 	},

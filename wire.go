@@ -412,6 +412,19 @@ type HTTPConfig struct {
 	// (buildUiLink, auth.router.ts:265-266). It mounts nothing by itself; the
 	// deployment that sets it serves the UI under that path.
 	UIEnabled bool
+	// ResourceServer mounts this instance as a resource server: an API that
+	// verifies tokens another instance issued and owns no credentials of its
+	// own. The adapters then register none of the routes in
+	// ResourceServerGatedRoutes, so a credential route answers with whatever
+	// the router returns for an unknown path — 404 on all four — instead of
+	// reaching a handler that has no user database behind it.
+	//
+	// It changes nothing else: the routes that stay are unaffected, and the
+	// bearer verification itself is ResourceServerMiddleware, which a host
+	// mounts on its own routes. The reference gates six of the nineteen
+	// (auth.router.ts:510, :541); gating all of them is the
+	// resource-server-gates-all-credential-routes deviation.
+	ResourceServer bool
 }
 
 // DefaultHTTPConfig returns the conventions an adapter uses when the host app

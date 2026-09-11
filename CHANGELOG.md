@@ -107,6 +107,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`IDPConfig.JWKSURL`** overrides the `jwks_uri` of the discovery document
   `RegisterHandlers` serves, for an IdP reached through a gateway whose external
   URL is not `Issuer` + the mounted path.
+- **Resource-server mode: a JWKS client, an RS256 verifier and a middleware on
+  all four adapters.** `ResourceServerConfig{JWKSURL, Issuer, CacheTTL,
+  FetchTimeout, Client}` points a deployment at the JWKS of the instance that
+  issues its tokens. `NewJWKSClient(cfg)` returns a `*JWKSClient` whose cache is
+  stale-while-revalidate, transcribed from the reference's `JwksClient`
+  (`jwks.service.ts:29-141`): a document inside its TTL comes from memory; a
+  burst on a cold cache is one HTTP call, not one per request; a document past
+  its TTL is served immediately while the refresh runs behind it; and a refresh
+  that fails changes nothing, so an issuer that is briefly unreachable cannot
+  take the resource server down with it. Defaults are the reference's —
+  `DefaultJWKSCacheTTL` 1 hour, `DefaultJWKSFetchTimeout` 5 seconds
+  (`jwks.service.ts:40-41`). `GetKey(ctx, kid)` and `Invalidate()` are the
+  reference's `getKey` and `invalidateCache`; `Document(ctx)` returns the whole
+  document, and `JWK.RSAPublicKey()` converts one published key back into an
+  `*rsa.PublicKey` (the inverse of `NewRSAJWK`, and of `jwkToPublicKey`,
+  `jwks.service.ts:199-202`). `NewJWKSClient` panics on a `JWKSURL` that is
+  empty or is not an absolute http/https URL: a resource server that cannot
+  reach its issuer fails at startup rather than answering 401 to every bearer
+  request for the life of the process, which is how the reference refuses the
+  same misconfiguration (`jwks-auth.middleware.ts:38-40`).
+- **`VerifyRS256(ctx, token, client, expectedIssuer)`** is `verifyWithJwks`
+  (`token.service.ts:102-141`): the `kid` header selects the key, a `kid` the
+  cache does not carry invalidates it and is looked up exactly once more — so a
+  key rotated inside the TTL is picked up on the first request that needs it —
+  `RS256` is pinned as an allow-list rather than read from the token, `exp` and
+  `nbf` are honoured with no clock tolerance, and `iss` is compared by string
+  equality when `expectedIssuer` is set. Two orderings differ from the reference
+  and are the new `jwks-unknown-kid-refetch-is-rate-limited` deviation: the
+  `RS256` check runs *before* the key lookup, so an `alg: none` or `alg: HS256`
+  token never reaches the issuer; and the rotation retry is rate-limited by
+  `ResourceServerConfig.MinRefreshInterval` (`DefaultJWKSMinRefreshInterval`, 30
+  seconds), so a flood of tokens naming random `kid`s costs one outbound fetch
+  per interval instead of one per request. A negative `MinRefreshInterval`
+  restores the reference behaviour. Every refusal of the *token* wraps
+  `ErrInvalidToken` and carries the reference's own message (`Invalid token
+  format`, `Token missing kid header`, `Unknown signing key`, `Invalid or
+  expired token`, `Token issuer mismatch`); a failure to read the JWKS at all —
+  transport, non-200, unparseable document — surfaces unwrapped and maps to
+  `HTTPErrInternal`, because an issuer outage is this server's 5xx and not the
+  caller's bad credential. No new sentinel was added. The claims are returned as
+  the decoded payload, unchanged.
+- **`ResourceServerMiddleware(a, cfg)`, on net/http, chi, gin and echo.** A
+  bearer token is verified against the remote JWKS; an access-token cookie is
+  verified against this instance's own HS256 secret, for the dashboard that
+  hosts the resource server and may itself be logged in
+  (`jwks-auth.middleware.ts:44-79`). **Neither path reads a store** — the cookie
+  is checked with the reference's `verifyAccessToken`, a bare `jwt.verify`
+  (`token.service.ts:143-150`), not with `Auth.Authenticate`, which would need
+  the user table a resource server does not have. Two consequences follow, both
+  the reference's: a cookie whose subject this instance has no record of is
+  accepted, and a revoked session is accepted until its access token expires —
+  `SESSION_REVOKED` is a code of the session `Middleware`, which is the one with
+  a database behind it. The path is selected on the `Bearer ` prefix exactly as
+  the reference selects it (case-sensitive, and an empty token after the prefix
+  is a bearer request with no token, not a fallback to the cookie). No token
+  at all — neither header nor cookie — is `403 {"error":"No access token
+  provided"}`, code-less; every other failure is `401 {"error":"Invalid or
+  expired access token","code":"INVALID_TOKEN"}`, the new `HTTPErrInvalidTokenRS`
+  catalog entry. The user in context is built from the verified claims —
+  `UserFromRS256Claims` fills `ID`,
+  `Email`, `Role`, `LoginProvider`, `IsEmailVerified`, `IsTOTPEnabled` and
+  `TenantID` from `sub`, `email`, `role`, `loginProvider`, `isEmailVerified`,
+  `isTotpEnabled` and `tid`, leaves every store-only field zero, and carries the
+  whole verified payload in `CustomClaims` so a scope or permission claim
+  reaches the handler. `ResourceServerPrincipal` exposes the same decision for a
+  framework this repository does not ship.
+- **`HTTPConfig.ResourceServer`** unmounts the credential routes: with it set,
+  the four adapters register none of the nineteen routes in the new
+  `ResourceServerGatedRoutes()` — `/register`, `/login`, `/refresh`, `/logout`,
+  the five password and email-verification routes, both email-change routes,
+  both magic-link routes, both SMS routes and the four 2FA routes — so each
+  answers `404`, and `OpenAPIInfo.ResourceServer` drops the same nineteen
+  operations from the generated spec. What stays is `/me`, the session routes,
+  `/profile`, `/add-phone`, `/account` and the OAuth and linking group — and
+  those still need a local user store, so the flag is about credentials, not
+  about store independence: the store-less deployment is the one that mounts
+  `ResourceServerMiddleware` on its own routes. The reference gates six of the
+  nineteen and leaves the rest mounted over a database it has just declared
+  absent; gating all of them is the new
+  `resource-server-gates-all-credential-routes` deviation. See
+  README_DETAILED.md, "Resource server mode".
 
 ### Changed
 - **BREAKING (minor surface): `(*Auth).TwoFactorPolicy()` is now
@@ -131,6 +212,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Issuer` + `IDPConfig.JWKSPath`) instead of `<base>/jwks`. A relying party
   that reads the document follows it automatically; one configured by hand
   against `<base>/jwks` keeps working — see below.
+- **The authenticated user now sits under a context key owned by the root
+  package** (`auth.ContextWithUser` / `auth.UserFromContext`), so a middleware
+  written there can hand a principal to a handler an adapter mounted.
+  `nethttp.UserFromContext` is unchanged for callers — same signature, same
+  behaviour — and now delegates.
 
 ### Deprecated
 - **`<base>/jwks`, the alias `(*IDP).RegisterHandlers` mounts alongside the

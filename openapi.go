@@ -47,6 +47,10 @@ type OpenAPIInfo struct {
 	// a real endpoint from the spec; NewIDP refuses such a JWKSPath outright,
 	// so the collision can only come from this field disagreeing with the IdP.
 	JWKSPath string
+	// ResourceServer mirrors HTTPConfig.ResourceServer: the credential routes
+	// the adapters then leave unmounted are left out of the spec too. Set the
+	// two together, or the spec documents routes that answer 404.
+	ResourceServer bool
 }
 
 // GenerateOpenAPISpec returns an OpenAPI 3.0 spec for the mounted auth endpoints.
@@ -66,35 +70,19 @@ func GenerateOpenAPISpec(info OpenAPIInfo) map[string]any {
 		servers = append(servers, map[string]any{"url": info.ServerURL})
 	}
 
-	prefix := openAPIPrefix(info.APIPrefix)
-	paths := openAPIPaths(prefix)
+	// The conditional groups — the JWKS route an IdP adds, the credential
+	// routes resource-server mode takes away — are all in openAPIPathsFor. See
+	// OpenAPIInfo.IDProvider and OpenAPIInfo.ResourceServer, and the "jwks" and
+	// "ResourceServer" sets in the wiretest harness, which hold those flags and
+	// the adapters' mounts to each other in both directions.
+	paths := openAPIPathsFor(info)
 	schemas := openAPISchemas()
-	// The one conditional group so far: the JWKS route exists only on an Auth
-	// built WithIDP, so neither it nor the two schemas nothing else references
-	// are in the document unless the caller says so. See OpenAPIInfo.IDProvider
-	// and the "jwks" set in the wiretest harness, which holds this flag and the
-	// adapters' mounts to each other in both directions.
-	if info.IDProvider {
-		jwksPath := info.JWKSPath
-		if jwksPath == "" {
-			jwksPath = DefaultJWKSPath
-		}
-		// The field is a path below the prefix, like every other path in this
-		// document. A caller who dropped the leading "/" meant the same path, and
-		// would otherwise get the nonsense <prefix>jwks.json, so normalise it
-		// rather than emit that.
-		if !strings.HasPrefix(jwksPath, "/") {
-			jwksPath = "/" + jwksPath
-		}
-		// A JWKSPath colliding with a documented route would otherwise replace
-		// it silently, dropping a real endpoint from the spec. The documented
-		// route wins: it is the one the adapter certainly serves, whereas a
-		// colliding JWKSPath is a misconfiguration the host has to see.
-		if key := prefix + jwksPath; !openAPIHasPath(paths, key) {
-			paths[key] = openAPIJWKSPath()
-			for name, schema := range openAPIJWKSSchemas() {
-				schemas[name] = schema
-			}
+	// The two schemas nothing but the JWKS path item references follow that
+	// item rather than the flag: a JWKSPath colliding with a documented route
+	// adds no item, and definitions nothing points at are worse than none.
+	if openAPIDocumentsJWKS(info, paths) {
+		for name, schema := range openAPIJWKSSchemas() {
+			schemas[name] = schema
 		}
 	}
 
@@ -143,6 +131,45 @@ func openAPIHasPath(paths map[string]any, key string) bool {
 	return taken
 }
 
+// openAPIJWKSRoute is where the JWKS document sits below the prefix for this
+// info: OpenAPIInfo.JWKSPath, or DefaultJWKSPath when it is empty.
+//
+// The field is a path below the prefix, like every other path in this
+// document. A caller who dropped the leading "/" meant the same path, and
+// would otherwise get the nonsense <prefix>jwks.json, so normalise it rather
+// than emit that.
+func openAPIJWKSRoute(info OpenAPIInfo) string {
+	path := info.JWKSPath
+	if path == "" {
+		path = DefaultJWKSPath
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return path
+}
+
+// openAPIJWKSOperationID identifies the JWKS path item, both in the document
+// and to openAPIDocumentsJWKS.
+const openAPIJWKSOperationID = "jwks"
+
+// openAPIDocumentsJWKS reports whether the built paths really carry the JWKS
+// path item, which is a narrower question than info.IDProvider: a JWKSPath
+// that collides with a documented route leaves that route in place and adds
+// nothing, and the schemas only that item references must not be shipped
+// pointing at nothing.
+func openAPIDocumentsJWKS(info OpenAPIInfo, paths map[string]any) bool {
+	if !info.IDProvider {
+		return false
+	}
+	item, ok := paths[openAPIPrefix(info.APIPrefix)+openAPIJWKSRoute(info)].(map[string]any)
+	if !ok {
+		return false
+	}
+	get, ok := item["get"].(map[string]any)
+	return ok && get["operationId"] == openAPIJWKSOperationID
+}
+
 // openAPIJWKSPath describes GET <prefix><JWKSPath>, the IdP's public signing
 // keys. It is a path item on its own because it is added conditionally.
 func openAPIJWKSPath() map[string]any {
@@ -154,7 +181,7 @@ func openAPIJWKSPath() map[string]any {
 				"`IDPConfig.JWKSCORSOrigins` restricts it, in which case a listed `Origin` is " +
 				"echoed back and an unlisted one gets no such header. Mounted only when the " +
 				"`Auth` was built with `WithIDP`.",
-			"operationId": "jwks",
+			"operationId": openAPIJWKSOperationID,
 			"tags":        []string{"IdP"},
 			"responses": map[string]any{
 				"200": map[string]any{
@@ -179,6 +206,59 @@ func openAPIJWKSPath() map[string]any {
 				},
 			},
 		},
+	}
+}
+
+// openAPIPathsFor is openAPIPaths plus and minus what the configuration
+// changes. Two things do so far: resource-server mode drops the credential
+// routes, which is the same list the adapters skip registering
+// (ResourceServerGatedRoutes), and an IdP adds the JWKS route the adapters
+// mount from auth.WithIDP — so the spec and the mount stay in step under
+// either, or both.
+//
+// The subtraction runs first, in the order the adapters mount in: they
+// register the JWKS route whether or not resource-server mode is on, and skip
+// the credential routes it gates. A JWKSPath pointing at a gated route is
+// therefore served by the JWKS handler in that mode, and this documents it
+// that way; with the additions first the route would instead be deleted out
+// from under the JWKS item.
+func openAPIPathsFor(info OpenAPIInfo) map[string]any {
+	prefix := openAPIPrefix(info.APIPrefix)
+	paths := openAPIPaths(prefix)
+	if info.ResourceServer {
+		for route, method := range ResourceServerGatedRoutes() {
+			removeOpenAPIOperation(paths, prefix+route, method)
+		}
+	}
+	// A JWKSPath colliding with a route this document still describes would
+	// otherwise replace it silently, dropping a real endpoint from the spec.
+	// The documented route wins: it is the one the adapter certainly serves,
+	// whereas a colliding JWKSPath is a misconfiguration the host has to see.
+	if info.IDProvider {
+		if key := prefix + openAPIJWKSRoute(info); !openAPIHasPath(paths, key) {
+			paths[key] = openAPIJWKSPath()
+		}
+	}
+	return paths
+}
+
+// removeOpenAPIOperation drops one operation from the spec, and the path item
+// with it only when no operation is left.
+//
+// The gated set is method-keyed, so the removal has to be too. Today every
+// gated path carries a single operation and deleting the whole path item would
+// give the same answer; the day one of them gains a second method that is not
+// gated, deleting the path would quietly undocument a route the adapters still
+// serve — a spec that lies in the direction nothing checks, since the
+// conformance suite compares a path to one method.
+func removeOpenAPIOperation(paths map[string]any, path, method string) {
+	item, ok := paths[path].(map[string]any)
+	if !ok {
+		return
+	}
+	delete(item, strings.ToLower(method))
+	if len(item) == 0 {
+		delete(paths, path)
 	}
 }
 

@@ -67,6 +67,51 @@ func generateWithFake(extra ...string) func(auth.OpenAPIInfo) map[string]any {
 	}
 }
 
+// fakeRemovedRoute is the base route the subtractive fake set unmounts. It is
+// the OpenAPI probe of a real documented operation, so the harness is exercised
+// against the same machinery a real removal uses.
+const fakeRemovedRoute = "/add-phone"
+
+// generateWithoutFakeRemoved is GenerateOpenAPISpec minus fakeRemovedRoute
+// whenever the info carries the fake flag — a stand-in for what
+// OpenAPIInfo.ResourceServer does to the real spec.
+func generateWithoutFakeRemoved(info auth.OpenAPIInfo) map[string]any {
+	spec := auth.GenerateOpenAPISpec(info)
+	if info.Title != fakeSpecTitle {
+		return spec
+	}
+	prefix := auth.HTTPConfig{APIPrefix: info.APIPrefix}.Prefix()
+	delete(spec["paths"].(map[string]any), prefix+fakeRemovedRoute)
+	return spec
+}
+
+// withoutRoute wraps a Mounter so the handler answers 404 for one path, which
+// is what an adapter that never registered it does.
+func withoutRoute(inner Mounter, route string) Mounter {
+	return func(t *testing.T, a *auth.Auth, cfg auth.HTTPConfig) http.Handler {
+		h := inner(t, a, cfg)
+		gone := cfg.Prefix() + route
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == gone {
+				http.NotFound(w, r)
+				return
+			}
+			h.ServeHTTP(w, r)
+		})
+	}
+}
+
+// fakeRemovalSet is a well-formed subtractive set: configured, the mount stops
+// serving fakeRemovedRoute and the flagged spec stops documenting it.
+func fakeRemovalSet() conditionalRouteSet {
+	return conditionalRouteSet{
+		name:      fakeSetName,
+		configure: func(pc *probeConfig) { pc.Mount = withoutRoute(pc.Mount, fakeRemovedRoute) },
+		removes:   map[string]string{fakeRemovedRoute: http.MethodPost},
+		spec:      func() auth.OpenAPIInfo { return auth.OpenAPIInfo{Title: fakeSpecTitle} },
+	}
+}
+
 // fakeSet is a well-formed conditional set: configured, the mount serves
 // fakeRoute and the flagged spec documents it; unconfigured, neither does.
 func fakeSet() conditionalRouteSet {
@@ -110,6 +155,24 @@ func TestOpenAPIHarnessConditionalSet(t *testing.T) {
 	})
 	if len(rec.failures) != 0 {
 		t.Fatalf("a well-formed conditional set must pass, got:\n%s", rec.dump())
+	}
+}
+
+// TestOpenAPIHarnessSubtractiveSet is the positive case for the other
+// direction: a set whose configure unmounts a base route and whose spec flag
+// stops documenting it passes in full. Resource-server mode is exactly this
+// shape, so the harness has to be right about it before the real set is
+// trusted.
+func TestOpenAPIHarnessSubtractiveSet(t *testing.T) {
+	rec := &recorder{}
+	runOpenAPI(t, openAPIHarness{
+		mount:    mountNetHTTP,
+		sets:     []conditionalRouteSet{fakeRemovalSet()},
+		generate: generateWithoutFakeRemoved,
+		report:   rec,
+	})
+	if len(rec.failures) != 0 {
+		t.Fatalf("a well-formed subtractive set must pass, got:\n%s", rec.dump())
 	}
 }
 
@@ -208,6 +271,75 @@ func TestOpenAPIHarnessConditionalSetFailures(t *testing.T) {
 			generate: generateWithFake(),
 			want:     []string{`conditional set "fake" declares no routes`},
 			count:    1,
+		},
+		{
+			name: "a removed route the adapter still serves",
+			// The configure hook does not unmount anything, so the base route
+			// is still there while the set says it is gone.
+			mount: mountNetHTTP,
+			sets: func() []conditionalRouteSet {
+				set := fakeRemovalSet()
+				set.configure = func(*probeConfig) {}
+				return []conditionalRouteSet{set}
+			},
+			generate: generateWithoutFakeRemoved,
+			want: []string{
+				`POST /auth/add-phone is still reachable`,
+			},
+			count: prefixes,
+		},
+		{
+			name:  "a removed route the flagged spec still documents",
+			mount: mountNetHTTP,
+			sets: func() []conditionalRouteSet {
+				return []conditionalRouteSet{fakeRemovalSet()}
+			},
+			// The unmodified generator keeps documenting the removed route.
+			generate: auth.GenerateOpenAPISpec,
+			want: []string{
+				`spec documents "/add-phone", which is not in documentedRoutes or conditional set "fake"`,
+				`POST /auth/add-phone is documented but not mounted (404) (conditional set "fake")`,
+			},
+			count: 2 * prefixes,
+		},
+		{
+			name:  "a set removing a route the base set does not have",
+			mount: mountNetHTTP,
+			sets: func() []conditionalRouteSet {
+				set := fakeRemovalSet()
+				set.removes = map[string]string{"/not-a-route": http.MethodGet}
+				return []conditionalRouteSet{set}
+			},
+			generate: generateWithoutFakeRemoved,
+			want:     []string{`conditional set "fake" removes "/not-a-route", which is not in documentedRoutes`},
+			count:    1,
+		},
+		{
+			name:  "a set removing a route under the wrong method",
+			mount: mountNetHTTP,
+			sets: func() []conditionalRouteSet {
+				set := fakeRemovalSet()
+				set.removes = map[string]string{fakeRemovedRoute: http.MethodGet}
+				return []conditionalRouteSet{set}
+			},
+			generate: generateWithoutFakeRemoved,
+			want:     []string{`conditional set "fake" removes "/add-phone" as GET, but documentedRoutes has it as POST`},
+			count:    1,
+		},
+		{
+			name:  "a set that both adds and removes a route",
+			mount: mountNetHTTP,
+			sets: func() []conditionalRouteSet {
+				set := fakeRemovalSet()
+				set.routes = map[string]string{fakeRemovedRoute: http.MethodPost}
+				return []conditionalRouteSet{set}
+			},
+			generate: generateWithoutFakeRemoved,
+			want: []string{
+				`conditional set "fake" both adds and removes "/add-phone"`,
+				`conditional set "fake" redeclares "/add-phone", which is already in documentedRoutes`,
+			},
+			count: 2,
 		},
 		{
 			name:     "a set registered twice",

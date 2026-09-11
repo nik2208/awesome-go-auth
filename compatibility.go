@@ -416,6 +416,111 @@ func CompatibilityNotes() APICompatibilityNotes {
 						"so an allowlisted response must not reach a shared cache.",
 				}},
 			},
+			{
+				ID:      "resource-server-gates-all-credential-routes",
+				Title:   "Resource-server mode unmounts the whole credential set, not six routes of it",
+				Surface: "`HTTPConfig.ResourceServer`: the nineteen routes of `ResourceServerGatedRoutes`",
+				Behaviour: "Registers none of the nineteen routes that mint, deliver or consume a " +
+					"credential, so each answers `404` — `/register`, `/login`, " +
+					"`/refresh`, `/logout`, `/forgot-password`, `/reset-password`, " +
+					"`/change-password`, `/send-verification-email`, `/verify-email`, " +
+					"`/change-email/request`, `/change-email/confirm`, `/magic-link/send`, " +
+					"`/magic-link/verify`, `/sms/send`, `/sms/verify`, `/2fa/setup`, " +
+					"`/2fa/verify-setup`, `/2fa/verify` and `/2fa/disable`. " +
+					"`GenerateOpenAPISpec` drops the same nineteen under " +
+					"`OpenAPIInfo.ResourceServer`, so the published spec and the mount agree. " +
+					"What stays is `/me`, the session routes, `/profile`, `/add-phone`, " +
+					"`/account` and the OAuth and linking group — and those still need a local " +
+					"user store: `/me` reads it through `Service.Authenticate`, `/profile`, " +
+					"`/add-phone` and `/account` write it, and the OAuth callback provisions a " +
+					"user and mints a local session. The flag is about credentials, not about " +
+					"store independence. The deployment with no user store is the one that " +
+					"mounts `ResourceServerMiddleware` on its own routes, whose bearer and " +
+					"cookie paths both build the principal from verified claims and read no " +
+					"store at all.",
+				Reference: "Guards six registrations on `isResourceServer` — `/login`, `/logout`, " +
+					"`/refresh`, `/register`, `/forgot-password` and `/reset-password` — and " +
+					"leaves the other thirteen mounted. Those thirteen reach handlers that read " +
+					"and write the user store the mode says this instance does not have, so a " +
+					"caller gets a `500` from a failing store lookup, or a `200` on a route that " +
+					"mailed nothing, rather than a routing answer.",
+				Citations: []string{
+					"auth.router.ts:507-510",
+					"auth.router.ts:541",
+					"auth.router.ts:590",
+					"auth.router.ts:622",
+					"auth.router.ts:713",
+					"auth.router.ts:777",
+					"auth.router.ts:802",
+				},
+				Why: "The reference's own comment for the flag is that this instance has no local " +
+					"user DB and only token verification makes sense, and the six guards are an " +
+					"incomplete application of exactly that rule: a magic link cannot be minted, " +
+					"an SMS code cannot be stored and a TOTP secret cannot be enrolled without " +
+					"the store the mode has removed. Leaving them mounted turns a configuration " +
+					"mistake into a runtime failure on a credential route, which is the worst " +
+					"place to discover it. Gating all nineteen makes the mode mean one thing, " +
+					"and makes it checkable: the same list drives the mount, the OpenAPI spec " +
+					"and the conformance suite. It is drawn at the credential and not at the " +
+					"store deliberately: gating every store-reading route would unmount `/me` " +
+					"and the account routes from the deployment that has both a store and a " +
+					"remote issuer, which is the commoner configuration, to protect one that " +
+					"has no reason to mount the auth router at all.",
+				Notes: []DeviationNote{{
+					Label: "Matching the reference exactly",
+					Text: "Leave `HTTPConfig.ResourceServer` unset and mount " +
+						"`ResourceServerMiddleware` on the host's own routes: the bearer " +
+						"verification is independent of the gating, and every auth route then stays " +
+						"mounted as it is today. A host that wants the reference's partial set " +
+						"mounts two routers — one with the flag, one without — under different " +
+						"prefixes.",
+				}},
+			},
+			{
+				ID:      "jwks-unknown-kid-refetch-is-rate-limited",
+				Title:   "An unknown `kid` refetches the JWKS at most once per `MinRefreshInterval`",
+				Surface: "`VerifyRS256` / `JWKSClient`: the rotation retry behind every bearer token",
+				Behaviour: "On a `kid` the cached JWKS does not carry, the cache is invalidated and " +
+					"the key looked up once more — but only when the cached document is older " +
+					"than `ResourceServerConfig.MinRefreshInterval` (default " +
+					"`DefaultJWKSMinRefreshInterval`, 30 seconds). Inside that window the token " +
+					"is refused with `Unknown signing key` and no HTTP call is made, so N " +
+					"requests bearing unknown `kid`s cost at most one outbound fetch per " +
+					"interval. A negative `MinRefreshInterval` turns the limit off and restores " +
+					"the reference behaviour exactly. The `RS256` allow-list is also checked " +
+					"before the key lookup rather than after it, so an `alg: none` or `alg: " +
+					"HS256` token never reaches the issuer at all; both orderings answer `401` " +
+					"`INVALID_TOKEN`, only the logged message differs.",
+				Reference: "Calls `jwksClient.invalidateCache()` and retries on every unknown `kid`, " +
+					"with no interval and no cap. `invalidateCache` clears the cached document " +
+					"*and* the in-flight `fetchPromise`, so concurrent requests do not even " +
+					"coalesce onto one fetch, and the `algorithms: ['RS256']` pin is inside " +
+					"`jwt.verify`, which runs after the key lookup.",
+				Citations: []string{
+					"token.service.ts:116-125",
+					"token.service.ts:136",
+					"jwks.service.ts:101-105",
+					"jwks.service.ts:56-58",
+				},
+				Why: "Unrestricted, the retry is an unauthenticated request amplifier: anyone who " +
+					"can reach the resource server makes it call the issuer once per request by " +
+					"sending a random `kid`, and because the in-flight handle is dropped too, a " +
+					"burst multiplies rather than coalesces. Worse, the refusal is collateral: " +
+					"every legitimate request arriving between the invalidation and the next " +
+					"document landing takes the cold path and blocks on the issuer, which is the " +
+					"one thing the stale-while-revalidate cache exists to prevent. The interval " +
+					"costs a real rotation nothing — a cached document is typically an hour old " +
+					"by the time a token names a key it does not carry, so the first such token " +
+					"still refetches and still verifies — and only refuses the case of two " +
+					"rotations inside 30 seconds. `node-jwks-rsa` ships the same guard as its " +
+					"`rateLimit` option for the same reason.",
+				Notes: []DeviationNote{{
+					Label: "Matching the reference exactly",
+					Text: "Set `ResourceServerConfig.MinRefreshInterval` to any negative duration: " +
+						"every unknown `kid` then invalidates and refetches, as the reference " +
+						"does. Nothing else in the verifier changes.",
+				}},
+			},
 		},
 	}
 }

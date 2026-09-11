@@ -21,14 +21,15 @@ Complete reference for every public type, interface, function, and option in the
 13. [Mailer](#mailer)
 14. [Delivery](#delivery)
 15. [OIDC IDP](#oidc-idp)
-16. [MCP Server (out of parity scope)](#mcp-server-out-of-parity-scope)
-17. [OpenAPI](#openapi)
-18. [Embedded UI](#embedded-ui)
-19. [API Keys](#api-keys)
-20. [Event Bus](#event-bus)
-21. [HTTP Adapters](#http-adapters)
-22. [Security Helpers](#security-helpers)
-23. [Errors](#errors)
+16. [Resource server mode](#resource-server-mode)
+17. [MCP Server (out of parity scope)](#mcp-server-out-of-parity-scope)
+18. [OpenAPI](#openapi)
+19. [Embedded UI](#embedded-ui)
+20. [API Keys](#api-keys)
+21. [Event Bus](#event-bus)
+22. [HTTP Adapters](#http-adapters)
+23. [Security Helpers](#security-helpers)
+24. [Errors](#errors)
 
 ---
 
@@ -1768,6 +1769,264 @@ standard library through `BuildRS256JWT`, under `IDPConfig.Signer` and `KeyID`.
 
 ---
 
+## Resource server mode
+
+A *resource server* is the other side of the IdP: an API that owns no
+credentials, holds no user database, and answers requests by verifying tokens
+some other instance issued. It needs three things, and they are independent of
+each other — a deployment may take any one without the others.
+
+### 1. `ResourceServerConfig` and `JWKSClient`
+
+```go
+type ResourceServerConfig struct {
+    JWKSURL      string        // https://auth.example.com/auth/.well-known/jwks.json
+    Issuer       string        // expected iss; empty means the claim is not checked
+    CacheTTL     time.Duration // 0 → DefaultJWKSCacheTTL (1 hour)
+    FetchTimeout time.Duration // 0 → DefaultJWKSFetchTimeout (5 seconds)
+    Client       *http.Client  // nil → a plain client of this package
+
+    // 0 → DefaultJWKSMinRefreshInterval (30s); negative turns the limit off.
+    MinRefreshInterval time.Duration
+}
+
+client := auth.NewJWKSClient(cfg)
+key, err := client.GetKey(ctx, "provisioner-key-1") // *rsa.PublicKey
+client.Invalidate()
+doc, err := client.Document(ctx) // the whole JWKS
+```
+
+The cache is **stale-while-revalidate**, transcribed from the reference's
+`JwksClient` (`jwks.service.ts:29-141`):
+
+| state | what a read does |
+| --- | --- |
+| cached, inside the TTL | served from memory, no HTTP |
+| a fetch already in flight | joined — a burst on a cold cache is **one** HTTP call |
+| cached, past the TTL | the **stale** document is returned immediately and a refresh runs in the background |
+| that background refresh fails | nothing changes: the stale document keeps serving |
+| no cache at all | the caller waits for the fetch, and a failure is an error |
+
+The last two rows are the point of the design. Once the cache is warm no
+request ever waits on the issuer, and an issuer that is briefly unreachable
+cannot take the resource server down with it. A fetch is never bound to the
+request that triggered it, so cancelling a caller never poisons the cache;
+each fetch runs under `FetchTimeout` of its own.
+
+`NewJWKSClient` **panics** when `JWKSURL` is empty or is not an absolute
+`http`/`https` URL. A resource server pointed at nothing cannot verify a single
+bearer token, so the failure belongs at startup, where it is one line in a log,
+rather than at the first request, where it looks like an authentication problem
+and stays that way for the life of the process. The reference throws for the
+same reason (`jwks-auth.middleware.ts:38-40`).
+
+`JWK.RSAPublicKey()` converts a published key back into an `*rsa.PublicKey` —
+the inverse of `NewRSAJWK`, and of the reference's `jwkToPublicKey`
+(`jwks.service.ts:199-202`). It accepts only RSA signing keys: `kty` must be
+`RSA`, and `alg`, when the document states one, must be `RS256`.
+
+### 2. `VerifyRS256`
+
+```go
+claims, err := auth.VerifyRS256(ctx, token, client, cfg.Issuer)
+```
+
+The reference's `verifyWithJwks` (`token.service.ts:102-141`), step for step:
+
+1. the header is decoded **without verifying**, only to read `kid`;
+2. a token with no `kid` is refused;
+3. the header `alg` must be `RS256` — an allow-list, so the `alg` a token
+   advertises never selects the verification routine and neither `none` nor an
+   HS256 token presented under a published `kid` gets anywhere. The reference
+   applies the same pin inside `jwt.verify`, *after* the key lookup; here it
+   runs before, so a junk token cannot cost an outbound request;
+4. the key is looked up. If the cache does not carry that `kid`, the cache is
+   invalidated and the lookup is retried **exactly once** — which is how a key
+   rotated inside the TTL is picked up by the first request that needs it. A
+   second miss is refused, and so is the first when the cached document is
+   younger than `MinRefreshInterval`;
+5. the signature is checked, and `exp` and `nbf` are honoured with no clock
+   tolerance;
+6. when `expectedIssuer` is set, `iss` must equal it, by plain string
+   comparison.
+
+**Rate limit on the rotation retry.** The reference invalidates and refetches on
+every unknown `kid`, and its `invalidateCache` drops the in-flight fetch handle
+too — so anyone who can reach the resource server can make it call the issuer
+once per request by sending a random `kid`, uncoalesced, while every legitimate
+request in the gap takes the cold path and blocks. This port refuses to re-drop
+a document younger than `ResourceServerConfig.MinRefreshInterval`
+(`DefaultJWKSMinRefreshInterval`, 30 seconds): the first unknown `kid` may
+refetch, the rest are refused from memory. A real rotation is unaffected — the
+cached document is typically an hour old by the time a token names a key it does
+not carry — and a negative `MinRefreshInterval` restores the reference
+behaviour. This is the `jwks-unknown-kid-refetch-is-rate-limited` deviation.
+
+**Which failures are `INVALID_TOKEN`.** Every refusal of the *token* wraps
+`ErrInvalidToken` and carries the reference's own message (`Invalid token
+format`, `Token missing kid header`, `Unknown signing key`, `Invalid or expired
+token`, `Token issuer mismatch`), so `HTTPErrorFor` maps it to 401 and a host
+that logs the error logs what the reference logs. A failure to read the JWKS at
+all does not: a transport error, a non-200 status and an unparseable document
+come back from `GetKey` unwrapped, and `HTTPErrorFor` sends them to
+`HTTPErrInternal` — an issuer outage is this server's 5xx, not the caller's bad
+credential. `ResourceServerMiddleware` answers 401 either way, as the reference
+does (its `catch` does not distinguish them either); only a host calling
+`VerifyRS256` directly sees the difference, and it should.
+
+The claims come back as the decoded payload, unchanged: this verifier does not
+know what an issuer puts in its tokens, and a resource server is entitled to
+read all of it.
+
+### 3. `ResourceServerMiddleware`
+
+```go
+// net/http and chi
+mux.Handle("GET /reports", nethttp.ResourceServerMiddleware(a, cfg)(reports))
+r.With(chiadapter.ResourceServerMiddleware(a, cfg)).Get("/reports", reports)
+
+// gin and echo
+r.GET("/reports", ginadapter.ResourceServerMiddleware(a, cfg), reports)
+e.GET("/reports", reports, echoadapter.ResourceServerMiddleware(a, cfg))
+```
+
+It is the reference's `createJwksAuthMiddleware`
+(`jwks-auth.middleware.ts:44-79`):
+
+- `Authorization: Bearer <token>` → verified against the remote JWKS (RS256);
+- otherwise the access-token cookie (`__Host-` → `__Secure-` → bare) → verified
+  the **local** HS256 way, against this instance's own secret, because a cookie
+  session belongs to this instance. The reference keeps this path for the
+  dashboard that hosts the resource server;
+- neither → `403 {"error":"No access token provided"}`, code-less;
+- any verification failure → `401 {"error":"Invalid or expired access token",
+  "code":"INVALID_TOKEN"}` — the `HTTPErrInvalidTokenRS` catalog entry.
+
+**Neither path reads a store.** The cookie is checked the way the reference
+checks it — `tokenService.verifyAccessToken`, a bare `jwt.verify` against the
+HS256 secret (`token.service.ts:143-150`, called at
+`jwks-auth.middleware.ts:70-73`) — and *not* through `Auth.Authenticate`, which
+the session `Middleware` uses and which reads `users.GetUserByID` and checks the
+session for revocation. That difference is the whole point here: a resource
+server has no user table for `Authenticate` to read, so routing the cookie
+through it would 401 every SSR request on the deployment this mode exists for.
+Two consequences, both the reference's:
+
+- a cookie whose subject this instance has no record of is **accepted** — the
+  token is the principal;
+- a **revoked** session is accepted until its access token expires. This
+  middleware cannot emit `SESSION_REVOKED`; a deployment that wants revocation
+  checked on every call mounts the session `Middleware`, which is the one with a
+  database behind it.
+
+The signature, the `HS256` allow-list, `iss`, `typ` and `exp` are all still
+checked, so a refresh token, a token signed with another secret and a tampered
+token are refused. (`typ` is checked where the reference relies on a second
+secret: it signs refresh tokens with `refreshTokenSecret`, this port signs both
+with `Config.Secret` and tells them apart by `typ`.)
+
+**Which credential is used is decided by the header prefix**, not by what
+follows it, exactly as the reference decides it (`startsWith('Bearer ')`,
+`jwks-auth.middleware.ts:49-59`). So `Authorization: Bearer ` with an empty
+token is a bearer request with no token — the code-less 403 — even when a valid
+cookie is present; and the scheme match is case-sensitive, so `authorization:
+bearer x` falls through to the cookie. `BearerToken` is deliberately not used
+here: it trims and matches case-insensitively, which would turn both of those
+into different answers.
+
+**What the user context carries.** No store is read on either path: the token
+*is* the user record, which is the whole point of the mode. The same mapping
+serves both — the bearer claims come from the issuer, the cookie claims from
+this instance's own mint, and both carry the same base set.
+`UserFromRS256Claims` fills
+
+| `User` field | claim |
+| --- | --- |
+| `ID` | `sub` |
+| `Email` | `email` |
+| `Role` | `role` |
+| `LoginProvider` | `loginProvider` |
+| `IsEmailVerified` | `isEmailVerified` |
+| `IsTOTPEnabled` | `isTotpEnabled` |
+| `TenantID` | `tid` |
+
+— the reference's six base payload claims (`auth.router.ts:378-384`) plus the
+tenant this port writes, and **`CustomClaims` carries the entire verified
+payload**, so a scope or permission claim an issuer adds reaches the handler.
+Every store-only field is zero: no `PasswordHash`, no `Roles`, no
+`Permissions`, no `Tenants`, no `CreatedAt`. A handler that needs those reads
+its own store. A mistyped claim reads as absent rather than panicking — the
+token comes from another service, and this one does not get to assume its shape.
+
+The principal reaches the handler through the adapter's own `UserFromContext`,
+exactly as it does behind `Middleware`. `ResourceServerPrincipal(r, a, client,
+issuer)` exposes the same decision for a framework this repository does not
+ship.
+
+One `JWKSClient` is built per `ResourceServerMiddleware` call, so the key cache
+is shared by every request through that middleware. A host that mounts several
+against one issuer and wants a single cache builds the client once with
+`NewJWKSClient` and wraps `ResourceServerPrincipal` itself.
+
+### 4. `HTTPConfig.ResourceServer` — unmounting the credential routes
+
+```go
+cfg := auth.DefaultHTTPConfig()
+cfg.ResourceServer = true
+nethttp.MountWithConfig(mux, a, cfg)
+```
+
+The adapters then register **none** of the nineteen routes that mint, deliver or
+consume a credential, so each answers `404` from the router:
+
+```
+POST   /register                   POST   /magic-link/send
+POST   /login                      POST   /magic-link/verify
+POST   /refresh                    POST   /sms/send
+POST   /logout                     POST   /sms/verify
+POST   /forgot-password            POST   /2fa/setup
+POST   /reset-password             POST   /2fa/verify-setup
+POST   /change-password            POST   /2fa/verify
+POST   /send-verification-email    POST   /2fa/disable
+GET    /verify-email
+POST   /change-email/request
+POST   /change-email/confirm
+```
+
+`ResourceServerGatedRoutes()` returns that list (a fresh map each call).
+`OpenAPIInfo.ResourceServer` drops the same nineteen **operations** from
+`GenerateOpenAPISpec` — the method, not the whole path item, so a path that ever
+gains a second, ungated method keeps it — and the published spec and the mount
+then agree. Set the two together.
+
+What stays mounted is `GET /me`, the session routes, `PATCH /profile`,
+`POST /add-phone`, `DELETE /account`, and the whole OAuth and account-linking
+group.
+
+> **Those survivors still need a local user store.** `/me` reads it through
+> `Service.Authenticate` → `users.GetUserByID`; `/profile`, `/add-phone` and
+> `/account` read *and write* it; and `GET /oauth/{provider}/callback` provisions
+> a user and mints a local session, which is a credential this list otherwise
+> gates. They stay because the reference mounts them, and because the deployment
+> that has both a user store and a remote issuer — the commoner one — uses them.
+> **`HTTPConfig.ResourceServer` is about credentials, not about store
+> independence.** The store-less deployment is the one that mounts
+> `ResourceServerMiddleware` on its own routes, whose two paths read no store at
+> all; such a deployment should not be mounting the auth router's account routes
+> in the first place, and gating them here would take them away from the
+> deployment that can serve them.
+
+> **Deviation.** The reference guards six registrations on `isResourceServer` —
+> `/login`, `/logout`, `/refresh`, `/register`, `/forgot-password`,
+> `/reset-password` (`auth.router.ts:510`, `:541`, `:590`, `:622`, `:713`,
+> `:777`, `:802`) — and leaves the other thirteen mounted over a database it has
+> just declared absent. This port gates all nineteen; see
+> `resource-server-gates-all-credential-routes` in the README's deviations
+> section. To match the reference exactly, leave `ResourceServer` unset and use
+> the middleware alone.
+
+---
+
 ## MCP Server (out of parity scope)
 
 ### `NewMCPServer(authSvc *Service) *MCPServer`
@@ -1801,6 +2060,7 @@ Returns an OpenAPI 3.0.3 spec as a `map[string]any` (JSON-serializable).
 type OpenAPIInfo struct {
     Title, Description, Version, ServerURL string
     APIPrefix string // must match the mount; empty means DefaultAPIPrefix ("/auth")
+    ResourceServer bool // must match HTTPConfig.ResourceServer
 }
 ```
 
@@ -1818,9 +2078,12 @@ The spec describes exactly the operations the adapters mount — the current
 envelope, the per-route error catalog entries, the `X-Auth-Strategy` and
 `X-CSRF-Token` headers, and both the bearer and cookie security schemes. Set
 `APIPrefix` to whatever you passed to `MountWithConfig`; a mismatch documents
-paths the server does not serve. The wire conformance suite replays every
-documented operation against every adapter, so a route added without a spec entry
-(or a spec entry with no route) fails the build.
+paths the server does not serve. Set `ResourceServer` to whatever you passed as
+`HTTPConfig.ResourceServer`: it drops the nineteen credential operations the adapters
+then leave unmounted (see [Resource server mode](#resource-server-mode)). The
+wire conformance suite replays every documented operation against every adapter,
+so a route added without a spec entry (or a spec entry with no route) fails the
+build — and a route the configuration unmounts must vanish from both.
 
 ---
 
@@ -1938,6 +2201,13 @@ e.GET("/auth/me", adapt.Me, adapt.RequireAuth())
 ```
 
 All adapters provide at minimum: `Register`, `Login`, `Refresh`, `Logout`, `Me`, `ForgotPassword`, `ResetPassword`, `SendMagicLink`, `VerifyMagicLink`, `ChangePassword`, `SetupTOTP`, `VerifyTOTP`, `ListSessions`, `RequireAuth` middleware.
+
+Each adapter also exports two middlewares for the host's own routes, in its own
+framework's shape: `Middleware(a)`, which verifies this instance's HS256 session
+token, and `ResourceServerMiddleware(a, cfg)`, which verifies a bearer token
+against a remote JWKS and falls back to the local cookie — see
+[Resource server mode](#resource-server-mode). Both put the principal where that
+adapter's `UserFromContext` reads it.
 
 ---
 

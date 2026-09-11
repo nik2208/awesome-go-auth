@@ -82,6 +82,9 @@ func (ad *Adapter) Middleware() echo.MiddlewareFunc {
 }
 
 // Mount attaches the auth endpoints.
+//
+// Under HTTPConfig.ResourceServer the credential routes are not registered at
+// all — see mountCredentialRoutes and auth.ResourceServerGatedRoutes.
 func (ad *Adapter) Mount(group *echo.Group) {
 	prefix := ad.cfg.Prefix()
 	// IdP mode: the JWKS document, mounted first and bare — no CSRF, no auth —
@@ -95,10 +98,10 @@ func (ad *Adapter) Mount(group *echo.Group) {
 		group.GET(prefix+idp.JWKSPath(), jwks)
 		group.HEAD(prefix+idp.JWKSPath(), jwks)
 	}
-	group.POST(prefix+"/register", ad.guard(ad.register))
-	group.POST(prefix+"/login", ad.guard(ad.login))
-	group.POST(prefix+"/refresh", ad.guard(ad.refresh))
-	group.POST(prefix+"/logout", ad.guard(ad.logout))
+
+	if !ad.cfg.ResourceServer {
+		ad.mountCredentialRoutes(group, prefix)
+	}
 	// /me authenticates itself (see me) rather than sitting behind Middleware,
 	// so the token is verified once and the claims hook runs once.
 	group.GET(prefix+"/me", ad.guard(ad.me))
@@ -111,19 +114,6 @@ func (ad *Adapter) Mount(group *echo.Group) {
 	group.POST(prefix+"/add-phone", ad.guard(ad.Middleware()(ad.addPhone)))
 	group.DELETE(prefix+"/account", ad.guard(ad.Middleware()(ad.deleteAccount)))
 
-	// Passwordless and 2FA (passwordless.go). The four send/verify routes are
-	// unauthenticated by contract; the three enrolment routes sit behind the
-	// access-token middleware and are therefore the only ones CSRF-checked.
-	group.POST(prefix+"/magic-link/send", ad.guard(ad.magicLinkSend))
-	group.POST(prefix+"/magic-link/verify", ad.guard(ad.magicLinkVerify))
-	group.POST(prefix+"/sms/send", ad.guard(ad.smsSend))
-	group.POST(prefix+"/sms/verify", ad.guard(ad.smsVerify))
-	group.POST(prefix+"/2fa/setup", ad.guard(ad.Middleware()(ad.twoFactorSetup)))
-	group.POST(prefix+"/2fa/verify-setup", ad.guard(ad.Middleware()(ad.twoFactorVerifySetup)))
-	group.POST(prefix+"/2fa/verify", ad.guard(ad.twoFactorVerify))
-	group.POST(prefix+"/2fa/disable", ad.guard(ad.Middleware()(ad.twoFactorDisable)))
-	ad.mountPasswordEmail(group, prefix)
-
 	// OAuth and account linking. Echo registers the routes with its own
 	// ":param" syntax but serves the shared net/http handlers: the group's
 	// behaviour is entirely path- and body-driven, so re-implementing it here
@@ -135,6 +125,31 @@ func (ad *Adapter) Mount(group *echo.Group) {
 	group.DELETE(prefix+"/linked-accounts/:provider/:providerAccountId", serveHTTP(oauth.UnlinkAccountHandler()))
 	group.POST(prefix+"/link-request", serveHTTP(oauth.LinkRequestHandler()))
 	group.POST(prefix+"/link-verify", serveHTTP(oauth.LinkVerifyHandler()))
+}
+
+// mountCredentialRoutes registers the nineteen routes that create, prove,
+// deliver or change a credential — auth.ResourceServerGatedRoutes, which is the
+// same list and carries the reasoning. HTTPConfig.ResourceServer is the switch
+// that skips this call.
+func (ad *Adapter) mountCredentialRoutes(group *echo.Group, prefix string) {
+	group.POST(prefix+"/register", ad.guard(ad.register))
+	group.POST(prefix+"/login", ad.guard(ad.login))
+	group.POST(prefix+"/refresh", ad.guard(ad.refresh))
+	group.POST(prefix+"/logout", ad.guard(ad.logout))
+
+	// Passwordless and 2FA (passwordless.go). The four send/verify routes are
+	// unauthenticated by contract; the three enrolment routes sit behind the
+	// access-token middleware and are therefore the only ones CSRF-checked.
+	group.POST(prefix+"/magic-link/send", ad.guard(ad.magicLinkSend))
+	group.POST(prefix+"/magic-link/verify", ad.guard(ad.magicLinkVerify))
+	group.POST(prefix+"/sms/send", ad.guard(ad.smsSend))
+	group.POST(prefix+"/sms/verify", ad.guard(ad.smsVerify))
+	group.POST(prefix+"/2fa/setup", ad.guard(ad.Middleware()(ad.twoFactorSetup)))
+	group.POST(prefix+"/2fa/verify-setup", ad.guard(ad.Middleware()(ad.twoFactorVerifySetup)))
+	group.POST(prefix+"/2fa/verify", ad.guard(ad.twoFactorVerify))
+	group.POST(prefix+"/2fa/disable", ad.guard(ad.Middleware()(ad.twoFactorDisable)))
+	// Password management and email verification (password_email.go).
+	ad.mountPasswordEmail(group, prefix)
 }
 
 // serveHTTP adapts a net/http handler to echo. The handler writes the whole
