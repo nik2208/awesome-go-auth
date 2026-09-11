@@ -116,6 +116,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/userinfo`, replay refused) through an injected `AuthCodeStore`.
 
 ### Changed
+- **Tests — the wiretest OpenAPI check can express conditional route sets.**
+  `documentedRoutes` stays the unconditional base; a `conditionalRouteSet`
+  registered in `conditionalRoutes` names the configuration that mounts extra
+  routes and the `OpenAPIInfo` flag that documents them, and is checked
+  configured (spec and mount agree on base ∪ set), unconfigured (its routes
+  answer 404/405) and by name in every failure. The registry is empty until the
+  first conditional surface (JWKS, docs, UI, admin, tools) lands.
 - **Docs — the README parity snapshot now reflects the shipped surface.** It
   claimed every capability as implemented, including an admin router that does
   not exist; each row now says what is mounted, what is only a building block,

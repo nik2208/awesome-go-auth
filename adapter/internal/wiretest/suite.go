@@ -2,6 +2,8 @@ package wiretest
 
 import (
 	"context"
+	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -131,6 +133,123 @@ var openAPIPathParam = regexp.MustCompile(`\{[^/]+\}`)
 // resolves to something real.
 const openAPIProbeSegment = "probe"
 
+// openAPIPrefixes are the mount prefixes every spec-versus-mount comparison
+// runs under: the default, and a non-default one so the spec's paths track the
+// mount instead of hardcoding /auth.
+var openAPIPrefixes = []string{"", "/api/auth"}
+
+func openAPIPrefixName(prefix string) string {
+	if prefix == "" {
+		return "default prefix"
+	}
+	return prefix
+}
+
+// probeConfig is everything an OpenAPI probe env is built from. The harness
+// fills it with the base configuration; a conditional route set's configure
+// hook edits it before the env is mounted.
+type probeConfig struct {
+	// Mount is the adapter under test. A set leaves it alone: the routes a set
+	// declares have to come from the adapter's own MountWithConfig, driven by
+	// HTTP and Opts, or the suite ends up checking wiretest instead of the
+	// adapter. It is a field only so the suite's own test can stand in a fake
+	// route (see suite_test.go).
+	Mount Mounter
+	// HTTP is the wire configuration the adapter is mounted with. APIPrefix
+	// belongs to the harness: a set that changes it is reported, not honoured.
+	HTTP auth.HTTPConfig
+	// Opts are handed to auth.New after the suite's defaults, which is how a set
+	// wires a service the way a host application would (an IdP for JWKS, say).
+	Opts []auth.Option
+}
+
+// conditionalRouteSet is a group of routes an adapter mounts only under some
+// configuration, paired with the OpenAPIInfo flags that make
+// GenerateOpenAPISpec describe them. documentedRoutes is the unconditional
+// base; a set is what one configuration adds on top of it.
+type conditionalRouteSet struct {
+	// name labels the subtest and every failure message.
+	name string
+	// configure turns the set on by editing the probe config the env is built
+	// from — a flag on HTTP, an Option appended to Opts.
+	configure func(*probeConfig)
+	// routes is the operation set the configuration adds, relative to the mount
+	// prefix and in the shape of documentedRoutes. A route already in the base
+	// set cannot be listed here: it would be conditional in name only.
+	routes map[string]string
+	// spec returns the OpenAPIInfo whose flags make GenerateOpenAPISpec include
+	// routes. APIPrefix is filled in by the harness.
+	spec func() auth.OpenAPIInfo
+}
+
+// conditionalRoutes is the registry of route sets that exist only under a
+// configuration. testOpenAPI holds each registered set to three things: with
+// the set configured, the spec generated from set.spec() and the mounted
+// routes agree in both directions on documentedRoutes ∪ set.routes; without
+// it, the base spec and mount still agree on documentedRoutes alone; and every
+// route of the set answers 404 or 405 in that base env, so a route cannot
+// quietly become unconditional without moving to documentedRoutes.
+//
+// Empty for now: nothing the adapters mount today is conditional, and
+// OpenAPIInfo has no flag to switch on. The mechanism is exercised with a fake
+// set in suite_test.go until the first real one (JWKS, docs, UI, admin, tools)
+// registers here.
+var conditionalRoutes []conditionalRouteSet
+
+// failureReporter is the slice of testing.T the OpenAPI checks report through.
+// It is an interface so suite_test.go can record failures instead of raising
+// them and assert on their text.
+type failureReporter interface {
+	Errorf(format string, args ...any)
+}
+
+// openAPIHarness is what testOpenAPI runs. Its parts are fields so the suite's
+// own test can substitute a fake set, a generator that knows the fake's paths
+// and a recording reporter; the adapter suites reach it only through
+// testOpenAPI.
+type openAPIHarness struct {
+	mount    Mounter
+	sets     []conditionalRouteSet
+	generate func(auth.OpenAPIInfo) map[string]any
+	// report receives every assertion failure; nil means the subtest's own T.
+	report failureReporter
+}
+
+func (h openAPIHarness) reporter(t *testing.T) failureReporter {
+	if h.report != nil {
+		return h.report
+	}
+	return t
+}
+
+// baseConfig is the probe configuration with no conditional set applied.
+func (h openAPIHarness) baseConfig(prefix string) probeConfig {
+	cfg := auth.DefaultHTTPConfig()
+	cfg.APIPrefix = prefix
+	return probeConfig{
+		Mount: h.mount,
+		HTTP:  cfg,
+		// The OAuth routes answer 404 for a provider nobody configured, which is
+		// indistinguishable from "not mounted" at this level. Configuring a
+		// provider named after the path-parameter substitution tells the two apart.
+		Opts: []auth.Option{auth.WithOAuth(auth.OAuthWiring{
+			Service: auth.NewOAuthService(auth.OAuthProvider{
+				Name:         openAPIProbeSegment,
+				ClientID:     "probe-client",
+				ClientSecret: "probe-secret",
+				RedirectURL:  "https://api.example.com/auth/oauth/" + openAPIProbeSegment + "/callback",
+				AuthURL:      "https://provider.example.com/authorize",
+				TokenURL:     "https://provider.example.com/token",
+				UserInfoURL:  "https://provider.example.com/userinfo",
+			}),
+			LinkedAccounts: auth.NewMemoryLinkedAccounts(),
+			PendingLinks:   auth.NewMemoryPendingLinks(),
+			SiteURL:        "https://app.example.com",
+			TenantID:       testTenant,
+		})},
+	}
+}
+
 // testOpenAPI holds the generated spec to the routes that exist.
 //
 // Every documented operation is replayed against the mounted adapter and must
@@ -138,85 +257,190 @@ const openAPIProbeSegment = "probe"
 // this it rots silently: before this test existed openapi.go advertised
 // /auth/totp/setup, /auth/sessions, /auth/forgot-password and
 // /auth/reset-password, none of which any adapter has ever mounted.
+//
+// The base configuration is compared against documentedRoutes; each set in
+// conditionalRoutes is then compared, configured, against the base plus its
+// own routes. See runOpenAPI.
 func testOpenAPI(t *testing.T, mount Mounter) {
-	// A non-default prefix as well, so the spec's paths track the mount instead
-	// of hardcoding /auth.
-	for _, prefix := range []string{"", "/api/auth"} {
-		name := "default prefix"
-		if prefix != "" {
-			name = prefix
-		}
-		t.Run(name, func(t *testing.T) {
-			cfg := auth.DefaultHTTPConfig()
-			cfg.APIPrefix = prefix
-			// The OAuth routes answer 404 for a provider nobody configured, which
-			// is indistinguishable from "not mounted" at this level. Configuring a
-			// provider named after the substitution below tells the two apart.
-			env := NewEnv(t, mount, cfg, auth.WithOAuth(auth.OAuthWiring{
-				Service: auth.NewOAuthService(auth.OAuthProvider{
-					Name:         openAPIProbeSegment,
-					ClientID:     "probe-client",
-					ClientSecret: "probe-secret",
-					RedirectURL:  "https://api.example.com/auth/oauth/" + openAPIProbeSegment + "/callback",
-					AuthURL:      "https://provider.example.com/authorize",
-					TokenURL:     "https://provider.example.com/token",
-					UserInfoURL:  "https://provider.example.com/userinfo",
-				}),
-				LinkedAccounts: auth.NewMemoryLinkedAccounts(),
-				PendingLinks:   auth.NewMemoryPendingLinks(),
-				SiteURL:        "https://app.example.com",
-				TenantID:       testTenant,
-			}))
+	runOpenAPI(t, openAPIHarness{mount: mount, sets: conditionalRoutes, generate: auth.GenerateOpenAPISpec})
+}
 
-			spec := auth.GenerateOpenAPISpec(auth.OpenAPIInfo{APIPrefix: prefix})
-			paths, ok := spec["paths"].(map[string]any)
-			if !ok {
-				t.Fatalf("spec has no paths object: %T", spec["paths"])
-			}
+// runOpenAPI is testOpenAPI with its inputs exposed.
+//
+// With no sets the walk is the base comparison alone, once per prefix. Each
+// set adds two things: in the base env, a check that none of its routes is
+// reachable; in its own env, built with configure applied, the two-direction
+// comparison of the spec set.spec() selects against documentedRoutes ∪
+// set.routes.
+func runOpenAPI(t *testing.T, h openAPIHarness) {
+	sets := wellFormedSets(h.reporter(t), h.sets)
 
-			mountPrefix := env.Config.Prefix()
-			seen := make(map[string]string, len(paths))
-			for path, item := range paths {
-				operations, ok := item.(map[string]any)
-				if !ok {
-					t.Errorf("path %q is not an object: %T", path, item)
-					continue
-				}
-				route, found := strings.CutPrefix(path, mountPrefix)
-				if !found {
-					t.Errorf("documented path %q is not under the mount prefix %q", path, mountPrefix)
-					continue
-				}
-				for method := range operations {
-					seen[route] = strings.ToUpper(method)
-
-					probe := openAPIPathParam.ReplaceAllString(path, openAPIProbeSegment)
-					req := httptest.NewRequest(strings.ToUpper(method), probe, stringReader("{}"))
-					req.Header.Set("Content-Type", "application/json")
-					rec := env.Do(req)
-					switch rec.Code {
-					case http.StatusNotFound, http.StatusMethodNotAllowed:
-						t.Errorf("%s %s is documented but not mounted (%d)", strings.ToUpper(method), probe, rec.Code)
-					}
-				}
-			}
-
-			for route, method := range documentedRoutes {
-				got, ok := seen[route]
-				if !ok {
-					t.Errorf("route %q is mounted but missing from the spec", route)
-					continue
-				}
-				if got != method {
-					t.Errorf("route %q is documented as %s, want %s", route, got, method)
-				}
-			}
-			for route := range seen {
-				if _, ok := documentedRoutes[route]; !ok {
-					t.Errorf("spec documents %q, which is not in documentedRoutes — add the route there or drop it from the spec", route)
-				}
+	for _, prefix := range openAPIPrefixes {
+		t.Run(openAPIPrefixName(prefix), func(t *testing.T) {
+			report := h.reporter(t)
+			pc := h.baseConfig(prefix)
+			env := NewEnv(t, pc.Mount, pc.HTTP, pc.Opts...)
+			checkOpenAPI(report, env, h.generate(auth.OpenAPIInfo{APIPrefix: prefix}), documentedRoutes, nil)
+			for _, set := range sets {
+				checkUnconfigured(report, env, set)
 			}
 		})
+	}
+
+	for _, set := range sets {
+		t.Run(set.name, func(t *testing.T) {
+			want := unionRoutes(documentedRoutes, set.routes)
+			for _, prefix := range openAPIPrefixes {
+				t.Run(openAPIPrefixName(prefix), func(t *testing.T) {
+					report := h.reporter(t)
+					pc := h.baseConfig(prefix)
+					base := pc.HTTP.Prefix()
+					set.configure(&pc)
+					if got := pc.HTTP.Prefix(); got != base {
+						report.Errorf("conditional set %q changed the mount prefix to %q, want %q — the prefix belongs to the harness; a set adds routes under it", set.name, got, base)
+						return
+					}
+					env := NewEnv(t, pc.Mount, pc.HTTP, pc.Opts...)
+					info := set.spec()
+					info.APIPrefix = prefix
+					checkOpenAPI(report, env, h.generate(info), want, &set)
+				})
+			}
+		})
+	}
+}
+
+// wellFormedSets reports every malformed set and returns the rest, so a
+// registry mistake is one failure naming the set rather than a cascade of
+// misleading route failures under it.
+func wellFormedSets(report failureReporter, sets []conditionalRouteSet) []conditionalRouteSet {
+	kept := make([]conditionalRouteSet, 0, len(sets))
+	names := make(map[string]bool, len(sets))
+	for _, set := range sets {
+		ok := true
+		fail := func(format string, args ...any) {
+			ok = false
+			report.Errorf(format, args...)
+		}
+		switch {
+		case set.name == "":
+			fail("a conditional set has no name")
+		case names[set.name]:
+			fail("conditional set %q is registered twice", set.name)
+		}
+		names[set.name] = true
+		if set.configure == nil {
+			fail("conditional set %q has no configure hook", set.name)
+		}
+		if set.spec == nil {
+			fail("conditional set %q has no spec hook", set.name)
+		}
+		if len(set.routes) == 0 {
+			fail("conditional set %q declares no routes", set.name)
+		}
+		for route := range set.routes {
+			if _, base := documentedRoutes[route]; base {
+				fail("conditional set %q redeclares %q, which is already in documentedRoutes", set.name, route)
+			}
+		}
+		if ok {
+			kept = append(kept, set)
+		}
+	}
+	return kept
+}
+
+func unionRoutes(base, extra map[string]string) map[string]string {
+	out := make(map[string]string, len(base)+len(extra))
+	maps.Copy(out, base)
+	maps.Copy(out, extra)
+	return out
+}
+
+// openAPIProbe builds the request that replays one documented operation. path
+// is the documented template, mount prefix included; its parameters are
+// substituted with openAPIProbeSegment so every router routes it.
+func openAPIProbe(method, path string) (probe string, req *http.Request) {
+	probe = openAPIPathParam.ReplaceAllString(path, openAPIProbeSegment)
+	req = httptest.NewRequest(method, probe, stringReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	return probe, req
+}
+
+// checkOpenAPI holds one generated spec to one mounted env in both directions:
+// every documented operation must be routed, and every route in want must be
+// documented with its method, with nothing else documented. set is nil for the
+// base configuration; otherwise every failure names it.
+func checkOpenAPI(report failureReporter, env *Env, spec map[string]any, want map[string]string, set *conditionalRouteSet) {
+	suffix, wantName := "", "documentedRoutes"
+	if set != nil {
+		suffix = fmt.Sprintf(" (conditional set %q)", set.name)
+		wantName = fmt.Sprintf("documentedRoutes or conditional set %q", set.name)
+	}
+
+	paths, ok := spec["paths"].(map[string]any)
+	if !ok {
+		report.Errorf("spec has no paths object: %T%s", spec["paths"], suffix)
+		return
+	}
+
+	mountPrefix := env.Config.Prefix()
+	seen := make(map[string]string, len(paths))
+	for path, item := range paths {
+		operations, ok := item.(map[string]any)
+		if !ok {
+			report.Errorf("path %q is not an object: %T%s", path, item, suffix)
+			continue
+		}
+		route, found := strings.CutPrefix(path, mountPrefix)
+		if !found {
+			report.Errorf("documented path %q is not under the mount prefix %q%s", path, mountPrefix, suffix)
+			continue
+		}
+		for method := range operations {
+			method = strings.ToUpper(method)
+			seen[route] = method
+
+			probe, req := openAPIProbe(method, path)
+			rec := env.Do(req)
+			switch rec.Code {
+			case http.StatusNotFound, http.StatusMethodNotAllowed:
+				report.Errorf("%s %s is documented but not mounted (%d)%s", method, probe, rec.Code, suffix)
+			}
+		}
+	}
+
+	for route, method := range want {
+		got, ok := seen[route]
+		if !ok {
+			report.Errorf("route %q is mounted but missing from the spec%s", route, suffix)
+			continue
+		}
+		if got != method {
+			report.Errorf("route %q is documented as %s, want %s%s", route, got, method, suffix)
+		}
+	}
+	for route := range seen {
+		if _, ok := want[route]; !ok {
+			report.Errorf("spec documents %q, which is not in %s — add the route there or drop it from the spec", route, wantName)
+		}
+	}
+}
+
+// checkUnconfigured proves a conditional set is conditional: in an env built
+// without its configure hook, each of its routes must answer 404 or 405. A
+// route reachable here has either become unconditional, in which case it
+// belongs in documentedRoutes, or is switched on by something other than the
+// set's configure.
+func checkUnconfigured(report failureReporter, env *Env, set conditionalRouteSet) {
+	for route, method := range set.routes {
+		probe, req := openAPIProbe(method, env.Config.Prefix()+route)
+		rec := env.Do(req)
+		switch rec.Code {
+		case http.StatusNotFound, http.StatusMethodNotAllowed:
+		default:
+			report.Errorf("%s %s of conditional set %q is reachable (%d) without the set configured — a conditional route must answer 404 or 405 in the base configuration; if it is unconditional now, move it to documentedRoutes", method, probe, set.name, rec.Code)
+		}
 	}
 }
 
