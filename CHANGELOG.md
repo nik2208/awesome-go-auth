@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Docs — the README parity snapshot now reflects the shipped surface.** It
+  claimed every capability as implemented, including an admin router that does
+  not exist; each row now says what is mounted, what is only a building block,
+  what is absent, and the milestone release that closes the gap.
+
 ## [0.3.1] - 2026-09-11
 
 A one-line patch for the shipped clients, cut so that consumers can pin a tag

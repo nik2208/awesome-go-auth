@@ -314,22 +314,39 @@ revision the whole contract was extracted from.
 
 ## Parity Snapshot vs `awesome-node-auth`
 
-| Capability | Status in `awesome-go-auth` | Notes |
-|------------|-----------------------------|-------|
-| Auth strategies (email/password, magic link, SMS OTP, TOTP 2FA, OAuth linking) | ✅ Implemented | OAuth + account linking in `oauth.go`. |
-| Token management (cookie/bearer, access/refresh rotation, secure cookies) | ✅ Implemented | Adapter HTTP supportano cookie e bearer; rotation attiva. |
-| Identity Provider (IdP) mode (RS256 + JWKS + resource server validation) | ✅ Implemented | OIDC IdP con discovery, authorize, token, userinfo e JWKS. |
-| Stateful sessions | ✅ Implemented | Revoca/rotation + `Config.SessionCheckOn` (`allcalls`/`refresh`/`none`). |
-| Dynamic email templates + UI i18n fallback | ✅ Implemented | Template mail + fallback i18n built-in. |
-| CSRF protection | ✅ Implemented | `CSRFMiddleware` cookie+header double-submit. |
-| Account management | ✅ Implemented | Register, `UpdateProfile`, `DeleteAccount`, password/email lifecycle. |
-| Account linking | ✅ Implemented | Pending link + linked account store. |
-| RBAC | ✅ Implemented | `RolesPermissionsStore` tenant-aware. |
-| Multi-tenancy | ✅ Implemented | `TenantStore` e membership utente↔tenant. |
-| Admin panel | ✅ Implemented | `ServeAdminUI()` embedded. |
-| Built-in UI + auth runtime (`auth.js`) | ✅ Implemented | `ServeAuthUI()` + `ServeAuthJS()`. |
-| Client libraries compatibility (Angular + Flutter) | ✅ Implemented | Cookie+CSRF browser e bearer per native client. |
-| Event-driven tooling (event bus, SSE, inbound/outbound webhooks, telemetry, notify channels) | ✅ Implemented | Event bus, SSE, webhooks, telemetry, notify. |
-| API keys (M2M) | ✅ Implemented | `APIKeyService` + middleware API key. |
-| OpenAPI / Swagger docs | ✅ Implemented | `GenerateOpenAPISpec`. |
-| MCP server (`awesome-node-auth-mcp-server`) | ➖ Out of scope | Fuori scope di parity per questa libreria. |
+Status as of v0.3.1, verified against the code rather than the intent. ✅ means the
+surface is mounted by all four adapters and covered by the wiretest conformance
+suite; ⚠️ means the building blocks exist but a caller cannot get the reference's
+behaviour without writing code; ❌ means absent. The milestone column names the
+release that closes the gap.
+
+| Capability | Status in `awesome-go-auth` | Notes | Closes in |
+|------------|-----------------------------|-------|-----------|
+| Auth strategies (email/password, magic link, SMS OTP, TOTP 2FA) | ✅ Implemented | Every route mounted on net/http, chi, gin and echo; delivery through `Config.Send*` senders. | — |
+| Token management (cookie/bearer, access/refresh rotation, secure cookies) | ✅ Implemented | HS256 JWS, `X-Auth-Strategy: bearer`, rotation on refresh, `__Host-`/`__Secure-`/bare cookie policy. | — |
+| Stateful sessions | ✅ Implemented | Revocation, rotation, `Config.SessionCheckOn` (`allcalls`/`refresh`/`none`). | — |
+| CSRF protection | ✅ Implemented | `CSRFMiddleware`, double-submit cookie + header, exemption table pinned to the reference. | — |
+| Account management | ✅ Implemented | Register, `UpdateProfile`, `DeleteAccount`, password and email lifecycle. | — |
+| OAuth login + account linking | ✅ Implemented | Signed state, PKCE, single-use nonce; Google and GitHub presets, generic providers by hand. No provisioning policy or `profileMap` yet. | v0.6.0 |
+| Dynamic email templates + UI i18n fallback | ⚠️ Partial | Built-in en/it templates only; no template store, no override, no site-URL allowlist for links. | v0.4.0 |
+| Custom token claims | ⚠️ Partial | `Config.BuildTokenClaims` hook only; no static claim map, no claims webhook. | v0.5.0 |
+| Identity Provider (IdP) mode (RS256 + JWKS + resource-server validation) | ⚠️ Partial | Discovery, authorize, token and userinfo endpoints exist, but the key pair is generated per process with a random `kid`, JWKS is served at `<base>/jwks` rather than `/.well-known/jwks.json`, authorization codes live in process memory and there is no RS256 verifier for resource servers. | v0.7.0 |
+| RBAC | ⚠️ Service-level | `RolesPermissionsStore` and service helpers; no HTTP surface (the admin router is absent). | v0.9.0 |
+| Multi-tenancy | ⚠️ Service-level | `TenantStore` and membership helpers; no HTTP surface. | v0.9.0 |
+| API keys (M2M) | ⚠️ Service-level | `APIKeyService` + `APIKeyMiddleware`; no management routes. | v0.9.0 |
+| Admin panel | ❌ Absent | `ServeAdminUI()` serves a static page; none of the reference's admin routes exist, and no admin guard. | v0.9.0 |
+| Built-in UI + auth runtime (`auth.js`) | ⚠️ Partial | `ServeAuthUI()`/`ServeAuthJS()` serve hand-written assets, not the reference's; no `GET /ui/config`, no branding. | v0.8.0 |
+| OpenAPI / Swagger docs | ⚠️ Partial | `GenerateOpenAPISpec` returns the document; nothing serves it. | v0.8.0 |
+| Event-driven tooling (event bus, SSE, inbound/outbound webhooks, telemetry, notify) | ⚠️ Primitives only | `EventBus`, `SseHub`, `WebhookDispatcher` and `TelemetryStore` exist, but the service publishes no events, there is no tools router, and the outbound webhook headers differ from the reference. | v0.10.0 |
+| Client libraries compatibility (Angular + Flutter) | ✅ For the auth surface | Verified by [awesome-lambda-auth](https://github.com/nik2208/awesome-lambda-auth) with both official clients unmodified against a live stack. | — |
+| Rate limiting | ➖ Not a library concern | The reference ships none either; it is the integrator's middleware. | — |
+| MCP server (`awesome-node-auth-mcp-server`) | ➖ Out of scope | Out of parity scope for this library. | — |
+
+### Roadmap
+
+The gaps above close in order, one minor release per milestone: v0.4.0 email
+flows (site URLs, template store, delivery webhook), v0.5.0 2FA knobs and claims,
+v0.6.0 OAuth provisioning, v0.7.0 IdP key injection and RS256 verification,
+v0.8.0 settings store, `/ui/config`, vendored reference UI and served docs,
+v0.9.0 the admin router, v0.10.0 the tools router and event plane. v1.0.0 removes
+the shims those releases deprecate.
