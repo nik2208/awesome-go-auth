@@ -94,12 +94,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   structs gained camelCase JSON tags for it (additive; nothing serialised them
   before), and `DeliveryKind*` / `DeliveryWebhookRequest` name the vocabulary for
   a receiver written in Go.
+- **`AuthCodeStore` — the OIDC IdP's authorization codes are now a store
+  seam.** `AuthCodeStore{SaveCode, ConsumeCode}` persists codes between
+  `/authorize` and `/token`; `ConsumeCode` is single-use and treats an expired
+  record as absent, answering `ErrInvalidCode` (reused: the sentinel already
+  means "unknown, consumed or expired code" and `/token` writes its own
+  `invalid_grant`, so no new mapping was needed). `MemoryAuthCodeStore` /
+  `NewMemoryAuthCodeStore()` is the in-process implementation. `IDPConfig.Codes`
+  selects the store (nil keeps today's in-process behaviour) and
+  `IDPConfig.CodeTTL` replaces the hardcoded five minutes (zero keeps it). The
+  `AuthCode` record carries `RedirectURI`, `Scope`, `CodeChallenge` and
+  `CodeChallengeMethod` as data so a store written now needs no schema change
+  when PKCE verification lands; nothing checks them yet.
+- **Codes are stored hashed.** The client still receives the 24-byte random
+  code; the store is keyed by its SHA-256 (`hashToken`), so a dump of the
+  backing table cannot be redeemed at `/token`, the same rule refresh, reset
+  and magic-link tokens already follow.
+- **`idp_test.go`.** The IdP had no tests. The store is covered for
+  save/consume-once, expiry and 32 concurrent consumers under `-race`; the
+  endpoints are walked end to end over `httptest` (`/authorize` → `/token` →
+  `/userinfo`, replay refused) through an injected `AuthCodeStore`.
 
 ### Changed
 - **Docs — the README parity snapshot now reflects the shipped surface.** It
   claimed every capability as implemented, including an admin router that does
   not exist; each row now says what is mounted, what is only a building block,
   what is absent, and the milestone release that closes the gap.
+- **The IdP no longer keeps authorization codes in a process-local map.**
+  `/authorize` saves through `IDPConfig.Codes` and `/token` consumes through
+  it; the `sync.Map` is gone. A deployment where the two requests can land on
+  different processes — serverless, or more than one instance — must supply a
+  shared store or every code minted by a sibling process is `invalid_grant`.
+  Single-process callers that never set `Codes` see no change.
+- **`/token` binds the code to the client redeeming it.** A code issued to one
+  `client_id` redeemed with another client's credentials is now
+  `invalid_grant` and the attempt consumes the code (RFC 6749 §4.1.3). The map
+  never checked this.
 
 ### Deprecated
 - **`HTTPMailerTransport` and `NewHTTPMailerTransport`.** They POST `MailMessage`

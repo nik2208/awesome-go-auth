@@ -231,8 +231,11 @@ func TestErrorMapping(t *testing.T) {
 func TestUnmappedSentinelsAreDeliberate(t *testing.T) {
 	routeSpecific := map[error]string{
 		// 401 "Invalid or expired SMS code" on /sms/verify, 401 "Invalid TOTP
-		// code" on /2fa/verify — both code-less, both route literals.
-		ErrInvalidCode: "wire-contract §3 /sms/verify and /2fa/verify",
+		// code" on /2fa/verify — both code-less, both route literals. The OIDC
+		// /token route (idp.go, off the reference surface) reuses it for an
+		// unknown, consumed or expired authorization code and writes RFC 6749's
+		// invalid_grant itself.
+		ErrInvalidCode: "wire-contract §3 /sms/verify and /2fa/verify; OIDC /token invalid_grant",
 		// Admin-router routes, which emit plain {"error": …} bodies.
 		ErrTenantNotFound: "wire-contract §5 tenants",
 		ErrRoleNotFound:   "wire-contract §5 roles",

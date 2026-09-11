@@ -12,15 +12,31 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 )
+
+// defaultAuthCodeTTL is how long an authorization code stays redeemable when
+// IDPConfig.CodeTTL is unset. Five minutes is the value the process-local map
+// hardcoded before the store seam existed, so existing callers see no change.
+const defaultAuthCodeTTL = 5 * time.Minute
 
 // IDPConfig configures the OIDC Identity Provider.
 type IDPConfig struct {
 	Issuer         string
 	AccessTokenTTL time.Duration
 	IDTokenTTL     time.Duration
+
+	// Codes holds authorization codes between /authorize and /token. Nil
+	// selects NewMemoryAuthCodeStore, which is correct only while both
+	// endpoints are served by the same process: a serverless runtime or any
+	// deployment with more than one instance must supply a shared
+	// implementation, or /token will answer invalid_grant for every code
+	// minted by a sibling process. See AuthCodeStore for the contract.
+	Codes AuthCodeStore
+
+	// CodeTTL bounds how long a code issued by /authorize can be redeemed at
+	// /token. Zero (or negative) resolves to defaultAuthCodeTTL, five minutes.
+	CodeTTL time.Duration
 }
 
 // IDPClient represents a registered OIDC client application.
@@ -38,18 +54,17 @@ type IDP struct {
 	privateKey *rsa.PrivateKey
 	keyID      string
 	clients    map[string]IDPClient
-	codes      sync.Map // code -> idpCode
-}
-
-type idpCode struct {
-	UserID    string
-	TenantID  string
-	ClientID  string
-	Nonce     string
-	ExpiresAt time.Time
+	// codes is cfg.Codes with the nil default resolved. Every code handed to a
+	// client is looked up here by hashToken(code); nothing in the IDP holds a
+	// code or its record after the handler returns, which is what lets
+	// /authorize and /token run on different processes.
+	codes AuthCodeStore
 }
 
 // NewIDP creates a new OIDC IDP backed by the given auth service.
+//
+// A nil cfg.Codes falls back to an in-process MemoryAuthCodeStore; see
+// IDPConfig.Codes for when that is not enough.
 func NewIDP(cfg IDPConfig, authSvc *Service, clients ...IDPClient) (*IDP, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -63,7 +78,19 @@ func NewIDP(cfg IDPConfig, authSvc *Service, clients ...IDPClient) (*IDP, error)
 	for _, c := range clients {
 		cm[c.ClientID] = c
 	}
-	return &IDP{cfg: cfg, authSvc: authSvc, privateKey: key, keyID: kid, clients: cm}, nil
+	codes := cfg.Codes
+	if codes == nil {
+		codes = NewMemoryAuthCodeStore()
+	}
+	return &IDP{cfg: cfg, authSvc: authSvc, privateKey: key, keyID: kid, clients: cm, codes: codes}, nil
+}
+
+// codeTTL resolves IDPConfig.CodeTTL, applying the five-minute default.
+func (idp *IDP) codeTTL() time.Duration {
+	if idp.cfg.CodeTTL <= 0 {
+		return defaultAuthCodeTTL
+	}
+	return idp.cfg.CodeTTL
 }
 
 // RegisterHandlers mounts OIDC endpoints on the given mux.
@@ -148,11 +175,25 @@ func (idp *IDP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		idp.codes.Store(code, idpCode{
-			UserID: user.ID, TenantID: user.TenantID,
-			ClientID: clientID, Nonce: nonce,
-			ExpiresAt: time.Now().Add(5 * time.Minute),
+		// The client gets the random code; the store gets only its hash, so
+		// a leaked store dump cannot be redeemed at /token. The PKCE and
+		// scope parameters are recorded as data for a later PR to verify.
+		err = idp.codes.SaveCode(r.Context(), AuthCode{
+			CodeHash:            hashToken(code),
+			UserID:              user.ID,
+			TenantID:            user.TenantID,
+			ClientID:            clientID,
+			Nonce:               nonce,
+			RedirectURI:         canonicalRedirect,
+			CodeChallenge:       q.Get("code_challenge"),
+			CodeChallengeMethod: q.Get("code_challenge_method"),
+			Scope:               q.Get("scope"),
+			ExpiresAt:           time.Now().Add(idp.codeTTL()),
 		})
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 		// Use the canonical (server-controlled) URI, not the raw user input.
 		redir, err := url.Parse(canonicalRedirect)
 		if err != nil {
@@ -200,13 +241,20 @@ func (idp *IDP) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, ok := idp.codes.LoadAndDelete(code)
-	if !ok {
+	// ConsumeCode is destructive: whichever request reaches the store first
+	// gets the record and every later one, on any process, gets ErrInvalidCode.
+	// That is the whole single-use guarantee, so nothing is cached here. The
+	// expiry re-check is belt and braces against a store that does not honour
+	// the "expired is absent" clause of the AuthCodeStore contract.
+	meta, err := idp.codes.ConsumeCode(r.Context(), hashToken(code))
+	if err != nil || time.Now().After(meta.ExpiresAt) {
 		http.Error(w, "invalid_grant", http.StatusBadRequest)
 		return
 	}
-	meta := raw.(idpCode)
-	if time.Now().After(meta.ExpiresAt) {
+	// RFC 6749 §4.1.3: the code must have been issued to the client now
+	// redeeming it. The map never checked this; the record carries ClientID
+	// precisely so the store can be asked.
+	if meta.ClientID != clientID {
 		http.Error(w, "invalid_grant", http.StatusBadRequest)
 		return
 	}

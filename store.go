@@ -101,6 +101,60 @@ type RolesPermissionsStore interface {
 	UserHasPermission(ctx context.Context, userID, permission, tenantID string) (bool, error)
 }
 
+// AuthCode is one OIDC authorization code as the IDP stores it between
+// /authorize and /token. CodeHash is hashToken of the value the client was
+// given; the clear-text code is never persisted. RedirectURI is the canonical
+// entry from IDPClient.RedirectURIs that the authorization request matched.
+// CodeChallenge, CodeChallengeMethod and Scope are recorded from the
+// authorization request as plain data: this package does not verify them yet,
+// but carrying them now means a store written today needs no schema change
+// when /token starts to.
+type AuthCode struct {
+	CodeHash            string
+	UserID              string
+	TenantID            string
+	ClientID            string
+	Nonce               string
+	RedirectURI         string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	Scope               string
+	ExpiresAt           time.Time
+}
+
+// AuthCodeStore persists OIDC authorization codes for the IDP.
+//
+// Design note. The IDP endpoints are net-new relative to the TypeScript
+// reference, which ships no authorization server, so there is no wire contract
+// to cite; the shape below is chosen for the runtimes this library targets.
+//
+//   - The store is keyed by hashToken(code), never by the code itself. The
+//     client carries a 24-byte random token in the redirect; the store sees
+//     only its SHA-256, so a dump of the backing table cannot be redeemed at
+//     /token. This matches how refresh tokens, reset tokens and magic links
+//     are already held.
+//   - ConsumeCode is the only read and it is destructive: it returns a record
+//     exactly once and answers ErrInvalidCode for every later call with the
+//     same hash, including concurrent ones. That is the single-use guarantee
+//     /token relies on. It used to come from a process-local map, which holds
+//     only while /authorize and /token run in the same process; a serverless
+//     or multi-instance deployment must supply a shared implementation via
+//     IDPConfig.Codes, and its ConsumeCode must be atomic (a conditional
+//     delete, a row lock, or a DEL-and-check pipeline, not a read followed by a
+//     delete).
+//   - An expired record is absent: ConsumeCode returns ErrInvalidCode for it
+//     and is free to delete it. Implementations may also sweep expired rows on
+//     SaveCode or on a schedule. The handler re-checks ExpiresAt regardless.
+//   - SaveCode overwrites an existing record with the same CodeHash. The codes
+//     are random, so in practice this never happens; the rule exists so an
+//     implementation need not detect the collision.
+//   - Errors other than ErrInvalidCode are surfaced by /authorize and /token as
+//     plain 500s; the store is not expected to map them.
+type AuthCodeStore interface {
+	SaveCode(ctx context.Context, code AuthCode) error
+	ConsumeCode(ctx context.Context, codeHash string) (AuthCode, error)
+}
+
 // TenantStore manages tenants and user memberships.
 type TenantStore interface {
 	CreateTenant(ctx context.Context, tenant Tenant) (Tenant, error)

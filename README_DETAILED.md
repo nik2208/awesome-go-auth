@@ -816,8 +816,52 @@ type IDPConfig struct {
     Issuer         string
     AccessTokenTTL time.Duration
     IDTokenTTL     time.Duration
+    Codes          AuthCodeStore // nil → NewMemoryAuthCodeStore()
+    CodeTTL        time.Duration // 0 → 5 minutes
 }
 ```
+
+### Authorization-code storage
+
+Codes issued by `authorize` and redeemed by `token` live in an `AuthCodeStore`:
+
+```go
+type AuthCode struct {
+    CodeHash                           string // hashToken of the code the client holds
+    UserID, TenantID, ClientID, Nonce  string
+    RedirectURI                        string
+    CodeChallenge, CodeChallengeMethod string // recorded, not yet verified
+    Scope                              string
+    ExpiresAt                          time.Time
+}
+
+type AuthCodeStore interface {
+    SaveCode(ctx context.Context, code AuthCode) error
+    ConsumeCode(ctx context.Context, codeHash string) (AuthCode, error)
+}
+```
+
+The contract, in full in the `AuthCodeStore` doc comment:
+
+- The store never sees the code itself, only `hashToken(code)`; a leaked table
+  cannot be replayed at `token`.
+- `ConsumeCode` is destructive and single-use: it returns a record exactly once
+  and `ErrInvalidCode` on every later call for the same hash, including
+  concurrent ones. A shared implementation must make this atomic (conditional
+  delete, row lock, `DEL`-and-check), not a read followed by a delete.
+- An expired record is absent: `ConsumeCode` returns `ErrInvalidCode` and may
+  drop it. `token` re-checks `ExpiresAt` regardless.
+
+`IDPConfig.Codes` left nil selects `NewMemoryAuthCodeStore()`, an in-process
+map behind a mutex that sweeps expired entries on each save. That is correct
+only while `authorize` and `token` are served by the same process. **A
+serverless runtime or any deployment with more than one instance must supply a
+shared `AuthCodeStore`** (Redis, a database table, DynamoDB with a conditional
+delete) or `token` answers `invalid_grant` for every code minted by a sibling
+process.
+
+`token` also refuses a code redeemed by a `client_id` other than the one it was
+issued to, and consumes it in the process.
 
 ### `IDPClient`
 
