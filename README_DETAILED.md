@@ -8,26 +8,27 @@ Complete reference for every public type, interface, function, and option in the
 
 1. [Core Service](#core-service)
 2. [Configuration](#configuration)
-3. [Models](#models)
-4. [Store Interfaces](#store-interfaces)
-5. [In-Memory Stores](#in-memory-stores)
-6. [Auth Functional Options](#auth-functional-options)
-7. [Custom Claims](#custom-claims)
-8. [OAuth 2.0 + Account Linking](#oauth-20--account-linking)
-9. [SSE (Server-Sent Events)](#sse-server-sent-events)
-10. [Webhooks](#webhooks)
-11. [Telemetry](#telemetry)
-12. [Mailer](#mailer)
-13. [Delivery](#delivery)
-14. [OIDC IDP](#oidc-idp)
-15. [MCP Server (out of parity scope)](#mcp-server-out-of-parity-scope)
-16. [OpenAPI](#openapi)
-17. [Embedded UI](#embedded-ui)
-18. [API Keys](#api-keys)
-19. [Event Bus](#event-bus)
-20. [HTTP Adapters](#http-adapters)
-21. [Security Helpers](#security-helpers)
-22. [Errors](#errors)
+3. [Runtime settings](#runtime-settings)
+4. [Models](#models)
+5. [Store Interfaces](#store-interfaces)
+6. [In-Memory Stores](#in-memory-stores)
+7. [Auth Functional Options](#auth-functional-options)
+8. [Custom Claims](#custom-claims)
+9. [OAuth 2.0 + Account Linking](#oauth-20--account-linking)
+10. [SSE (Server-Sent Events)](#sse-server-sent-events)
+11. [Webhooks](#webhooks)
+12. [Telemetry](#telemetry)
+13. [Mailer](#mailer)
+14. [Delivery](#delivery)
+15. [OIDC IDP](#oidc-idp)
+16. [MCP Server (out of parity scope)](#mcp-server-out-of-parity-scope)
+17. [OpenAPI](#openapi)
+18. [Embedded UI](#embedded-ui)
+19. [API Keys](#api-keys)
+20. [Event Bus](#event-bus)
+21. [HTTP Adapters](#http-adapters)
+22. [Security Helpers](#security-helpers)
+23. [Errors](#errors)
 
 ---
 
@@ -138,6 +139,7 @@ type Config struct {
     SendEmailChange       EmailChangeSender             // optional; POST /auth/change-email/request
     SendEmailChanged      EmailChangedSender            // optional; the notice POST /auth/change-email/confirm mails to the old address
     Templates             TemplateStore                 // optional; run-time overrides of the built-in mail templates — see Mailer
+    Settings              SettingsStore                 // optional; the admin-flipped runtime settings — see Runtime settings
     SiteURLs              []string                      // first = canonical link base; all = origin allowlist — see Delivery
     Logger                func(format string, args ...any)
 }
@@ -205,6 +207,146 @@ Returns a `Config` with sensible defaults.
 ### `(Config).validate() error`
 
 Called internally; ensures secret length >= 32 and TTLs > 0.
+
+---
+
+## Runtime settings
+
+`Config` is what a deployment decides at start-up. `SettingsStore` is the other
+half: the handful of global switches an administrator flips at run time through
+the reference's admin Control panel, the reference's `ISettingsStore`
+(`src/interfaces/settings-store.interface.ts:28-40`, wired as
+`routerOptions.settingsStore`, `src/router/auth.router.ts:92`).
+
+```go
+type SettingsStore interface {
+    GetSettings(ctx context.Context) (AuthSettings, error)                       // zero value = nothing configured
+    UpdateSettings(ctx context.Context, patch AuthSettings) (AuthSettings, error) // shallow merge; returns what is stored
+}
+
+type AuthSettings struct {
+    RequireEmailVerification             *bool       `json:"requireEmailVerification,omitempty"`
+    EmailVerificationMode                *string     `json:"emailVerificationMode,omitempty"`               // none|lazy|strict
+    LazyEmailVerificationGracePeriodDays *int        `json:"lazyEmailVerificationGracePeriodDays,omitempty"` // 7 when unset
+    Require2FA                           *bool       `json:"require2FA,omitempty"`
+    EnabledWebhookActions                []string    `json:"enabledWebhookActions,omitempty"`
+    UI                                   *UISettings `json:"ui,omitempty"`
+}
+
+type UISettings struct {
+    PrimaryColor   *string `json:"primaryColor,omitempty"`
+    SecondaryColor *string `json:"secondaryColor,omitempty"`
+    LogoURL        *string `json:"logoUrl,omitempty"`
+    SiteName       *string `json:"siteName,omitempty"`
+    LogoPath       *string `json:"logoPath,omitempty"`
+    BgColor        *string `json:"bgColor,omitempty"`
+    BgImage        *string `json:"bgImage,omitempty"`
+    CardBg         *string `json:"cardBg,omitempty"`
+}
+```
+
+`MemorySettingsStore` (`NewMemorySettingsStore()`) is the in-memory
+implementation: safe for concurrent use, copies in and out.
+`WithSettingsStore(store)` wires it (`Config.Settings`); without one nothing
+changes, exactly as in the reference, which skips the settings check altogether
+when no store is configured (`auth.router.ts:890`).
+
+### What is consulted
+
+One setting, on one route. `Require2FA` is read by `(*Auth).TwoFactorPolicy(ctx)`
+and `POST /auth/2fa/disable` refuses on it with
+`403 {"error":"Cannot disable 2FA: required by system policy","code":"2FA_REQUIRED"}`
+— the reference's answer, from the same check
+(`auth.router.ts:890-896`). The route checks the per-user `User.Require2FA` flag
+first and answers `403 ... "required for your account"` for that one
+(`:884-888`), as the reference does.
+
+```go
+store := auth.NewMemorySettingsStore()
+required := true
+_, _ = store.UpdateSettings(ctx, auth.AuthSettings{Require2FA: &required})
+a, err := auth.New(auth.WithSettingsStore(store))
+```
+
+`TwoFactorPolicy` is `Config.Require2FA || settings.require2FA`. The static term
+is this port's own — the reference has no config-level `require2FA` anywhere,
+which is a wire difference, registered as the deviation
+`config-require2fa-is-a-system-policy-term` in [README.md](README.md) — and it is
+checked first, so a deployment that already requires the factor never
+pays for a store read. A store that cannot answer is an error, and the route
+answers `500 {"error":"Internal server error"}` with no `code`: failing closed,
+and the same status the reference produces when its `getSettings` throws
+(`handleError`, `auth.router.ts:899-901` and `:189-195`). The error is logged
+through `Config.Logger` before that body goes out, since the body carries none of
+it — as the reference logs it in `handleError` (`:193`).
+
+### What is deliberately not consulted
+
+`RequireEmailVerification`, `EmailVerificationMode` and
+`LazyEmailVerificationGracePeriodDays` are stored, returned and never read by
+login. That is the reference's behaviour, not a gap here: no route that decides a
+login reads the store there either — its local strategy reads the static
+`config.emailVerificationMode` (`src/strategies/local/local.strategy.ts:32-35`).
+The admin UI writes the keys and displays them back; nothing enforces them. It is
+catalogued upstream as reference-issues N36, and reproducing it is the point — a
+port that quietly enforced these would refuse logins the reference allows, and
+the family's clients are pinned to the reference. Use
+`Config.EmailVerificationMode` for the knob that does decide a login; see
+[`EmailVerificationMode`](#emailverificationmode).
+
+There is no deviation entry for any of this, because there is no wire
+difference: every route this port serves answers what the reference answers for
+the same stored settings.
+
+`EnabledWebhookActions` and `UI` are stored for surfaces that have not landed yet
+and are read by neither today. Both have a reader in the reference, and both sit
+outside the login path:
+
+- `GET <prefix>/ui/config` reads the `ui` block for branding
+  (`src/router/ui.router.ts:99` and `:126-133`), mounted by `createAuthRouter`
+  itself when `config.ui.enabled` (`auth.router.ts:1639-1648`).
+- The tools router reads `enabledWebhookActions` as the global allowlist for the
+  inbound-webhook sandbox (`src/router/tools.router.ts:261-262`) — and swallows a
+  store failure (`.catch(() => ({}))`), i.e. it fails **open**, where this port
+  fails closed on `/2fa/disable`. Worth knowing before that router is ported.
+
+### The merge rule
+
+`UpdateSettings` applies the patch as the reference's shallow spread,
+`merged = {...current, ...settings}` — the JSDoc example at
+`settings-store.interface.ts:20-24` and the interface comment at `:36-38`,
+"Settings not present in the input are left untouched". A `nil` field keeps what
+is stored; a set field replaces it. `MergeSettings(current, patch)` is that rule,
+exported so a database-backed store applies the same one.
+
+The reference's `src/` ships no `ISettingsStore` implementation to compare
+against — `src/stores/` holds only `memory-template.store.ts`. The
+implementations live beside it and all spread the same way; the closest to this
+one is `examples/in-memory-user-store.ts:266-268`,
+`this.settings = { ...this.settings, ...updates }`.
+
+Shallow is the operative word, and it bites on `UI`: that is one key of the
+spread, so a patch carrying a `UI` replaces the stored block **whole** — the
+fields it does not name are dropped, not preserved. The reference depends on
+this: its admin `PATCH /admin/api/settings/ui` reads the current settings, merges
+the `ui` sub-object itself and writes the merged block back
+(`admin.router.ts:979-981`), which it would have no reason to do if the store
+merged it. To change one colour, read, merge, write. `EnabledWebhookActions`
+follows the same rule as a whole value — `nil` keeps, and a non-`nil` slice
+replaces, an empty one included, which is how every action is switched off.
+
+That last distinction has to survive an encoder, and `omitempty` on a `[]string`
+would not carry it: it drops the empty slice as well as the `nil` one, so a store
+that persists `AuthSettings` as JSON would write the cleared list as an absent
+key, read it back as `nil`, and the next merge would put the old list back.
+`AuthSettings.MarshalJSON` encodes that one field through a pointer instead, so
+`nil` stays absent and a cleared list is written as `[]` — which is what
+`JSON.stringify` emits in the reference. Nothing is needed on the way in:
+`encoding/json` already decodes `[]` into a non-`nil` empty slice.
+
+The reference's `updateSettings` returns `void` and leaves the caller to read
+the result back; this one returns what is stored afterwards, as `TemplateStore`
+does.
 
 ---
 
@@ -350,6 +492,7 @@ Pass to `auth.New(...)`:
 | `WithEmailChangeSender(EmailChangeSender)` | Deliver email-change tokens to the new address — see [Delivery](#delivery) |
 | `WithEmailChangedSender(EmailChangedSender)` | Deliver the email-changed notice to the old address — see [The email-changed notice](#the-email-changed-notice) |
 | `WithTemplateStore(TemplateStore)` | Run-time overrides of the built-in mail templates — see [`TemplateStore` interface](#templatestore-interface) |
+| `WithSettingsStore(SettingsStore)` | Global settings an administrator flips at run time; only `require2FA` is acted on — see [Runtime settings](#runtime-settings) |
 | `WithSiteURLs(urls ...string)` | Front-end base URLs: the first is the canonical link base, all are the origin allowlist — see [Per-request link base and language](#per-request-link-base-and-language) |
 | `WithLogger(func)` | Logging callback |
 
@@ -1510,7 +1653,7 @@ Implements `http.Handler`. Handles JSON-RPC 2.0 POST requests.
 **Available tools:**
 | Tool | Description |
 |------|-------------|
-| `auth_get_config` | Returns issuer, TTLs, feature flags |
+| `auth_get_config` | Returns issuer, TTLs, feature flags. `require_2fa` is the static `Config.Require2FA`; `require_2fa_effective` is the policy `/2fa/disable` enforces (that term OR the stored `require2FA`), omitted when the settings store cannot be read |
 | `auth_register` | Registers a new user |
 | `auth_login` | Authenticates a user |
 | `auth_create_tenant` | Creates a tenant |

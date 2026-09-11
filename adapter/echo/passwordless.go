@@ -277,13 +277,25 @@ func (ad *Adapter) twoFactorDisable(c echo.Context) error {
 	// Re-read the user rather than trust the access token: a require2FA flag set
 	// after the token was issued still has to be honoured. A failed re-read falls
 	// through rather than 404ing, matching the reference's optional chaining
-	// (`currentUser?.require2FA`, auth.router.ts:884-885).
+	// (`currentUser?.require2FA`, auth.router.ts:884-885). That makes this term
+	// fail OPEN where the settings term below fails closed — the asymmetry, and
+	// why it stands, is written out in adapter/nethttp/passwordless.go.
 	fresh, err := ad.auth.FindUser(c.Request().Context(), user.ID, "", user.TenantID)
 	if err == nil && fresh.Require2FA {
 		auth.WriteHTTPError(c.Response(), auth.HTTPErrTwoFactorRequiredForUser)
 		return nil
 	}
-	if ad.auth.TwoFactorPolicy() {
+	// The system-wide term is second, as in the reference (per-user at :884-888,
+	// settings at :890-896). A settings store that cannot answer fails closed
+	// with the reference generic 500 (handleError, :899-901 and :189-195);
+	// TwoFactorPolicy logs the error through Config.Logger, because this body
+	// carries none of it.
+	required, err := ad.auth.TwoFactorPolicy(c.Request().Context())
+	if err != nil {
+		auth.WriteHTTPError(c.Response(), auth.HTTPErrInternal)
+		return nil
+	}
+	if required {
 		auth.WriteHTTPError(c.Response(), auth.HTTPErrTwoFactorRequiredByPolicy)
 		return nil
 	}

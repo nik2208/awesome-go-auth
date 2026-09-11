@@ -54,6 +54,7 @@ var updateREADME = flag.Bool("update", false,
 // CompatibilityNotes — after which README.md is regenerated, not edited.
 var wantDeviationIDs = []string{
 	"advertised-2fa-methods-require-store-support",
+	"config-require2fa-is-a-system-policy-term",
 	"cookie-max-age-follows-configured-ttl",
 	"csrf-cookie-not-reissued-with-tokens",
 	"forgot-password-succeeds-on-delivery-failure",
@@ -79,6 +80,7 @@ var wantClaims = map[string][]string{
 	"totp-accepts-one-step-of-skew":                {"TOTPSkew", "epochTolerance", "totp.strategy.ts"},
 	"one-time-tokens-are-base64url":                {"43", "64", "base64url"},
 	"advertised-2fa-methods-require-store-support": {"available2faMethods", "501"},
+	"config-require2fa-is-a-system-policy-term":    {"Config.Require2FA", "2FA_REQUIRED", "403", "200", "AuthConfig"},
 	"csrf-cookie-not-reissued-with-tokens":         {"Set-Cookie", "setTokenCookies"},
 	"cookie-max-age-follows-configured-ttl": {
 		"Max-Age=2592000", "Max-Age=604800", "RefreshTokenTTL", "refreshTokenExpiresIn",

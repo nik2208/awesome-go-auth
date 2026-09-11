@@ -310,6 +310,40 @@ revision the whole contract was extracted from.
   term can only ever remove an option that would have failed; a deployment whose
   store implements the capability sees the reference's list.
 
+### `Config.Require2FA` is a deployment-level 2FA policy the reference has no equivalent of
+
+`config-require2fa-is-a-system-policy-term`
+
+- **Surface**: `POST <prefix>/2fa/disable` and `POST <prefix>/login`.
+- **This port**: `Config.Require2FA` is a third term in two decisions the
+  reference makes with two. On `/2fa/disable` it is ORed with the stored
+  `require2FA` into the system-policy refusal, so a deployment that sets it and
+  configures no settings store at all answers
+  `403 {"error":"Cannot disable 2FA: required by system policy","code":"2FA_REQUIRED"}`
+  where the reference answers `200 {"success":true}` and turns the factor off.
+  At login it is ORed into the challenge term, so a user with no enrolled TOTP
+  and no per-user flag is challenged where the reference logs them straight in.
+- **The reference**: Has no config-level `require2FA`: the name exists only on
+  the settings store and on the user record, never on `AuthConfig`.
+  `/2fa/disable` refuses on the per-user flag and on the stored setting and on
+  nothing else, and login challenges on an enrolled TOTP or the per-user flag
+  alone (`auth.router.ts:880-902`, `auth.router.ts:552`,
+  `settings-store.interface.ts:64`, `user.model.ts:39`).
+- **Why**: A deployment-wide switch is what an embedder without the admin router
+  has instead of the Control panel: the reference reaches the same policy by
+  writing `require2FA: true` through a settings store, which requires running a
+  store and an admin surface to write it. The term is additive and inert by
+  default — `Config.Require2FA` is `false` unless a deployment sets it, and a
+  deployment that leaves it alone gets the reference's answers on both routes,
+  including with a settings store attached. Both wire shapes are the reference's
+  own: the `403` body is the one it sends for the stored setting, and the
+  challenge is the one it sends for the per-user flag, so a client meets nothing
+  it has no branch for.
+- **Matching the reference exactly**: Leave `Config.Require2FA` unset (the
+  default) and express the policy through a `SettingsStore` holding
+  `require2FA: true`, which is the reference's own term and produces the same
+  `/2fa/disable` refusal with no login-side difference.
+
 ### The CSRF cookie is not reissued alongside tokens
 
 `csrf-cookie-not-reissued-with-tokens`
@@ -403,6 +437,8 @@ release that closes the gap.
 The gaps above close in order, one minor release per milestone: v0.4.0 email
 flows (site URLs, template store, delivery webhook), v0.5.0 2FA knobs and claims,
 v0.6.0 OAuth provisioning, v0.7.0 IdP key injection and RS256 verification,
-v0.8.0 settings store, `/ui/config`, vendored reference UI and served docs,
-v0.9.0 the admin router, v0.10.0 the tools router and event plane. v1.0.0 removes
-the shims those releases deprecate.
+v0.8.0 `/ui/config`, vendored reference UI and served docs, v0.9.0 the admin
+router, v0.10.0 the tools router and event plane. v1.0.0 removes the shims those
+releases deprecate. The settings store was the other half of the v0.8.0 item and
+landed ahead of it: it is in [Unreleased](CHANGELOG.md), and `/ui/config` — the
+one route that reads its branding block — is what is left of that milestone.

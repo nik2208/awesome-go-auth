@@ -372,9 +372,64 @@ func (a *Auth) StepUpSubject(tempToken string, missing, invalid HTTPError) (Temp
 }
 
 // TwoFactorPolicy reports whether the deployment requires a second factor of
-// every user. It is the port's equivalent of the reference's settingsStore
-// require2FA flag, which is what /2fa/disable refuses on.
-func (a *Auth) TwoFactorPolicy() bool { return a.service.cfg.Require2FA }
+// every user, which is what POST <prefix>/2fa/disable refuses on with 403
+// 2FA_REQUIRED. It is the OR of two terms:
+//
+//   - Config.Require2FA, the static deployment-time switch. It is also a login
+//     term (Service.requiresTwoFactor), and it is this port's own: the reference
+//     has no config-level require2FA anywhere. That is a wire difference, and it
+//     is registered as config-require2fa-is-a-system-policy-term in
+//     compatibility.go rather than stated only here.
+//   - AuthSettings.Require2FA read from Config.Settings, the run-time switch an
+//     administrator flips through the admin Control panel. This is the
+//     reference's own term and the only setting it reads on this route
+//     (auth.router.ts:890-896).
+//
+// The static term is checked first and short-circuits, so a deployment that has
+// already decided the answer never pays for a store read.
+//
+// The error is the store failing. It is reported rather than swallowed so that
+// the route can fail closed — a settings store that cannot be reached must not
+// be read as permission to turn the factor off — and the adapters answer the
+// reference generic 500, which is what its handleError does with anything its
+// getSettings throws (auth.router.ts:189-195, the catch at :899-901).
+//
+// It is also logged through Config.Logger before being returned, because the
+// 500 the adapters write carries no detail at all — the reference logs the
+// error itself before answering the same body (console.error in handleError,
+// :193) — and a policy-store outage that leaves nothing in the operator's log is
+// indistinguishable from any other 500. A caller that handles the error itself
+// gets one log line it did not ask for, which is the cheaper of the two
+// mistakes.
+//
+// The signature grew the context and the error when the settings store landed.
+// It was TwoFactorPolicy() bool while the answer came from Config alone, when
+// there was nothing to read and nothing to fail; Go has no overloading, so the
+// old spelling could only be kept under a different name that nothing would
+// call, and it was dropped instead. The CHANGELOG records the break.
+func (a *Auth) TwoFactorPolicy(ctx context.Context) (bool, error) {
+	return a.service.twoFactorPolicy(ctx)
+}
+
+// twoFactorPolicy is TwoFactorPolicy's body, on the Service so that the MCP
+// surface can report the same answer without holding an Auth. There is one
+// implementation of the policy and this is it.
+func (s *Service) twoFactorPolicy(ctx context.Context) (bool, error) {
+	if s.cfg.Require2FA {
+		return true, nil
+	}
+	store := s.cfg.Settings
+	if store == nil {
+		return false, nil
+	}
+	settings, err := store.GetSettings(ctx)
+	if err != nil {
+		s.logf("auth: settings store unreachable; the two-factor policy could not be "+
+			"resolved and the route it was read from fails closed: %v", err)
+		return false, err
+	}
+	return settings.Require2FA != nil && *settings.Require2FA, nil
+}
 
 // SMSConfigured reports whether the deployment can deliver an SMS code.
 //

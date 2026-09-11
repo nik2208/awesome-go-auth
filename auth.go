@@ -318,6 +318,25 @@ func WithTemplateStore(store TemplateStore) Option {
 	}
 }
 
+// WithSettingsStore sets Config.Settings: the store holding the global runtime
+// settings an administrator flips — the reference's routerOptions.settingsStore
+// (auth.router.ts:92). Only AuthSettings.Require2FA is acted on, by
+// POST <prefix>/2fa/disable; see SettingsStore for what the rest is for.
+//
+//	store := auth.NewMemorySettingsStore()
+//	required := true
+//	_, _ = store.UpdateSettings(ctx, auth.AuthSettings{Require2FA: &required})
+//	auth.WithSettingsStore(store)
+func WithSettingsStore(store SettingsStore) Option {
+	return func(b *authBuilder) error {
+		if store == nil {
+			return errors.New("auth: settings store is required")
+		}
+		b.cfg.Settings = store
+		return nil
+	}
+}
+
 // WithSiteURLs sets Config.SiteURLs: the base URLs the front ends are served
 // from. The first is canonical, every one of them is allowlisted for the
 // per-request origin match — see Config.SiteURLs and Auth.ResolveSiteURL.

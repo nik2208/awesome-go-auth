@@ -320,12 +320,38 @@ func (a *Adapter) TwoFactorDisable(w http.ResponseWriter, r *http.Request) {
 	// instead of 404ing — and the disable itself then reports whatever the store
 	// says. Reachable only if the user vanishes between the middleware's lookup
 	// and this one, but a 404 here would be the port inventing a status.
+	//
+	// Note the asymmetry with the settings read below, deliberately: this term
+	// fails OPEN and that one fails closed. `err != nil` here covers a user store
+	// that is merely down as well as a user that is gone, so a transient outage
+	// lets a user whose record carries require2FA disable the factor. The
+	// reference does distinguish them — a findById that *throws* reaches
+	// handleError and becomes 500, and only a null user falls through — and this
+	// port does not, because Auth.FindUser reports both as an error. Matching the
+	// reference here needs a not-found sentinel the user-store interface does not
+	// have; until it does, the fail-closed rule stated below is the rule for the
+	// settings read and not for this one.
 	fresh, err := a.auth.FindUser(r.Context(), user.ID, "", user.TenantID)
 	if err == nil && fresh.Require2FA {
 		auth.WriteHTTPError(w, auth.HTTPErrTwoFactorRequiredForUser)
 		return
 	}
-	if a.auth.TwoFactorPolicy() {
+	// The system-wide term is second, as it is in the reference, where the
+	// per-user check sits at :884-888 and the settings check at :890-896. Both
+	// answer 403 2FA_REQUIRED, so only the message tells them apart.
+	//
+	// A settings store that cannot answer is the reference generic 500: its
+	// getSettings throw falls out of the route into handleError
+	// (auth.router.ts:899-901, :189-195). Failing closed is also the only safe
+	// reading — an unreachable policy store is not permission to drop a factor.
+	// The body carries no detail, so TwoFactorPolicy logs the error through
+	// Config.Logger first, as the reference's handleError does (:193).
+	required, err := a.auth.TwoFactorPolicy(r.Context())
+	if err != nil {
+		auth.WriteHTTPError(w, auth.HTTPErrInternal)
+		return
+	}
+	if required {
 		auth.WriteHTTPError(w, auth.HTTPErrTwoFactorRequiredByPolicy)
 		return
 	}
