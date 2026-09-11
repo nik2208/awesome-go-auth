@@ -164,6 +164,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `epochTolerance` to `0`. The behaviour is unchanged — it is now recorded in
   `CompatibilityNotes()` and the README's deviations section. There is no knob
   to narrow the window to the reference's and none is planned.
+- **`OAuthProvider.MapProfile func(raw map[string]any) (OAuthUserInfo, error)`**
+  — the reference's `mapProfile` hook (`generic-oauth.strategy.ts:71-77`): when
+  set, it is the profile `ExchangeCode` returns for that provider, in place of
+  the default mapping (`:151-153`) — the whole mapping, the `github` preset's
+  `/user/emails` fallback included. The service fills `Provider`, and `Raw`
+  when the hook left it nil; a hook error fails the exchange on the existing
+  profile-failed path (401 `OAUTH_PROFILE_FAILED` on the callback).
+- **`OAuthProvider.ProfileMap map[string]string` and
+  `CompileProfileMap(map[string]string)`** — the declarative form of the hook
+  for a provider loaded from configuration: the keys `id`, `email`,
+  `emailVerified`, `name` and `picture` (`id` required, any other key an
+  error) mapped to expressions in a grammar that is this port's own — `$.a.b`
+  and `$.a[0]` paths, `??` fallback chains and a double-quoted literal as the
+  final fallback — e.g. `"$.mail ?? $.userPrincipalName"` for Microsoft Graph
+  or `"$.data.user.id"` for a wrapped document. Evaluation follows
+  JavaScript's `??`: the first path resolving to a value that is neither
+  missing nor `null` wins; a string is taken as is, a number is rendered as
+  `String()` renders it (an integer-valued id has no decimal point) and a
+  boolean as `true`/`false`. An object or array value, an `emailVerified`
+  that is not a boolean or `"true"`/`"false"`, and an `id` that resolves to
+  nothing or to the empty string are evaluation errors on the profile-failed
+  path. Anything outside the grammar — `$` alone, single quotes, wildcards,
+  filters, function calls — is a compile error naming the expression.
+  `MapProfile` wins when both are set. `CompileProfileMap` is the compiler,
+  exported so a deployment can validate a map before it wires anything.
+- **`NewOAuthServiceWithConfig(providers ...OAuthProvider) (*OAuthService, error)`**
+  — `NewOAuthService` with every `ProfileMap` validated, so a deployment fails
+  at start-up rather than at the first login; the errors name each broken
+  provider and expression. `NewOAuthService` keeps its signature and never
+  panics: a map that does not compile is recorded against its provider, whose
+  exchanges then return that error before the token endpoint is contacted
+  (500 on the callback — a configuration error, not a client one) while the
+  other providers keep working. No route changes.
 
 ### Changed
 - **Tests — the wiretest OpenAPI check can express conditional route sets.**
