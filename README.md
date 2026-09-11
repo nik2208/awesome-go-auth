@@ -432,6 +432,97 @@ revision the whole contract was extracted from.
   implementation sends `Vary: Origin` while both send
   `Cache-Control: public, max-age=3600`, so an allowlisted response must not
   reach a shared cache.
+
+### Resource-server mode unmounts the whole credential set, not six routes of it
+
+`resource-server-gates-all-credential-routes`
+
+- **Surface**: `HTTPConfig.ResourceServer`: the nineteen routes of
+  `ResourceServerGatedRoutes`.
+- **This port**: Registers none of the nineteen routes that mint, deliver or
+  consume a credential, so each answers `404` — `/register`, `/login`,
+  `/refresh`, `/logout`, `/forgot-password`, `/reset-password`,
+  `/change-password`, `/send-verification-email`, `/verify-email`,
+  `/change-email/request`, `/change-email/confirm`, `/magic-link/send`,
+  `/magic-link/verify`, `/sms/send`, `/sms/verify`, `/2fa/setup`,
+  `/2fa/verify-setup`, `/2fa/verify` and `/2fa/disable`. `GenerateOpenAPISpec`
+  drops the same nineteen under `OpenAPIInfo.ResourceServer`, so the published
+  spec and the mount agree. What stays is `/me`, the session routes, `/profile`,
+  `/add-phone`, `/account` and the OAuth and linking group — and those still
+  need a local user store: `/me` reads it through `Service.Authenticate`,
+  `/profile`, `/add-phone` and `/account` write it, and the OAuth callback
+  provisions a user and mints a local session. The flag is about credentials,
+  not about store independence. The deployment with no user store is the one
+  that mounts `ResourceServerMiddleware` on its own routes, whose bearer and
+  cookie paths both build the principal from verified claims and read no store
+  at all.
+- **The reference**: Guards six registrations on `isResourceServer` — `/login`,
+  `/logout`, `/refresh`, `/register`, `/forgot-password` and `/reset-password` —
+  and leaves the other thirteen mounted. Those thirteen reach handlers that read
+  and write the user store the mode says this instance does not have, so a
+  caller gets a `500` from a failing store lookup, or a `200` on a route that
+  mailed nothing, rather than a routing answer (`auth.router.ts:507-510`,
+  `auth.router.ts:541`, `auth.router.ts:590`, `auth.router.ts:622`,
+  `auth.router.ts:713`, `auth.router.ts:777`, `auth.router.ts:802`).
+- **Why**: The reference's own comment for the flag is that this instance has no
+  local user DB and only token verification makes sense, and the six guards are
+  an incomplete application of exactly that rule: a magic link cannot be minted,
+  an SMS code cannot be stored and a TOTP secret cannot be enrolled without the
+  store the mode has removed. Leaving them mounted turns a configuration mistake
+  into a runtime failure on a credential route, which is the worst place to
+  discover it. Gating all nineteen makes the mode mean one thing, and makes it
+  checkable: the same list drives the mount, the OpenAPI spec and the
+  conformance suite. It is drawn at the credential and not at the store
+  deliberately: gating every store-reading route would unmount `/me` and the
+  account routes from the deployment that has both a store and a remote issuer,
+  which is the commoner configuration, to protect one that has no reason to
+  mount the auth router at all.
+- **Matching the reference exactly**: Leave `HTTPConfig.ResourceServer` unset
+  and mount `ResourceServerMiddleware` on the host's own routes: the bearer
+  verification is independent of the gating, and every auth route then stays
+  mounted as it is today. A host that wants the reference's partial set mounts
+  two routers — one with the flag, one without — under different prefixes.
+
+### An unknown `kid` refetches the JWKS at most once per `MinRefreshInterval`
+
+`jwks-unknown-kid-refetch-is-rate-limited`
+
+- **Surface**: `VerifyRS256` / `JWKSClient`: the rotation retry behind every
+  bearer token.
+- **This port**: On a `kid` the cached JWKS does not carry, the cache is
+  invalidated and the key looked up once more — but only when the cached
+  document is older than `ResourceServerConfig.MinRefreshInterval` (default
+  `DefaultJWKSMinRefreshInterval`, 30 seconds). Inside that window the token is
+  refused with `Unknown signing key` and no HTTP call is made, so N requests
+  bearing unknown `kid`s cost at most one outbound fetch per interval. A
+  negative `MinRefreshInterval` turns the limit off and restores the reference
+  behaviour exactly. The `RS256` allow-list is also checked before the key
+  lookup rather than after it, so an `alg: none` or `alg: HS256` token never
+  reaches the issuer at all; both orderings answer `401` `INVALID_TOKEN`, only
+  the logged message differs.
+- **The reference**: Calls `jwksClient.invalidateCache()` and retries on every
+  unknown `kid`, with no interval and no cap. `invalidateCache` clears the
+  cached document *and* the in-flight `fetchPromise`, so concurrent requests do
+  not even coalesce onto one fetch, and the `algorithms: ['RS256']` pin is
+  inside `jwt.verify`, which runs after the key lookup
+  (`token.service.ts:116-125`, `token.service.ts:136`,
+  `jwks.service.ts:101-105`, `jwks.service.ts:56-58`).
+- **Why**: Unrestricted, the retry is an unauthenticated request amplifier:
+  anyone who can reach the resource server makes it call the issuer once per
+  request by sending a random `kid`, and because the in-flight handle is dropped
+  too, a burst multiplies rather than coalesces. Worse, the refusal is
+  collateral: every legitimate request arriving between the invalidation and the
+  next document landing takes the cold path and blocks on the issuer, which is
+  the one thing the stale-while-revalidate cache exists to prevent. The interval
+  costs a real rotation nothing — a cached document is typically an hour old by
+  the time a token names a key it does not carry, so the first such token still
+  refetches and still verifies — and only refuses the case of two rotations
+  inside 30 seconds. `node-jwks-rsa` ships the same guard as its `rateLimit`
+  option for the same reason.
+- **Matching the reference exactly**: Set
+  `ResourceServerConfig.MinRefreshInterval` to any negative duration: every
+  unknown `kid` then invalidates and refetches, as the reference does. Nothing
+  else in the verifier changes.
 <!-- END GENERATED: deviations -->
 
 ## Parity Snapshot vs `awesome-node-auth`
@@ -452,7 +543,7 @@ release that closes the gap.
 | OAuth login + account linking | ✅ Implemented | Signed state, PKCE, single-use nonce; Google and GitHub presets, generic providers by hand. No provisioning policy or `profileMap` yet. | v0.6.0 |
 | Dynamic email templates + UI i18n fallback | ✅ Implemented | The reference's six template ids with its en/it built-ins, `TemplateStore` overrides rendered under its `{{T.key}}`/`{{key}}` rule, per-request site-URL links and the old-address notice on `/change-email/confirm`. The `welcome` template renders but `POST /register` does not mail it yet (the reference does, `auth.router.ts:719-724`); UI translations are stored and are read by `GET /ui/config` once the UI router lands (v0.8.0). | — |
 | Custom token claims | ✅ Implemented | `Config.BuildTokenClaims` hook, plus `StaticClaims`/`UserFieldClaims`/`ChainClaims` and the synchronous `ClaimsWebhook` (this port's extension); the hook runs at mint time and on `/me`, never in the middleware. | — |
-| Identity Provider (IdP) mode (RS256 + JWKS + resource-server validation) | ⚠️ Partial | Discovery, authorize, token and userinfo endpoints exist; the signing key, `kid` and published keys are injectable (`IDPConfig.Signer`, `KeyID`, `PublicKeys`, with `ParseRSAPrivateKeyPEM` for the reference's PEM form), authorization codes go through `AuthCodeStore`, and `IssueIdPTokenPair` mints the reference's RS256 pair. `auth.WithIDP` makes all four adapters serve the JWKS document at `<prefix>/.well-known/jwks.json` (`IDPConfig.JWKSPath`) with the reference's `Cache-Control` and CORS headers; `<base>/jwks` stays as a deprecated alias through the 0.x line and is removed in v1.0.0. Still pending: no RS256 verifier for resource servers. | v0.7.0 |
+| Identity Provider (IdP) mode (RS256 + JWKS + resource-server validation) | ⚠️ Partial | Discovery, authorize, token and userinfo endpoints exist; the signing key, `kid` and published keys are injectable (`IDPConfig.Signer`, `KeyID`, `PublicKeys`, with `ParseRSAPrivateKeyPEM` for the reference's PEM form), authorization codes go through `AuthCodeStore`, and `IssueIdPTokenPair` mints the reference's RS256 pair. Both halves of the JWKS contract are in: `auth.WithIDP` makes all four adapters serve the document at `<prefix>/.well-known/jwks.json` (`IDPConfig.JWKSPath`) with the reference's `Cache-Control` and CORS headers, with `<base>/jwks` kept as a deprecated alias through the 0.x line and removed in v1.0.0; and on the consuming side `JWKSClient` caches a remote JWKS with stale-while-revalidate, `VerifyRS256` verifies a bearer token against it (RS256 pinned before the key lookup, `kid` rotation retried once and rate-limited, `iss` checked), `ResourceServerMiddleware` is wired on all four adapters — bearer against the JWKS, cookie against the local HS256 secret, neither path reading a store — and `HTTPConfig.ResourceServer` unmounts the credential routes. What keeps this ⚠️: the OIDC endpoints themselves are mounted by `(*IDP).RegisterHandlers` on the host's own mux rather than by the four adapters, so they are outside the wiretest conformance suite. | v0.7.0 |
 | RBAC | ⚠️ Service-level | `RolesPermissionsStore` and service helpers; no HTTP surface (the admin router is absent). | v0.9.0 |
 | Multi-tenancy | ⚠️ Service-level | `TenantStore` and membership helpers; no HTTP surface. | v0.9.0 |
 | API keys (M2M) | ⚠️ Service-level | `APIKeyService` + `APIKeyMiddleware`; no management routes. | v0.9.0 |

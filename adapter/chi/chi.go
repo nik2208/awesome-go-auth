@@ -19,6 +19,9 @@ func Mount(r chi.Router, a *auth.Auth) {
 }
 
 // MountWithConfig mounts auth routes using the supplied wire conventions.
+//
+// Under HTTPConfig.ResourceServer the credential routes are not registered at
+// all — see mountCredentialRoutes and auth.ResourceServerGatedRoutes.
 func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 	h := nethttpadapter.NewWithConfig(a, cfg)
 	resolved := h.Config()
@@ -37,10 +40,9 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 		r.Method(http.MethodHead, prefix+idp.JWKSPath(), jwks)
 	}
 
-	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/register", h.Register)
-	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/login", h.Login)
-	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/refresh", h.Refresh)
-	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/logout", h.Logout)
+	if !resolved.ResourceServer {
+		mountCredentialRoutes(r, h, csrf, prefix)
+	}
 	// /me authenticates itself (nethttp's Me) rather than sitting behind the
 	// auth middleware, so the claims hook runs once and the token is verified once.
 	r.With(csrf).MethodFunc(http.MethodGet, prefix+"/me", h.Me)
@@ -60,6 +62,17 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 	r.Method(http.MethodDelete, prefix+"/linked-accounts/{provider}/{providerAccountId}", h.UnlinkAccountHandler())
 	r.Method(http.MethodPost, prefix+"/link-request", h.LinkRequestHandler())
 	r.Method(http.MethodPost, prefix+"/link-verify", h.LinkVerifyHandler())
+}
+
+// mountCredentialRoutes registers the nineteen routes that create, prove,
+// deliver or change a credential — auth.ResourceServerGatedRoutes, which is the
+// same list and carries the reasoning. HTTPConfig.ResourceServer is the switch
+// that skips this call.
+func mountCredentialRoutes(r chi.Router, h *nethttpadapter.Adapter, csrf func(http.Handler) http.Handler, prefix string) {
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/register", h.Register)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/login", h.Login)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/refresh", h.Refresh)
+	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/logout", h.Logout)
 	// Passwordless and 2FA. Chi serves the net/http handlers unchanged, so the
 	// only chi-specific part is the registration.
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/magic-link/send", h.MagicLinkSend)

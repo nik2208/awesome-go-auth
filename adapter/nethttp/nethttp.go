@@ -8,12 +8,13 @@ import (
 	auth "github.com/nik2208/awesome-go-auth"
 )
 
-type userContextKey struct{}
-
 // UserFromContext reads authenticated user data from context.
+//
+// The key belongs to the root package (auth.ContextWithUser), so a middleware
+// written there — auth.ResourceServerMiddleware — hands its principal to a
+// handler mounted here without either side knowing about the other.
 func UserFromContext(ctx context.Context) (auth.User, bool) {
-	user, ok := ctx.Value(userContextKey{}).(auth.User)
-	return user, ok
+	return auth.UserFromContext(ctx)
 }
 
 // Adapter exposes standard net/http handlers and middleware.
@@ -70,13 +71,15 @@ func (a *Adapter) Middleware() func(http.Handler) http.Handler {
 				auth.WriteHTTPError(w, auth.AccessHTTPError(err))
 				return
 			}
-			ctx := context.WithValue(r.Context(), userContextKey{}, user)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, r.WithContext(auth.ContextWithUser(r.Context(), user)))
 		})
 	}
 }
 
 // Mount attaches auth endpoints.
+//
+// Under HTTPConfig.ResourceServer the credential routes are not registered at
+// all — see mountCredentialRoutes and auth.ResourceServerGatedRoutes.
 func (a *Adapter) Mount(mux *http.ServeMux) {
 	prefix := a.cfg.Prefix()
 	// IdP mode: the JWKS document, mounted first and bare. The reference
@@ -88,10 +91,10 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 	if idp := a.auth.IDP(); idp != nil {
 		mux.Handle("GET "+prefix+idp.JWKSPath(), a.auth.JWKSHandler())
 	}
-	mux.Handle("POST "+prefix+"/register", a.guard(http.HandlerFunc(a.Register)))
-	mux.Handle("POST "+prefix+"/login", a.guard(http.HandlerFunc(a.Login)))
-	mux.Handle("POST "+prefix+"/refresh", a.guard(http.HandlerFunc(a.Refresh)))
-	mux.Handle("POST "+prefix+"/logout", a.guard(http.HandlerFunc(a.Logout)))
+
+	if !a.cfg.ResourceServer {
+		a.mountCredentialRoutes(mux, prefix)
+	}
 	// /me authenticates itself (see Me) rather than sitting behind Middleware,
 	// so the token is verified once and the claims hook runs once.
 	mux.Handle("GET "+prefix+"/me", a.guard(http.HandlerFunc(a.Me)))
@@ -108,6 +111,17 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 	mux.Handle("DELETE "+prefix+"/linked-accounts/{provider}/{providerAccountId}", a.UnlinkAccountHandler())
 	mux.Handle("POST "+prefix+"/link-request", a.LinkRequestHandler())
 	mux.Handle("POST "+prefix+"/link-verify", a.LinkVerifyHandler())
+}
+
+// mountCredentialRoutes registers the nineteen routes that create, prove,
+// deliver or change a credential — auth.ResourceServerGatedRoutes, which is the
+// same list and carries the reasoning. HTTPConfig.ResourceServer is the switch
+// that skips this call.
+func (a *Adapter) mountCredentialRoutes(mux *http.ServeMux, prefix string) {
+	mux.Handle("POST "+prefix+"/register", a.guard(http.HandlerFunc(a.Register)))
+	mux.Handle("POST "+prefix+"/login", a.guard(http.HandlerFunc(a.Login)))
+	mux.Handle("POST "+prefix+"/refresh", a.guard(http.HandlerFunc(a.Refresh)))
+	mux.Handle("POST "+prefix+"/logout", a.guard(http.HandlerFunc(a.Logout)))
 
 	// Passwordless and 2FA (passwordless.go). The four send/verify routes are
 	// unauthenticated by contract; the three enrolment routes sit behind the
