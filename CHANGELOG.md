@@ -114,6 +114,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   save/consume-once, expiry and 32 concurrent consumers under `-race`; the
   endpoints are walked end to end over `httptest` (`/authorize` → `/token` →
   `/userinfo`, replay refused) through an injected `AuthCodeStore`.
+- **`OAuthProvider.AdditionalAuthParams map[string]string`** — the reference's
+  `additionalAuthParams` (`generic-oauth.strategy.ts:63`): every entry is added
+  to the authorization URL's query. Precedence is the reference's spread order
+  (`:113-120`): an entry overrides `client_id`, `redirect_uri`, `response_type`
+  and `scope`, and `state` overrides an entry; the PKCE pair this port adds is
+  written after the entries too, so no configuration can weaken the code
+  binding. `GoogleProvider` pre-populates `access_type=offline`, the one extra
+  parameter the reference's Google strategy sends (`google.strategy.ts:29`) —
+  it sends no `prompt`.
+- **`OAuthUserInfo.EmailVerified *bool`** — the reference profile's
+  `emailVerified?` (`generic-oauth.strategy.ts:157`, `google.strategy.ts:58`),
+  read from the userinfo's `email_verified` boolean; `nil` when the provider
+  said nothing. `HandleCallback` does not read it yet: an account the callback
+  creates is verified exactly as before.
+- **GitHub email fallback.** When GitHub's `/user` answers without an email —
+  an account whose address is private — the `github` provider now fetches
+  `/user/emails` with `Authorization: token <access_token>` and
+  `Accept: application/vnd.github.v3+json`, picks the entry that is both
+  `primary` and `verified`, else the first one, and reports its `verified`
+  flag as `EmailVerified` (`github.strategy.ts:54-68`). A failing call leaves
+  the email empty rather than failing the exchange, as the reference's
+  `emailRes.ok` gate does. **`OAuthProvider.GitHubEmailsURL`** overrides the
+  endpoint (empty means `UserInfoURL + "/emails"`); `GitHubProvider` sets it to
+  `https://api.github.com/user/emails`.
 
 ### Changed
 - **Tests — the wiretest OpenAPI check can express conditional route sets.**
@@ -137,6 +161,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `client_id` redeemed with another client's credentials is now
   `invalid_grant` and the attempt consumes the code (RFC 6749 §4.1.3). The map
   never checked this.
+- **Default OAuth subject id is `id`, then `sub`.** The generic userinfo
+  mapping probed `sub` → `id` → `user_id`; it now follows the reference's
+  `String(raw.id ?? raw.sub ?? '')` (`generic-oauth.strategy.ts:155`) and
+  stringifies a numeric `id`. `user_id` stays as this port's extra last
+  resort so a provider registered against an earlier version keeps resolving;
+  it only widens what is accepted. A profile carrying both `id` and `sub` with
+  different values — rare, since OIDC providers send `sub` alone — now links by
+  `id`. The `github` mapping prefers `name` and falls back to `login`
+  (`github.strategy.ts:69`); it used the login unconditionally.
 
 ### Deprecated
 - **`HTTPMailerTransport` and `NewHTTPMailerTransport`.** They POST `MailMessage`

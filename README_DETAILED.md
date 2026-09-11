@@ -335,13 +335,34 @@ type OAuthProvider struct {
     Name, ClientID, ClientSecret, RedirectURL string
     AuthURL, TokenURL, UserInfoURL            string
     Scopes                                    []string
+    AdditionalAuthParams                      map[string]string // extra authorize-query params
+    GitHubEmailsURL                           string            // "github" only; "" = UserInfoURL + "/emails"
 }
 ```
+
+The reference's `GenericOAuthProviderConfig` (`generic-oauth.strategy.ts:39-78`).
+`AdditionalAuthParams` is its `additionalAuthParams`: every entry lands in the
+authorization URL's query, with the reference's precedence — an entry overrides
+`client_id`, `redirect_uri`, `response_type` and `scope`, while `state` (and
+the PKCE `code_challenge`/`code_challenge_method` pair this port adds) always
+wins over an entry.
 
 ### `NewOAuthService(providers ...OAuthProvider) *OAuthService`
 
 ### `GoogleProvider(clientID, clientSecret, redirectURL) OAuthProvider`
 ### `GitHubProvider(clientID, clientSecret, redirectURL) OAuthProvider`
+
+The reference's two hard-coded strategies as presets. Google sends scope
+`openid email profile` plus `access_type=offline` through
+`AdditionalAuthParams` (`google.strategy.ts:28-29`) and maps `sub`, `email`,
+`email_verified`, `name`, `picture`. GitHub sends scope `user:email`, maps
+`String(id)`, `email`, `name` falling back to `login`, `avatar_url`, and when
+the profile carries no email — a GitHub account with a private address — GETs
+`GitHubEmailsURL` (`https://api.github.com/user/emails`) with
+`Authorization: token <access_token>`, picks the entry that is both `primary`
+and `verified`, else the first one, and reports its `verified` flag as
+`EmailVerified` (`github.strategy.ts:54-69`). A failing emails call leaves the
+email empty; it does not fail the exchange.
 
 ### `(*OAuthService).AuthorizeURL(provider, state) (string, error)`
 
@@ -349,7 +370,11 @@ Returns the OAuth2 authorization URL to redirect the user to.
 
 ### `(*OAuthService).ExchangeCode(ctx, provider, code) (OAuthUserInfo, error)`
 
-Exchanges an authorization code for normalized user info.
+Exchanges an authorization code for normalized user info. For a provider that
+is neither `google` nor `github` the subject id is `id`, then `sub` — the
+reference's `String(raw.id ?? raw.sub ?? '')` (`generic-oauth.strategy.ts:155`)
+— then `user_id`, this port's extra last resort; a numeric id is stringified.
+`email_verified` fills `EmailVerified` when it is a boolean.
 
 ### `(*OAuthService).HandleCallback(ctx, authSvc, linkedAccounts, info, tenantID, linkToUserID) (User, AuthTokens, error)`
 
@@ -364,9 +389,14 @@ Resolves or creates a user from OAuth user info:
 ```go
 type OAuthUserInfo struct {
     ProviderID, Provider, Email, Name, AvatarURL string
+    EmailVerified *bool // provider's email_verified; nil = not stated
     Raw map[string]any
 }
 ```
+
+`EmailVerified` is the reference profile's `emailVerified?`. `HandleCallback`
+does not read it yet: an account the callback creates is marked verified as
+before.
 
 ### `LinkedAccountStore` interface
 

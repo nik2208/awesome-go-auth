@@ -7,12 +7,15 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// OAuthProvider holds configuration for a single OAuth 2.0 provider.
+// OAuthProvider holds configuration for a single OAuth 2.0 provider. It is the
+// reference's GenericOAuthProviderConfig (generic-oauth.strategy.ts:39-78) with
+// the two hard-coded strategies, Google and GitHub, expressed as presets.
 type OAuthProvider struct {
 	Name         string
 	ClientID     string
@@ -22,16 +25,38 @@ type OAuthProvider struct {
 	TokenURL     string
 	UserInfoURL  string
 	Scopes       []string
+	// AdditionalAuthParams are extra query parameters for the authorization
+	// URL — provider-specific knobs such as Google's access_type or prompt. They
+	// are the reference's additionalAuthParams (generic-oauth.strategy.ts:63) and
+	// keep its precedence exactly (:113-120): an entry overrides client_id,
+	// redirect_uri, response_type and scope, and state overrides an entry. The
+	// PKCE pair this port adds (code_challenge, code_challenge_method) is written
+	// after them as well, so a configuration cannot weaken the code binding.
+	AdditionalAuthParams map[string]string
+	// GitHubEmailsURL is the endpoint the "github" provider consults when the
+	// user profile carries no email — a GitHub account whose address is private
+	// (github.strategy.ts:54-68). Empty means UserInfoURL + "/emails", which is
+	// https://api.github.com/user/emails for the preset; a test points it at a
+	// fake. Only the "github" provider reads it.
+	GitHubEmailsURL string
 }
 
-// OAuthUserInfo is the normalized profile returned after token exchange.
+// OAuthUserInfo is the normalized profile returned after token exchange — the
+// reference's {id, email, emailVerified?, name?, picture?}
+// (generic-oauth.strategy.ts:143, :154-160), plus the provider name and the raw
+// document.
 type OAuthUserInfo struct {
 	ProviderID string
 	Provider   string
 	Email      string
 	Name       string
 	AvatarURL  string
-	Raw        map[string]any
+	// EmailVerified is the provider's email_verified claim, or for GitHub the
+	// verified flag of the address picked from /user/emails. nil means the
+	// provider said nothing, the reference's `emailVerified: undefined`; the
+	// callback's provisioning does not read it yet.
+	EmailVerified *bool
+	Raw           map[string]any
 }
 
 // PendingLinkStore holds temporary OAuth link state.
@@ -99,31 +124,38 @@ func NewOAuthService(providers ...OAuthProvider) *OAuthService {
 	return &OAuthService{providers: m, client: &http.Client{Timeout: 10 * time.Second}}
 }
 
-// GoogleProvider builds a pre-configured Google OAuth2 provider.
+// GoogleProvider builds a pre-configured Google OAuth2 provider — the
+// reference's GoogleStrategy (google.strategy.ts:23-33, :53). The authorization
+// request carries access_type=offline (:29), the one extra parameter that
+// strategy sends; it sends no prompt.
 func GoogleProvider(clientID, clientSecret, redirectURL string) OAuthProvider {
 	return OAuthProvider{
-		Name:         "google",
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		RedirectURL:  redirectURL,
-		AuthURL:      "https://accounts.google.com/o/oauth2/v2/auth",
-		TokenURL:     "https://oauth2.googleapis.com/token",
-		UserInfoURL:  "https://www.googleapis.com/oauth2/v3/userinfo",
-		Scopes:       []string{"openid", "email", "profile"},
+		Name:                 "google",
+		ClientID:             clientID,
+		ClientSecret:         clientSecret,
+		RedirectURL:          redirectURL,
+		AuthURL:              "https://accounts.google.com/o/oauth2/v2/auth",
+		TokenURL:             "https://oauth2.googleapis.com/token",
+		UserInfoURL:          "https://www.googleapis.com/oauth2/v3/userinfo",
+		Scopes:               []string{"openid", "email", "profile"},
+		AdditionalAuthParams: map[string]string{"access_type": "offline"},
 	}
 }
 
-// GitHubProvider builds a pre-configured GitHub OAuth2 provider.
+// GitHubProvider builds a pre-configured GitHub OAuth2 provider — the
+// reference's GithubStrategy (github.strategy.ts:23-31, :49-70), including the
+// /user/emails fallback for accounts with a private address.
 func GitHubProvider(clientID, clientSecret, redirectURL string) OAuthProvider {
 	return OAuthProvider{
-		Name:         "github",
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		RedirectURL:  redirectURL,
-		AuthURL:      "https://github.com/login/oauth/authorize",
-		TokenURL:     "https://github.com/login/oauth/access_token",
-		UserInfoURL:  "https://api.github.com/user",
-		Scopes:       []string{"user:email"},
+		Name:            "github",
+		ClientID:        clientID,
+		ClientSecret:    clientSecret,
+		RedirectURL:     redirectURL,
+		AuthURL:         "https://github.com/login/oauth/authorize",
+		TokenURL:        "https://github.com/login/oauth/access_token",
+		UserInfoURL:     "https://api.github.com/user",
+		Scopes:          []string{"user:email"},
+		GitHubEmailsURL: "https://api.github.com/user/emails",
 	}
 }
 
@@ -150,6 +182,14 @@ func (s *OAuthService) AuthorizeURLPKCE(providerName, state, codeChallenge strin
 	q.Set("redirect_uri", p.RedirectURL)
 	q.Set("response_type", "code")
 	q.Set("scope", strings.Join(p.Scopes, " "))
+	// The reference spreads additionalAuthParams over the four standard
+	// parameters and then state over it (generic-oauth.strategy.ts:113-120):
+	// later keys win, so an entry can replace scope or redirect_uri but never
+	// state. The PKCE pair has no reference counterpart and is written last for
+	// the same reason.
+	for key, value := range p.AdditionalAuthParams {
+		q.Set(key, value)
+	}
 	q.Set("state", state)
 	if codeChallenge != "" {
 		q.Set("code_challenge", codeChallenge)
@@ -242,29 +282,122 @@ func (s *OAuthService) ExchangeCodePKCE(ctx context.Context, providerName, code,
 	info := OAuthUserInfo{Provider: providerName, Raw: raw}
 	switch providerName {
 	case "google":
+		// GoogleStrategy.getUserProfile (google.strategy.ts:57-58): sub, email,
+		// email_verified, name, picture.
 		info.ProviderID, _ = raw["sub"].(string)
 		info.Email, _ = raw["email"].(string)
+		info.EmailVerified = optionalBool(raw["email_verified"])
 		info.Name, _ = raw["name"].(string)
 		info.AvatarURL, _ = raw["picture"].(string)
 	case "github":
-		if id, ok := raw["id"].(float64); ok {
-			info.ProviderID = fmt.Sprintf("%.0f", id)
-		}
+		// GithubStrategy.getUserProfile (github.strategy.ts:59-69): String(id),
+		// email, name ?? login, avatar_url. emailVerified is only ever known when
+		// the address came from /user/emails, which is consulted when the profile
+		// has none (:60-68).
+		info.ProviderID = subjectID(raw["id"])
 		info.Email, _ = raw["email"].(string)
-		info.Name, _ = raw["login"].(string)
+		if info.Name, _ = raw["name"].(string); info.Name == "" {
+			info.Name, _ = raw["login"].(string)
+		}
 		info.AvatarURL, _ = raw["avatar_url"].(string)
+		if info.Email == "" {
+			info.Email, info.EmailVerified = s.githubEmailFallback(ctx, p, tok.AccessToken)
+		}
 	default:
-		for _, k := range []string{"sub", "id", "user_id"} {
-			if v, ok := raw[k].(string); ok && v != "" {
+		// The reference's default mapping, id ?? sub (generic-oauth.strategy.ts:
+		// 154-160). user_id is this port's extra last resort, kept because
+		// providers registered against earlier versions may rely on it; it only
+		// widens what is accepted.
+		for _, k := range []string{"id", "sub", "user_id"} {
+			if v := subjectID(raw[k]); v != "" {
 				info.ProviderID = v
 				break
 			}
 		}
 		info.Email, _ = raw["email"].(string)
+		info.EmailVerified = optionalBool(raw["email_verified"])
 		info.Name, _ = raw["name"].(string)
 		info.AvatarURL, _ = raw["avatar_url"].(string)
 	}
 	return info, nil
+}
+
+// subjectID renders a provider's subject the way the reference's
+// String(raw.id ?? raw.sub ?? "") does: a string as-is, a JSON number without
+// a trailing ".0" (GitHub's id is a number), anything else as "". An empty
+// string reads as absent so the next candidate is tried — the one place this is
+// looser than the reference, which would keep the empty id.
+func subjectID(v any) string {
+	switch id := v.(type) {
+	case string:
+		return id
+	case float64:
+		return strconv.FormatFloat(id, 'f', -1, 64)
+	default:
+		return ""
+	}
+}
+
+// optionalBool reads a JSON boolean claim as the reference's `as boolean |
+// undefined` cast does: a boolean is taken, anything else — absent, null, a
+// string "true" — is nil.
+func optionalBool(v any) *bool {
+	if b, ok := v.(bool); ok {
+		return &b
+	}
+	return nil
+}
+
+// githubEmailsURL is the endpoint githubEmailFallback calls: the configured
+// override, else UserInfoURL + "/emails", which for the real API is
+// https://api.github.com/user/emails.
+func githubEmailsURL(p OAuthProvider) string {
+	if p.GitHubEmailsURL != "" {
+		return p.GitHubEmailsURL
+	}
+	return strings.TrimSuffix(p.UserInfoURL, "/") + "/emails"
+}
+
+// githubEmailFallback is github.strategy.ts:54-68 for a profile with no email:
+// GET /user/emails with the reference's `Authorization: token` scheme and
+// `Accept: application/vnd.github.v3+json` (:55), pick the entry that is both
+// primary and verified, else the first one, and report its verified flag. A
+// failed call is not an error — the reference gates on `emailRes.ok` and
+// otherwise leaves the email empty — so a transport error, a non-2xx or an
+// unparsable body all answer ("", nil).
+func (s *OAuthService) githubEmailFallback(ctx context.Context, p OAuthProvider, accessToken string) (string, *bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubEmailsURL(p), nil)
+	if err != nil {
+		return "", nil
+	}
+	req.Header.Set("Authorization", "token "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", nil
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode >= 400 {
+		return "", nil
+	}
+	var entries []struct {
+		Email    string `json:"email"`
+		Primary  bool   `json:"primary"`
+		Verified bool   `json:"verified"`
+	}
+	if err := json.Unmarshal(body, &entries); err != nil || len(entries) == 0 {
+		return "", nil
+	}
+	chosen := entries[0]
+	for _, entry := range entries {
+		if entry.Primary && entry.Verified {
+			chosen = entry
+			break
+		}
+	}
+	verified := chosen.Verified
+	return chosen.Email, &verified
 }
 
 // HandleCallback resolves/creates a user after OAuth callback.
