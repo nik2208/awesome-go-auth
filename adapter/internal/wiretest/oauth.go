@@ -78,7 +78,10 @@ func newFakeOAuthProvider(t *testing.T) *fakeOAuthProvider {
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"sub":"acme-1","email":"oauth@example.com","name":"OAuth User"}`))
+		// sub rather than id, so the default mapping's second candidate is what
+		// the wire exercises; email_verified is what a Google-shaped userinfo
+		// carries (google.strategy.ts:57) and reaches OAuthUserInfo.EmailVerified.
+		_, _ = w.Write([]byte(`{"sub":"acme-1","email":"oauth@example.com","email_verified":true,"name":"OAuth User"}`))
 	})
 	p.server = httptest.NewServer(mux)
 	t.Cleanup(p.server.Close)
@@ -540,6 +543,28 @@ func testOAuthCallback(t *testing.T, mount Mounter) {
 		AssertStatus(t, me, http.StatusOK)
 		if got := Body(t, me)["loginProvider"]; got != testProvider {
 			t.Fatalf("loginProvider = %v, want %q (body %s)", got, testProvider, me.Body.String())
+		}
+	})
+
+	// The fake profile carries email_verified, as Google's userinfo does. The
+	// claim is mapped onto OAuthUserInfo.EmailVerified and must not disturb the
+	// login: the callback still issues the session for the profile's address, and
+	// the created account is verified exactly as before — the provisioning policy
+	// that will read the claim is a later change.
+	t.Run("a profile carrying email_verified still logs in", func(t *testing.T) {
+		f := newOAuthFixture(t, mount, fixtureOptions{allowed: []string{fixtureSiteURL}})
+		location := f.begin(t, "", map[string]string{"Origin": fixtureSiteURL})
+		rec := f.callback(t, "c", location.Query().Get("state"))
+		AssertStatus(t, rec, http.StatusFound)
+		user := f.sessionUser(t, rec)
+		if user.Email != "oauth@example.com" {
+			t.Fatalf("the callback issued a session for %q, want %q", user.Email, "oauth@example.com")
+		}
+		if !user.IsEmailVerified {
+			t.Fatal("an account the callback creates is verified, as before")
+		}
+		if _, err := f.links.FindByProvider(context.Background(), testProvider, "acme-1"); err != nil {
+			t.Fatalf("provider account was not linked: %v", err)
 		}
 	})
 

@@ -2,7 +2,11 @@ package auth
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -550,6 +554,372 @@ func TestGitHubProvider_Config(t *testing.T) {
 	if p.AuthURL == "" || p.TokenURL == "" {
 		t.Fatal("github provider should have all URLs set")
 	}
+	if p.GitHubEmailsURL != "https://api.github.com/user/emails" {
+		t.Fatalf("GitHubEmailsURL = %q, want the reference's endpoint (github.strategy.ts:54)", p.GitHubEmailsURL)
+	}
+}
+
+// authorizeQuery builds the authorization URL and returns its parsed query.
+func authorizeQuery(t *testing.T, svc *OAuthService, provider, state, challenge string) url.Values {
+	t.Helper()
+	u, err := svc.AuthorizeURLPKCE(provider, state, challenge)
+	if err != nil {
+		t.Fatalf("AuthorizeURLPKCE: %v", err)
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		t.Fatalf("parse %q: %v", u, err)
+	}
+	return parsed.Query()
+}
+
+// The reference's additionalAuthParams (generic-oauth.strategy.ts:63) reach
+// the authorization query verbatim (:118).
+func TestOAuthService_AuthorizeURL_AdditionalAuthParams(t *testing.T) {
+	svc := NewOAuthService(OAuthProvider{
+		Name:                 "mock",
+		ClientID:             "client123",
+		AuthURL:              "https://auth.example.com/authorize?tenant=acme",
+		Scopes:               []string{"openid"},
+		AdditionalAuthParams: map[string]string{"access_type": "offline", "prompt": "consent"},
+	})
+	q := authorizeQuery(t, svc, "mock", "s", "")
+	for key, want := range map[string]string{
+		"access_type":   "offline",
+		"prompt":        "consent",
+		"client_id":     "client123",
+		"scope":         "openid",
+		"response_type": "code",
+		"state":         "s",
+		"tenant":        "acme", // the AuthURL's own query survives
+	} {
+		if got := q.Get(key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if _, present := q["code_challenge"]; present {
+		t.Errorf("code_challenge present without a challenge: %v", q)
+	}
+}
+
+// Precedence, pinned to the reference's spread order
+// (generic-oauth.strategy.ts:113-120): additionalAuthParams is spread AFTER
+// client_id, redirect_uri, response_type and scope — so an entry replaces any
+// of those four — and BEFORE state, so state always wins. The PKCE pair has no
+// counterpart in the reference and is written after the entries too: a
+// configuration must not be able to downgrade the code binding.
+func TestOAuthService_AuthorizeURL_AdditionalAuthParamsPrecedence(t *testing.T) {
+	svc := NewOAuthService(OAuthProvider{
+		Name:        "mock",
+		ClientID:    "client123",
+		RedirectURL: "https://api.example.com/cb",
+		AuthURL:     "https://auth.example.com/authorize",
+		Scopes:      []string{"openid"},
+		AdditionalAuthParams: map[string]string{
+			"client_id":             "override-client",
+			"redirect_uri":          "https://evil.example.net/cb",
+			"response_type":         "token",
+			"scope":                 "openid email offline_access",
+			"state":                 "forged-state",
+			"code_challenge":        "forged-challenge",
+			"code_challenge_method": "plain",
+		},
+	})
+	q := authorizeQuery(t, svc, "mock", "real-state", "real-challenge")
+	for key, want := range map[string]string{
+		// The four the reference lets additionalAuthParams override.
+		"client_id":     "override-client",
+		"redirect_uri":  "https://evil.example.net/cb",
+		"response_type": "token",
+		"scope":         "openid email offline_access",
+		// state is spread after the entries in the reference.
+		"state": "real-state",
+		// PKCE, this port's addition, is likewise not overridable.
+		"code_challenge":        "real-challenge",
+		"code_challenge_method": "S256",
+	} {
+		if got := q[key]; len(got) != 1 || got[0] != want {
+			t.Errorf("%s = %q, want exactly [%q]", key, got, want)
+		}
+	}
+}
+
+// google.strategy.ts:24-31 sends access_type=offline and nothing else beyond
+// the standard parameters — no prompt.
+func TestGoogleProvider_AuthorizeURL_AccessTypeOffline(t *testing.T) {
+	svc := NewOAuthService(GoogleProvider("gid", "gsecret", "https://example.com/callback"))
+	q := authorizeQuery(t, svc, "google", "s", "")
+	if got := q.Get("access_type"); got != "offline" {
+		t.Fatalf("access_type = %q, want %q", got, "offline")
+	}
+	if _, present := q["prompt"]; present {
+		t.Fatalf("prompt = %q, the reference sends none", q.Get("prompt"))
+	}
+	if got := q.Get("scope"); got != "openid email profile" {
+		t.Fatalf("scope = %q, want %q (google.strategy.ts:28)", got, "openid email profile")
+	}
+}
+
+// fakeUserInfoServer serves a token endpoint that always succeeds and a
+// userinfo endpoint answering the given JSON. It records what reached the
+// optional /user/emails endpoint so the GitHub fallback can be asserted.
+type fakeUserInfoServer struct {
+	*httptest.Server
+	mu           sync.Mutex
+	emailsCalls  int
+	emailsAuth   string
+	emailsAccept string
+}
+
+func newFakeUserInfoServer(t *testing.T, userinfo, emails string, emailsStatus int) *fakeUserInfoServer {
+	t.Helper()
+	f := &fakeUserInfoServer{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"provider-access-token","token_type":"bearer"}`))
+	})
+	mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(userinfo))
+	})
+	mux.HandleFunc("/user/emails", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.emailsCalls++
+		f.emailsAuth = r.Header.Get("Authorization")
+		f.emailsAccept = r.Header.Get("Accept")
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(emailsStatus)
+		_, _ = w.Write([]byte(emails))
+	})
+	f.Server = httptest.NewServer(mux)
+	t.Cleanup(f.Close)
+	return f
+}
+
+func (f *fakeUserInfoServer) provider(name string) OAuthProvider {
+	return OAuthProvider{
+		Name:         name,
+		ClientID:     "cid",
+		ClientSecret: "csecret",
+		RedirectURL:  "https://api.example.com/cb",
+		AuthURL:      "https://provider.example.com/authorize",
+		TokenURL:     f.URL + "/token",
+		UserInfoURL:  f.URL + "/user",
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+func describeBool(b *bool) string {
+	if b == nil {
+		return "nil"
+	}
+	if *b {
+		return "true"
+	}
+	return "false"
+}
+
+// email_verified maps onto EmailVerified as the reference's `raw.email_verified
+// as boolean | undefined` does (generic-oauth.strategy.ts:157; Google
+// google.strategy.ts:58): a boolean is taken, absence is nil, and a value that
+// is not a boolean is not coerced.
+func TestOAuthService_ExchangeCode_EmailVerified(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider string
+		userinfo string
+		want     *bool
+	}{
+		{"generic true", "acme", `{"id":"1","email":"a@example.com","email_verified":true}`, boolPtr(true)},
+		{"generic false", "acme", `{"id":"1","email":"a@example.com","email_verified":false}`, boolPtr(false)},
+		{"generic absent", "acme", `{"id":"1","email":"a@example.com"}`, nil},
+		{"generic null", "acme", `{"id":"1","email":"a@example.com","email_verified":null}`, nil},
+		{"generic string is not coerced", "acme", `{"id":"1","email":"a@example.com","email_verified":"true"}`, nil},
+		{"google true", "google", `{"sub":"g1","email":"g@example.com","email_verified":true}`, boolPtr(true)},
+		{"google false", "google", `{"sub":"g1","email":"g@example.com","email_verified":false}`, boolPtr(false)},
+		{"google absent", "google", `{"sub":"g1","email":"g@example.com"}`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeUserInfoServer(t, tc.userinfo, "[]", http.StatusOK)
+			svc := NewOAuthService(srv.provider(tc.provider))
+			info, err := svc.ExchangeCode(context.Background(), tc.provider, "code")
+			if err != nil {
+				t.Fatalf("ExchangeCode: %v", err)
+			}
+			if describeBool(info.EmailVerified) != describeBool(tc.want) {
+				t.Fatalf("EmailVerified = %s, want %s", describeBool(info.EmailVerified), describeBool(tc.want))
+			}
+		})
+	}
+}
+
+// The default subject mapping is the reference's String(raw.id ?? raw.sub ?? "")
+// (generic-oauth.strategy.ts:155): id first, then sub. user_id is this port's
+// extra last resort, and a JSON number renders without a decimal point.
+func TestOAuthService_ExchangeCode_SubjectIDPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		userinfo string
+		want     string
+	}{
+		{"id wins over sub", `{"id":"the-id","sub":"the-sub","user_id":"the-user-id"}`, "the-id"},
+		{"sub when id is absent", `{"sub":"the-sub","user_id":"the-user-id"}`, "the-sub"},
+		{"user_id as the last resort", `{"user_id":"the-user-id"}`, "the-user-id"},
+		{"a numeric id is stringified", `{"id":12345,"sub":"the-sub"}`, "12345"},
+		{"an empty id falls through to sub", `{"id":"","sub":"the-sub"}`, "the-sub"},
+		{"a non-scalar id falls through", `{"id":{"nested":true},"sub":"the-sub"}`, "the-sub"},
+		{"nothing usable", `{"email":"x@example.com"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeUserInfoServer(t, tc.userinfo, "[]", http.StatusOK)
+			svc := NewOAuthService(srv.provider("acme"))
+			info, err := svc.ExchangeCode(context.Background(), "acme", "code")
+			if err != nil {
+				t.Fatalf("ExchangeCode: %v", err)
+			}
+			if info.ProviderID != tc.want {
+				t.Fatalf("ProviderID = %q, want %q", info.ProviderID, tc.want)
+			}
+		})
+	}
+}
+
+// github.strategy.ts:59-69: a profile with no email is completed from
+// /user/emails, sent with `Authorization: token <access_token>` and the v3
+// Accept header (:55), choosing the primary AND verified entry, else the first
+// one (:64-67); emailVerified is that entry's verified flag. When the profile
+// has an email the endpoint's answer is not consulted, and a failing endpoint
+// leaves the email empty rather than failing the exchange (:62).
+func TestOAuthService_ExchangeCode_GitHubEmailFallback(t *testing.T) {
+	const twoEmails = `[{"email":"secondary@example.com","primary":false,"verified":true},{"email":"primary@example.com","primary":true,"verified":true}]`
+	for _, tc := range []struct {
+		name         string
+		userinfo     string
+		emails       string
+		emailsStatus int
+		wantEmail    string
+		wantVerified *bool
+		wantCalls    int
+	}{
+		{
+			name:         "picks the primary verified entry",
+			userinfo:     `{"id":42,"login":"octo","avatar_url":"https://a/octo.png"}`,
+			emails:       twoEmails,
+			emailsStatus: http.StatusOK,
+			wantEmail:    "primary@example.com",
+			wantVerified: boolPtr(true),
+			wantCalls:    1,
+		},
+		{
+			name:         "falls back to the first entry",
+			userinfo:     `{"id":42,"login":"octo"}`,
+			emails:       `[{"email":"first@example.com","primary":false,"verified":false},{"email":"unverified-primary@example.com","primary":true,"verified":false}]`,
+			emailsStatus: http.StatusOK,
+			wantEmail:    "first@example.com",
+			wantVerified: boolPtr(false),
+			wantCalls:    1,
+		},
+		{
+			name:         "a profile email skips the endpoint",
+			userinfo:     `{"id":42,"login":"octo","email":"public@example.com"}`,
+			emails:       twoEmails,
+			emailsStatus: http.StatusOK,
+			wantEmail:    "public@example.com",
+			wantVerified: nil,
+			wantCalls:    0,
+		},
+		{
+			name:         "a failing endpoint leaves the email empty",
+			userinfo:     `{"id":42,"login":"octo"}`,
+			emails:       `{"message":"Requires authentication"}`,
+			emailsStatus: http.StatusUnauthorized,
+			wantEmail:    "",
+			wantVerified: nil,
+			wantCalls:    1,
+		},
+		{
+			name:         "an empty list leaves the email empty",
+			userinfo:     `{"id":42,"login":"octo"}`,
+			emails:       `[]`,
+			emailsStatus: http.StatusOK,
+			wantEmail:    "",
+			wantVerified: nil,
+			wantCalls:    1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeUserInfoServer(t, tc.userinfo, tc.emails, tc.emailsStatus)
+			// GitHubEmailsURL is left empty on purpose: the endpoint derives from
+			// UserInfoURL, which is how the preset's real values line up too.
+			svc := NewOAuthService(srv.provider("github"))
+			info, err := svc.ExchangeCode(context.Background(), "github", "code")
+			if err != nil {
+				t.Fatalf("ExchangeCode: %v", err)
+			}
+			if info.ProviderID != "42" {
+				t.Errorf("ProviderID = %q, want %q (String(user.id))", info.ProviderID, "42")
+			}
+			if info.Name != "octo" {
+				t.Errorf("Name = %q, want the login %q when name is absent", info.Name, "octo")
+			}
+			if info.Email != tc.wantEmail {
+				t.Errorf("Email = %q, want %q", info.Email, tc.wantEmail)
+			}
+			if describeBool(info.EmailVerified) != describeBool(tc.wantVerified) {
+				t.Errorf("EmailVerified = %s, want %s", describeBool(info.EmailVerified), describeBool(tc.wantVerified))
+			}
+			srv.mu.Lock()
+			defer srv.mu.Unlock()
+			if srv.emailsCalls != tc.wantCalls {
+				t.Fatalf("/user/emails was called %d times, want %d", srv.emailsCalls, tc.wantCalls)
+			}
+			if tc.wantCalls > 0 {
+				if srv.emailsAuth != "token provider-access-token" {
+					t.Errorf("Authorization = %q, want %q (github.strategy.ts:55)", srv.emailsAuth, "token provider-access-token")
+				}
+				if srv.emailsAccept != "application/vnd.github.v3+json" {
+					t.Errorf("Accept = %q, want %q", srv.emailsAccept, "application/vnd.github.v3+json")
+				}
+			}
+		})
+	}
+
+	t.Run("GitHubEmailsURL overrides the derived endpoint", func(t *testing.T) {
+		srv := newFakeUserInfoServer(t, `{"id":42,"login":"octo"}`, twoEmails, http.StatusOK)
+		other := newFakeUserInfoServer(t, `{}`, `[{"email":"elsewhere@example.com","primary":true,"verified":true}]`, http.StatusOK)
+		p := srv.provider("github")
+		p.GitHubEmailsURL = other.URL + "/user/emails"
+		svc := NewOAuthService(p)
+		info, err := svc.ExchangeCode(context.Background(), "github", "code")
+		if err != nil {
+			t.Fatalf("ExchangeCode: %v", err)
+		}
+		if info.Email != "elsewhere@example.com" {
+			t.Fatalf("Email = %q, want the override endpoint's %q", info.Email, "elsewhere@example.com")
+		}
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		if srv.emailsCalls != 0 {
+			t.Fatalf("the derived endpoint was still called %d times", srv.emailsCalls)
+		}
+	})
+
+	// The reference prefers the display name and falls back to the login
+	// (github.strategy.ts:69).
+	t.Run("name wins over login", func(t *testing.T) {
+		srv := newFakeUserInfoServer(t, `{"id":42,"login":"octo","name":"Octo Cat","email":"o@example.com"}`, "[]", http.StatusOK)
+		svc := NewOAuthService(srv.provider("github"))
+		info, err := svc.ExchangeCode(context.Background(), "github", "code")
+		if err != nil {
+			t.Fatalf("ExchangeCode: %v", err)
+		}
+		if info.Name != "Octo Cat" {
+			t.Fatalf("Name = %q, want %q", info.Name, "Octo Cat")
+		}
+	})
 }
 
 // ─── MemoryLinkedAccounts ─────────────────────────────────────────────────────
