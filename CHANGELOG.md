@@ -60,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no base, so an existing deployment keeps the links and the language it had.
 - `GenerateOpenAPISpec` documents `emailLang` on `POST /magic-link/send` and
   describes what it does on all four routes. No route was added.
+- **`loginProvider` on every token and on `GET /me`.** `User.LoginProvider`
+  records the provider that created the account: `OAuthService.HandleCallback`
+  sets it to the provider's name on the users it creates, and a password
+  registration leaves it empty. It reaches the wire as the `loginProvider`
+  claim on access, refresh and temp tokens and as the `loginProvider` field of
+  `/me`, always present and `"local"` when nothing recorded one — the
+  reference's `user.loginProvider ?? 'local'` (`auth.router.ts:379`), which
+  its `/me` carries unconditionally. `LoginProviderLocal` names the default.
+  The field is additive: a host store that never persists it keeps answering
+  `"local"`, and `MemoryUserStore` stores it with the rest of the row.
 
 ### Changed
 - **Docs — the README parity snapshot now reflects the shipped surface.** It
@@ -75,6 +85,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there, so a caller that never sets it sends the same bytes as before. Use
   `NewGatewayMailerTransport` for new deployments; removal is scheduled for
   v1.0.0.
+
+### Fixed
+- **Security — `Config.BuildTokenClaims` can no longer override the session
+  claims.** The hook's result was merged over the whole payload, so a custom
+  claim named `sid`, `tid`, `jti`, `typ`, `iss`, `iat` or `exp` replaced the
+  session binding, tenant scope, token id, type, issuer or lifetime of every
+  token minted — and a hook returning `typ: "access"` turned the 2FA step-up
+  `tempToken` into a full session credential, reopening the five-minute bypass
+  the typed temp token exists to close. Those seven claims are now written
+  after the merge, on access, refresh and temp tokens alike. The hook still
+  overrides the six base claims (`sub`, `email`, `role`, `loginProvider`,
+  `isEmailVerified`, `isTotpEnabled`), which is the reference's own semantics:
+  it spreads `buildTokenPayload(user)` over exactly those, assigns `sid`
+  afterwards and strips `iat`/`exp` before signing (`auth.router.ts:378-384`,
+  `:433`, `token.service.ts:19`).
 
 ## [0.3.1] - 2026-09-11
 

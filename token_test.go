@@ -607,3 +607,241 @@ func TestIssueToken_UniqueJTI(t *testing.T) {
 		t.Fatalf("jti must be unique per token, got %q twice", claims1.Jti)
 	}
 }
+
+// TestIssueToken_ReservedClaimsSurviveCustomClaims pins the merge order. The
+// Config.BuildTokenClaims result used to be spread over the whole payload, so
+// a hook claim named sid, tid, jti, typ, iss, iat or exp replaced the session
+// binding, tenant scope, token id, type, issuer or lifetime of every token
+// minted. Those seven are now written after the merge — on the access token,
+// the refresh token and the step-up token alike — which is the guarantee the
+// reference gives its own session claims by assigning sid after the spread
+// (auth.router.ts:433) and stripping iat/exp before signing
+// (token.service.ts:19).
+func TestIssueToken_ReservedClaimsSurviveCustomClaims(t *testing.T) {
+	svc := testServiceForToken(t)
+	now := time.Now().Truncate(time.Second)
+	svc.now = func() time.Time { return now }
+	svc.cfg.BuildTokenClaims = func(context.Context, User) (map[string]any, error) {
+		return map[string]any{
+			"sid": "ses_attacker",
+			"tid": "t_attacker",
+			"jti": "jti_attacker",
+			"typ": "access",
+			"iss": "attacker",
+			"iat": 0,
+			"exp": now.Add(100 * 365 * 24 * time.Hour).Unix(),
+			// A claim outside the reserved set still goes through, so the test
+			// cannot pass by the hook being ignored altogether.
+			"plan": "pro",
+		}, nil
+	}
+	ctx := context.Background()
+	user := User{ID: "usr_030", TenantID: "t1"}
+	for _, tc := range []struct {
+		typ string
+		sid string
+		ttl time.Duration
+	}{
+		{"access", "ses_030", 15 * time.Minute},
+		{"refresh", "ses_030", 30 * 24 * time.Hour},
+		{tokenTypeTemp, "", 5 * time.Minute},
+	} {
+		t.Run(tc.typ, func(t *testing.T) {
+			token, _, err := svc.issueToken(ctx, user, tc.sid, tc.typ, tc.ttl)
+			if err != nil {
+				t.Fatalf("issueToken: %v", err)
+			}
+			claims := decodeSegment(t, mustSegment(t, token, 1))
+			for key, want := range map[string]any{
+				"sid":  tc.sid,
+				"tid":  "t1",
+				"typ":  tc.typ,
+				"iss":  svc.cfg.Issuer,
+				"iat":  float64(now.Unix()),
+				"exp":  float64(now.Add(tc.ttl).Unix()),
+				"plan": "pro",
+			} {
+				if claims[key] != want {
+					t.Errorf("%s = %#v, want %#v (payload %+v)", key, claims[key], want, claims)
+				}
+			}
+			if jti, _ := claims["jti"].(string); jti == "" || jti == "jti_attacker" {
+				t.Errorf("jti = %#v, want a freshly minted id", claims["jti"])
+			}
+			// What the verifier sees agrees with the segment: the token parses
+			// under its own type with its own session and lifetime, and under
+			// no other type.
+			parsed, err := svc.parseToken(token, tc.typ)
+			if err != nil {
+				t.Fatalf("parseToken as %s: %v", tc.typ, err)
+			}
+			if parsed.Sid != tc.sid || parsed.Tid != "t1" || parsed.Exp != now.Add(tc.ttl).Unix() {
+				t.Fatalf("parsed claims %+v carry hook values", parsed)
+			}
+			for _, other := range []string{"access", "refresh", tokenTypeTemp} {
+				if other == tc.typ {
+					continue
+				}
+				if _, err := svc.parseToken(token, other); err != ErrInvalidToken {
+					t.Errorf("a %s token parsed as %s: %v", tc.typ, other, err)
+				}
+			}
+		})
+	}
+}
+
+// TestIssueTempToken_TypeCannotBePromotedByCustomClaims is the case the
+// reservation exists for. The step-up token is typed so that it cannot serve
+// as an access token (see tokenTypeTemp); with the old merge a hook returning
+// {"typ": "access"} undid that for every tempToken minted, handing whoever
+// held one a full session credential before the second factor was presented.
+func TestIssueTempToken_TypeCannotBePromotedByCustomClaims(t *testing.T) {
+	svc := testServiceForToken(t)
+	svc.cfg.BuildTokenClaims = func(context.Context, User) (map[string]any, error) {
+		return map[string]any{"typ": "access", "sid": "ses_forged"}, nil
+	}
+	ctx := context.Background()
+	user, _, err := svc.Register(ctx, RegisterInput{Email: "stepup@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	temp, err := svc.IssueTempToken(ctx, user)
+	if err != nil {
+		t.Fatalf("IssueTempToken: %v", err)
+	}
+	subject, err := svc.VerifyTempToken(temp)
+	if err != nil {
+		t.Fatalf("VerifyTempToken: %v", err)
+	}
+	if subject.UserID != user.ID || subject.TenantID != "t1" {
+		t.Fatalf("subject = %+v, want %s in t1", subject, user.ID)
+	}
+	if _, err := svc.Me(ctx, temp); err != ErrInvalidToken {
+		t.Fatalf("a tempToken must not authenticate as an access token, got %v", err)
+	}
+}
+
+// TestIssueToken_CustomClaimsOverrideBaseClaims pins the other half of the
+// reference's merge: the six base claims are the hook's to override —
+// auth.router.ts:378-384 spreads config.buildTokenPayload(user) over exactly
+// {sub, email, role, loginProvider, isEmailVerified, isTotpEnabled}.
+func TestIssueToken_CustomClaimsOverrideBaseClaims(t *testing.T) {
+	svc := testServiceForToken(t)
+	svc.cfg.BuildTokenClaims = func(context.Context, User) (map[string]any, error) {
+		return map[string]any{
+			"email":           "hook@example.com",
+			"role":            "auditor",
+			"loginProvider":   "saml",
+			"isEmailVerified": true,
+			"isTotpEnabled":   true,
+		}, nil
+	}
+	ctx := context.Background()
+	user := User{ID: "usr_031", TenantID: "t1", Email: "stored@example.com", Role: "member"}
+	token, _, err := svc.issueToken(ctx, user, "ses_031", "access", 15*time.Minute)
+	if err != nil {
+		t.Fatalf("issueToken: %v", err)
+	}
+	claims := decodeSegment(t, mustSegment(t, token, 1))
+	for key, want := range map[string]any{
+		"sub":             "usr_031",
+		"email":           "hook@example.com",
+		"role":            "auditor",
+		"loginProvider":   "saml",
+		"isEmailVerified": true,
+		"isTotpEnabled":   true,
+		"sid":             "ses_031",
+	} {
+		if claims[key] != want {
+			t.Errorf("%s = %#v, want %#v (payload %+v)", key, claims[key], want, claims)
+		}
+	}
+	if _, err := svc.parseToken(token, "access"); err != nil {
+		t.Fatalf("a token with overridden base claims must still parse: %v", err)
+	}
+}
+
+// TestIssueToken_LoginProviderClaim: every token carries loginProvider — the
+// reference's `user.loginProvider ?? 'local'` (auth.router.ts:379) — on the
+// access token, on the refresh token, which carries the identical claim set
+// (token.service.ts:25-29), and on the step-up token, which the reference
+// mints from the same payload (auth.router.ts:572-575).
+func TestIssueToken_LoginProviderClaim(t *testing.T) {
+	svc := testServiceForToken(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		user User
+		want string
+	}{
+		{"defaults to local", User{ID: "usr_032", TenantID: "t1"}, LoginProviderLocal},
+		{"reports the recorded provider", User{ID: "usr_033", TenantID: "t1", LoginProvider: "github"}, "github"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tokens, err := svc.newSessionTokens(ctx, tc.user)
+			if err != nil {
+				t.Fatalf("newSessionTokens: %v", err)
+			}
+			temp, err := svc.IssueTempToken(ctx, tc.user)
+			if err != nil {
+				t.Fatalf("IssueTempToken: %v", err)
+			}
+			for name, token := range map[string]string{"access": tokens.AccessToken, "refresh": tokens.RefreshToken, "temp": temp} {
+				if got := decodeSegment(t, mustSegment(t, token, 1))["loginProvider"]; got != tc.want {
+					t.Errorf("%s token loginProvider = %#v, want %q", name, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestIssueToken_LoginProviderAfterOAuthCallback drives the user-creation path
+// of OAuthService.HandleCallback: the account it creates records the provider,
+// the store hands it back, and the session it issues says so. An account the
+// callback only links keeps what it was created with — the reference's
+// linkAccount writes a linked-accounts row and touches no user column
+// (auth.router.ts:1336-1343).
+func TestIssueToken_LoginProviderAfterOAuthCallback(t *testing.T) {
+	svc := testServiceForToken(t)
+	ctx := context.Background()
+	oauth := NewOAuthService()
+	links := NewMemoryLinkedAccounts()
+
+	created, tokens, err := oauth.HandleCallback(ctx, svc, links, OAuthUserInfo{Provider: "acme", ProviderID: "acme-1", Email: "oauth@example.com"}, "t1", "")
+	if err != nil {
+		t.Fatalf("HandleCallback: %v", err)
+	}
+	if created.LoginProvider != "acme" {
+		t.Fatalf("LoginProvider = %q, want %q", created.LoginProvider, "acme")
+	}
+	stored, err := svc.users.GetUserByID(ctx, created.ID, "t1")
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if stored.LoginProvider != "acme" {
+		t.Fatalf("stored LoginProvider = %q, want %q", stored.LoginProvider, "acme")
+	}
+	if got := NewPublicUser(stored).LoginProvider; got != "acme" {
+		t.Fatalf("PublicUser.LoginProvider = %q, want %q", got, "acme")
+	}
+	for name, token := range map[string]string{"access": tokens.AccessToken, "refresh": tokens.RefreshToken} {
+		if got := decodeSegment(t, mustSegment(t, token, 1))["loginProvider"]; got != "acme" {
+			t.Errorf("%s token loginProvider = %#v, want %q", name, got, "acme")
+		}
+	}
+
+	local, _, err := svc.Register(ctx, RegisterInput{Email: "linked@example.com", Password: "password1", TenantID: "t1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	linked, tokens, err := oauth.HandleCallback(ctx, svc, links, OAuthUserInfo{Provider: "acme", ProviderID: "acme-2", Email: "linked@example.com"}, "t1", "")
+	if err != nil {
+		t.Fatalf("HandleCallback for an existing account: %v", err)
+	}
+	if linked.ID != local.ID || linked.LoginProvider != "" {
+		t.Fatalf("linked user = %+v, want the password account %s with no recorded provider", linked, local.ID)
+	}
+	if got := decodeSegment(t, mustSegment(t, tokens.AccessToken, 1))["loginProvider"]; got != LoginProviderLocal {
+		t.Errorf("a linked password account's token loginProvider = %#v, want %q", got, LoginProviderLocal)
+	}
+}

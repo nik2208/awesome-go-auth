@@ -95,7 +95,7 @@ func TestNewPublicUserUsesCamelCaseContract(t *testing.T) {
 		t.Fatalf("unmarshal public user: %v", err)
 	}
 
-	for _, key := range []string{"id", "email", "tenantId", "firstName", "lastName", "phoneNumber", "isEmailVerified", "isTotpEnabled", "roles", "permissions", "tenants", "metadata", "customClaims", "createdAt"} {
+	for _, key := range []string{"id", "email", "loginProvider", "tenantId", "firstName", "lastName", "phoneNumber", "isEmailVerified", "isTotpEnabled", "roles", "permissions", "tenants", "metadata", "customClaims", "createdAt"} {
 		if _, ok := decoded[key]; !ok {
 			t.Errorf("missing camelCase key %q: %s", key, raw)
 		}
@@ -141,9 +141,22 @@ func TestNewPublicUserEmptyUserOmitsOptionalFields(t *testing.T) {
 			t.Errorf("expected %q to be omitted when empty: %s", key, raw)
 		}
 	}
-	for _, key := range []string{"id", "email", "isEmailVerified", "isTotpEnabled", "createdAt"} {
+	for _, key := range []string{"id", "email", "loginProvider", "isEmailVerified", "isTotpEnabled", "createdAt"} {
 		if _, ok := decoded[key]; !ok {
 			t.Errorf("expected %q to always be present: %s", key, raw)
 		}
+	}
+}
+
+// loginProvider is always emitted: the reference's /me body is its token
+// payload, which carries `loginProvider: user.loginProvider ?? 'local'`
+// unconditionally (auth.router.ts:379), so a password account says "local"
+// rather than omitting the key.
+func TestNewPublicUserLoginProviderDefaultsToLocal(t *testing.T) {
+	if got := NewPublicUser(User{ID: "usr_1"}).LoginProvider; got != LoginProviderLocal {
+		t.Errorf("LoginProvider = %q for a user without one, want %q", got, LoginProviderLocal)
+	}
+	if got := NewPublicUser(User{ID: "usr_1", LoginProvider: "github"}).LoginProvider; got != "github" {
+		t.Errorf("LoginProvider = %q, want the recorded %q", got, "github")
 	}
 }

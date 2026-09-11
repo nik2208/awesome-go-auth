@@ -506,10 +506,16 @@ func testMe(t *testing.T, mount Mounter) {
 		if body["email"] != "me@example.com" {
 			t.Fatalf("email = %v, want me@example.com (body %s)", body["email"], rec.Body.String())
 		}
-		for _, key := range []string{"id", "isEmailVerified", "isTotpEnabled", "createdAt"} {
+		for _, key := range []string{"id", "isEmailVerified", "isTotpEnabled", "loginProvider", "createdAt"} {
 			if _, ok := body[key]; !ok {
 				t.Errorf("missing key %q in %s", key, rec.Body.String())
 			}
+		}
+		// The reference's /me is its token payload, which carries loginProvider
+		// unconditionally: `user.loginProvider ?? 'local'` (auth.router.ts:379),
+		// so a password account says "local" rather than omitting the key.
+		if body["loginProvider"] != "local" {
+			t.Errorf("loginProvider = %v, want %q (body %s)", body["loginProvider"], "local", rec.Body.String())
 		}
 	})
 

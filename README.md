@@ -60,7 +60,7 @@ func main() {
 - User metadata store and service helpers.
 - Multi-tenant in-memory RBAC (`MemoryRolesPermissionsStore`) with roles and permissions.
 - In-memory tenant store (`MemoryTenantStore`) with user↔tenant membership.
-- Custom token claims via `Config.BuildTokenClaims`, also reflected in the enriched profile.
+- Custom token claims via `Config.BuildTokenClaims`, also reflected in the enriched profile. The hook may override the reference's six base claims (`sub`, `email`, `role`, `loginProvider`, `isEmailVerified`, `isTotpEnabled`); the session claims `sid`, `tid`, `jti`, `typ`, `iss`, `iat` and `exp` are reserved.
 - API key service and HTTP middleware (`APIKeyService`, `APIKeyMiddleware`).
 - In-process event bus (`EventBus`) for event-driven integrations.
 - Extended storage interfaces and thread-safe in-memory implementations for all the above flows.

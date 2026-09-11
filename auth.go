@@ -173,7 +173,10 @@ func WithRequire2FA(enabled bool) Option {
 	}
 }
 
-// WithTokenClaimsBuilder customizes token claims creation.
+// WithTokenClaimsBuilder customizes token claims creation. The hook may add
+// claims and override the six base claims; the session claims (sid, tid, jti,
+// typ, iss, iat, exp) are reserved and cannot be set from it — see
+// Config.BuildTokenClaims.
 func WithTokenClaimsBuilder(fn func(ctx context.Context, user User) (map[string]any, error)) Option {
 	return func(b *authBuilder) error {
 		b.cfg.BuildTokenClaims = fn

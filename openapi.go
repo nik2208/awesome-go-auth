@@ -238,10 +238,11 @@ func openAPISchemas() map[string]any {
 		},
 		"User": map[string]any{
 			"type":     "object",
-			"required": []string{"id", "email", "isEmailVerified", "isTotpEnabled", "createdAt"},
+			"required": []string{"id", "email", "loginProvider", "isEmailVerified", "isTotpEnabled", "createdAt"},
 			"properties": map[string]any{
 				"id":              str,
 				"email":           map[string]any{"type": "string", "format": "email"},
+				"loginProvider":   map[string]any{"type": "string", "description": "The provider that created the account; `local` for a password registration."},
 				"tenantId":        str,
 				"firstName":       str,
 				"lastName":        str,
