@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-12
+
+The consuming half of identity, and the policies the reference leaves to its
+host. A resource server can now verify tokens this port did not issue: the
+JWKS document is served at the well-known path on every adapter, and a JWKS
+client, an RS256 verifier and a middleware consume one. OAuth gains the
+provisioning policy the reference only sketches, and with it the
+account-conflict story end to end, from the redirect through link-request to
+link-verify. Runtime settings gain their store, so a deployment can require a
+second factor without a redeploy.
+
 ### Added
 - **`SettingsStore`, `AuthSettings` and `MemorySettingsStore`** — the reference's
   `ISettingsStore` (`settings-store.interface.ts:28-40`), the global switches an
