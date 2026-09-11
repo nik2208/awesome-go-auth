@@ -670,7 +670,7 @@ func openAPIPaths(prefix string) map[string]any {
 		prefix + "/oauth/{provider}/callback": map[string]any{
 			"get": map[string]any{
 				"summary":     "Complete an OAuth login",
-				"description": "Verifies the state, issues a session and redirects back to the origin the state names.",
+				"description": "Verifies the state, issues a session and redirects back to the origin the state names. Under `OAuthProvisioning.OnEmailMatch: \"conflict\"` a provider account asserting an address another account holds redirects to `/account-conflict?provider=<p>&code=" + CodeOAuthAccountConflict + "[&email=<e>]` instead, with no session; the provisioning refusals are JSON.",
 				"operationId": "oauthCallback",
 				"tags":        []string{"OAuth"},
 				"parameters": []map[string]any{
@@ -678,8 +678,9 @@ func openAPIPaths(prefix string) map[string]any {
 					{"name": "code", "in": "query", "required": false, "schema": str},
 					{"name": "state", "in": "query", "required": false, "schema": str},
 				},
-				"responses": respond(http.StatusFound, "Redirect back to the application", schema("Success"),
-					HTTPErrOAuthState),
+				"responses": respond(http.StatusFound, "Redirect back to the application, or to the account-conflict page", schema("Success"),
+					HTTPErrOAuthState, HTTPErrOAuthEmailNotVerified, HTTPErrOAuthEmailDomainNotAllowed,
+					HTTPErrOAuthUserNotProvisioned),
 			},
 		},
 		prefix + "/linked-accounts": map[string]any{

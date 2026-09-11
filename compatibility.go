@@ -350,6 +350,54 @@ func CompatibilityNotes() APICompatibilityNotes {
 					"clients do — cannot tell the difference.",
 			},
 			{
+				ID:      "oauth-provisioning-is-a-policy-not-a-function",
+				Title:   "OAuth provisioning is a configured policy, with three refusals the reference has no counterpart for",
+				Surface: "`GET <prefix>/oauth/{provider}/callback`",
+				Behaviour: "Resolves the callback under `OAuthWiring.Provisioning` " +
+					"(`OAuthProvisioning{AutoCreate, AllowedEmailDomains, RequireVerifiedEmail, " +
+					"OnEmailMatch, FieldMap}`). Three of its outcomes are refusals with no reference " +
+					"counterpart, all `403` JSON on the callback: `OAUTH_EMAIL_NOT_VERIFIED` when " +
+					"`RequireVerifiedEmail` is set and the provider asserted nothing, " +
+					"`OAUTH_EMAIL_DOMAIN_NOT_ALLOWED` when the address is outside " +
+					"`AllowedEmailDomains`, and `OAUTH_USER_NOT_PROVISIONED` when the identity is " +
+					"unknown and `AutoCreate` is false, or when the address belongs to an account and " +
+					"`OnEmailMatch` is `reject`. The fourth, `OnEmailMatch: \"conflict\"`, is the " +
+					"reference's own `OAUTH_ACCOUNT_CONFLICT`: the stash and the 302 to " +
+					"`/account-conflict`, sent exactly as the reference sends them. An account the " +
+					"callback creates records the provider as `loginProvider`, takes " +
+					"`isEmailVerified` from the provider's claim — true when the provider said " +
+					"nothing, which is the common case — and fills further columns from `FieldMap`.",
+				Reference: "Has no provisioning at all: `findOrCreateUser(profile, state)` is an " +
+					"abstract method the integrator implements, and the library knows only two " +
+					"outcomes from it — a user, which becomes a session, or an `AuthError` coded " +
+					"`OAUTH_ACCOUNT_CONFLICT`, which becomes the stash and the redirect. Anything " +
+					"else that function throws reaches `handleError`, which answers `500` unless it " +
+					"is an `AuthError` carrying its own status.",
+				Citations: []string{
+					"generic-oauth.strategy.ts:169-172", "google.strategy.ts:67",
+					"github.strategy.ts:78", "auth.router.ts:1346-1355",
+				},
+				Why: "This port's consumer configures the library from a file; it cannot subclass a " +
+					"strategy, so a policy expressed as configuration is the only form the " +
+					"reference's function can take here. The refusals are what that policy needs to " +
+					"say and the reference never had to: its integrator would have thrown whatever " +
+					"they liked. Defaults reproduce what this port did before the policy existed — " +
+					"`AutoCreate` true, `OnEmailMatch` `link`, no domain list, no verification " +
+					"demand — so a deployment that configures nothing cannot see any of the three " +
+					"codes. `OnEmailMatch` exists because linking by address across providers is the " +
+					"account-takeover shape the reference's own store interface warns about " +
+					"(`findByProviderAccount`, `user-store.interface.ts:105-119`), and the port's " +
+					"default is the unsafe one only because changing it silently would lock accounts " +
+					"out of deployments that rely on it.",
+				Notes: []DeviationNote{{
+					Label: "Matching the reference exactly",
+					Text: "Leave `OAuthWiring.Provisioning` nil. The callback then behaves as it " +
+						"always has, no refusal is reachable, and the only policy-driven answer that " +
+						"can appear is the reference's own account conflict — which needs " +
+						"`OnEmailMatch: \"conflict\"` and so cannot appear either.",
+				}},
+			},
+			{
 				ID:      "cookie-max-age-follows-configured-ttl",
 				Title:   "Cookie `Max-Age` follows the configured TTL, not a hardcoded 7 days",
 				Surface: "`Set-Cookie` on every cookie-mode route that issues tokens, including `POST <prefix>/login`, `POST <prefix>/register` and `POST <prefix>/refresh`",
