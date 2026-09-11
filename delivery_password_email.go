@@ -8,11 +8,13 @@ import (
 )
 
 // This file extends the delivery seam of delivery.go to the three §2 routes that
-// mint a credential and, until now, had nowhere to send it:
+// mint a credential and, until now, had nowhere to send it, plus the one notice
+// the reference mails without a credential in it:
 //
 //	POST <prefix>/forgot-password        → PasswordResetSender
 //	POST <prefix>/send-verification-email → EmailVerificationSender
 //	POST <prefix>/change-email/request   → EmailChangeSender
+//	POST <prefix>/change-email/confirm   → EmailChangedSender (to the OLD address)
 //
 // The shape is delivery.go's, for delivery.go's reasons: func types rather than
 // interfaces, a delivery struct carrying the plaintext token and nothing else
@@ -107,12 +109,10 @@ type EmailVerificationDelivery struct {
 // only what the message needs, and a sender that wants the old address has
 // UserID to read it back with.
 //
-// The reference also mails the *old* address a notice once the change is applied
+// The notice the reference mails the *old* address once the change is applied
 // (config.email.sendEmailChanged from /change-email/confirm,
-// auth.router.ts:1060-1066). This port has no sender for that notice and no
-// template for it either — MailTemplater's email_change template is the
-// confirm-the-new-address mail, not the notice — so the gap is recorded here
-// rather than filled by inventing one. It belongs with a template addition.
+// auth.router.ts:1060-1066) is a different delivery: EmailChangedDelivery, handed
+// to Config.SendEmailChanged.
 type EmailChangeDelivery struct {
 	UserID   string `json:"userId"`
 	TenantID string `json:"tenantId"`
@@ -141,6 +141,39 @@ type EmailVerificationSender func(ctx context.Context, delivery EmailVerificatio
 // EmailChangeSender delivers an email-change token to the pending address. See
 // EmailVerificationSender for the failure contract.
 type EmailChangeSender func(ctx context.Context, delivery EmailChangeDelivery) error
+
+// EmailChangedDelivery is what an EmailChangedSender is handed: the notice that
+// POST <prefix>/change-email/confirm sends to the address an account just moved
+// away from (auth.router.ts:1060-1066, "Send notification to old address").
+//
+// OldEmail is the recipient; NewEmail is what the notice reports. There is no
+// token and no link — this mail confirms nothing, it informs — which is why it
+// carries neither. The JSON tags are the reference's argument names in
+// camelCase, so a sender that forwards the delivery as JSON does so in the
+// family's spelling.
+type EmailChangedDelivery struct {
+	UserID   string `json:"userId"`
+	TenantID string `json:"tenantId"`
+	// OldEmail is the address the notice goes to: the one the account had
+	// until the change was applied (auth.router.ts:1056, 1062).
+	OldEmail string `json:"oldEmail"`
+	// NewEmail is the address the account has now (:1057, 1062).
+	NewEmail string `json:"newEmail"`
+	// Lang is ConfirmEmailChangeInput.Lang, copied through untouched. The
+	// routes leave it empty — the reference calls sendEmailChanged with no
+	// language (:1062, 1065) — so EmailChangedMailer renders in its Locale.
+	Lang string `json:"lang"`
+}
+
+// EmailChangedSender delivers the email-changed notice to the old address.
+//
+// An error fails POST <prefix>/change-email/confirm with the reference's generic
+// 500 — its sendEmailChanged call sits inside the route's try block, after the
+// change has been written (auth.router.ts:1058-1066, handleError at :1068-1069)
+// — so the address has moved even though the response says 500. The failure
+// contract is EmailVerificationSender's; the difference is what has already
+// happened when it fires.
+type EmailChangedSender func(ctx context.Context, delivery EmailChangedDelivery) error
 
 // The routes the three tokens are spent on, relative to the mount prefix.
 const (
@@ -195,11 +228,14 @@ func EmailChangeConfirmURL(base, token string) string {
 // delivery untouched: the service neither resolves nor validates them, exactly
 // as the reference's routes hand `link` and `emailLang` to the sender as built
 // and as received (auth.router.ts:788, 957, 1028).
+//
+// Every sender is called with senderContext(ctx), which is how Config.Templates
+// reaches a ready-made mailer.
 func (s *Service) deliverPasswordReset(ctx context.Context, user User, token string, expiresAt time.Time, linkBase, lang string) error {
 	if s.cfg.SendPasswordReset == nil {
 		return nil
 	}
-	err := s.cfg.SendPasswordReset(ctx, PasswordResetDelivery{
+	err := s.cfg.SendPasswordReset(s.senderContext(ctx), PasswordResetDelivery{
 		UserID:    user.ID,
 		TenantID:  user.TenantID,
 		Email:     user.Email,
@@ -218,7 +254,7 @@ func (s *Service) deliverEmailVerification(ctx context.Context, user User, token
 	if s.cfg.SendEmailVerification == nil {
 		return nil
 	}
-	err := s.cfg.SendEmailVerification(ctx, EmailVerificationDelivery{
+	err := s.cfg.SendEmailVerification(s.senderContext(ctx), EmailVerificationDelivery{
 		UserID:    user.ID,
 		TenantID:  user.TenantID,
 		Email:     user.Email,
@@ -237,7 +273,7 @@ func (s *Service) deliverEmailChange(ctx context.Context, user User, newEmail, t
 	if s.cfg.SendEmailChange == nil {
 		return nil
 	}
-	err := s.cfg.SendEmailChange(ctx, EmailChangeDelivery{
+	err := s.cfg.SendEmailChange(s.senderContext(ctx), EmailChangeDelivery{
 		UserID:    user.ID,
 		TenantID:  user.TenantID,
 		NewEmail:  newEmail,
@@ -250,6 +286,33 @@ func (s *Service) deliverEmailChange(ctx context.Context, user User, newEmail, t
 		return fmt.Errorf("auth: deliver email change: %w: %w", ErrDeliveryFailed, err)
 	}
 	return nil
+}
+
+// deliverEmailChanged is the notice step of ConfirmEmailChange, called after
+// the change is applied. The nil-sender silence and the ErrDeliveryFailed join
+// are the three siblings'.
+func (s *Service) deliverEmailChanged(ctx context.Context, user User, oldEmail, newEmail, lang string) error {
+	if s.cfg.SendEmailChanged == nil {
+		return nil
+	}
+	err := s.cfg.SendEmailChanged(s.senderContext(ctx), EmailChangedDelivery{
+		UserID:   user.ID,
+		TenantID: user.TenantID,
+		OldEmail: oldEmail,
+		NewEmail: newEmail,
+		Lang:     lang,
+	})
+	if err != nil {
+		return fmt.Errorf("auth: deliver email changed: %w: %w", ErrDeliveryFailed, err)
+	}
+	return nil
+}
+
+// senderContext is the context every sender is called with: the caller's,
+// carrying Config.Templates for a MailTemplater whose Store is nil (see
+// MailTemplater.RenderMail). With no store configured it is ctx itself.
+func (s *Service) senderContext(ctx context.Context) context.Context {
+	return withTemplateStore(ctx, s.cfg.Templates)
 }
 
 // -----------------------------------------------------------------------------
@@ -269,13 +332,15 @@ type TokenMailer struct {
 	// MagicLinkMailer.BaseURL is. A delivery's LinkBase wins over it.
 	BaseURL string
 	// Locale selects the built-in template set: "en" (the default) or "it". An
-	// unknown locale falls back to English, as MailTemplater.Render does.
+	// unknown locale falls back to English, as MailTemplater.RenderMail does.
 	//
 	// It is the default, as MagicLinkMailer.Locale is: a delivery whose Lang is
 	// "it" or "en" — the request's emailLang body field — renders in that
 	// language instead, and any other Lang defers to this (resolveLang).
 	Locale string
-	// Templates renders subject and body. The constructors fill this in.
+	// Templates renders subject and bodies. The constructors fill this in; set
+	// Templates.Store to render from a TemplateStore outside a service call
+	// (inside one, Config.Templates is found on its own).
 	Templates *MailTemplater
 }
 
@@ -289,12 +354,11 @@ func (m TokenMailer) link(build func(base, token string) string, linkBase, token
 	return build(linkBaseOr(linkBase, m.BaseURL), token)
 }
 
-// send renders one of the built-in templates in the language resolved for the
-// delivery — lang over Locale, per resolveLang — and hands the result to the
-// transport. The recipient address stands in for the recipient's name: a
-// delivery carries no name, and the built-in templates greet the value they are
-// given.
-func (m TokenMailer) send(ctx context.Context, lang, template, to, token, link string) error {
+// send renders template id in the language resolved for the delivery — lang
+// over Locale, per resolveLang — with link and token as the data, which is what
+// the reference's three link senders render with (mailer.service.ts:186, 191,
+// 201), and hands subject, HTML and text to the transport.
+func (m TokenMailer) send(ctx context.Context, lang, id, to, token, link string) error {
 	if m.Transport == nil {
 		return errors.New("auth: mailer has no transport")
 	}
@@ -302,19 +366,20 @@ func (m TokenMailer) send(ctx context.Context, lang, template, to, token, link s
 	if templates == nil {
 		templates = NewMailTemplater("")
 	}
-	subject, body, err := templates.Render(resolveLang(lang, m.Locale), template, MailTemplateData{
-		UserName: to,
-		Token:    token,
-		URL:      link,
+	rendered, err := templates.RenderMail(ctx, resolveLang(lang, m.Locale), id, MailTemplateData{
+		Token: token,
+		URL:   link,
 	})
 	if err != nil {
 		return err
 	}
-	return m.Transport.Send(ctx, MailMessage{To: to, Subject: subject, Body: body, IsHTML: true})
+	return m.Transport.Send(ctx, MailMessage{To: to, Subject: rendered.Subject, Body: rendered.HTML, IsHTML: true, Text: rendered.Text})
 }
 
 // PasswordResetMailer is the ready-made PasswordResetSender: it renders the
-// built-in reset_password template and hands the result to a MailerTransport.
+// password-reset template (TemplatePasswordReset — the built-in, or a
+// TemplateStore's override) and hands the result to a MailerTransport, as the
+// reference's sendPasswordReset does (mailer.service.ts:185-188).
 //
 // Use it as a sender through its Send method:
 //
@@ -330,7 +395,8 @@ func (m TokenMailer) send(ctx context.Context, lang, template, to, token, link s
 type PasswordResetMailer struct{ TokenMailer }
 
 // NewPasswordResetMailer builds a PasswordResetMailer with the built-in
-// templates. appName is the name those templates greet the recipient with.
+// templates. appName is what a template mentioning {{.appName}} shows; the
+// built-ins mention none.
 func NewPasswordResetMailer(transport MailerTransport, appName, baseURL string) *PasswordResetMailer {
 	return &PasswordResetMailer{newTokenMailer(transport, appName, baseURL)}
 }
@@ -341,13 +407,14 @@ func (m *PasswordResetMailer) Send(ctx context.Context, delivery PasswordResetDe
 	if m == nil {
 		return errors.New("auth: password reset mailer is nil")
 	}
-	return m.send(ctx, delivery.Lang, "reset_password", delivery.Email, delivery.Token,
+	return m.send(ctx, delivery.Lang, TemplatePasswordReset, delivery.Email, delivery.Token,
 		m.link(PasswordResetURL, delivery.LinkBase, delivery.Token))
 }
 
 // EmailVerificationMailer is the ready-made EmailVerificationSender, rendering
-// the built-in verify_email template. See PasswordResetMailer for the usage
-// shape.
+// the verify-email template (TemplateVerifyEmail) as the reference's
+// sendVerificationEmail does (mailer.service.ts:200-203). See
+// PasswordResetMailer for the usage shape.
 type EmailVerificationMailer struct{ TokenMailer }
 
 // NewEmailVerificationMailer builds an EmailVerificationMailer with the built-in
@@ -362,19 +429,19 @@ func (m *EmailVerificationMailer) Send(ctx context.Context, delivery EmailVerifi
 	if m == nil {
 		return errors.New("auth: email verification mailer is nil")
 	}
-	return m.send(ctx, delivery.Lang, "verify_email", delivery.Email, delivery.Token,
+	return m.send(ctx, delivery.Lang, TemplateVerifyEmail, delivery.Email, delivery.Token,
 		m.link(EmailVerificationURL, delivery.LinkBase, delivery.Token))
 }
 
 // EmailChangeMailer is the ready-made EmailChangeSender. It mails the pending
-// address and renders the built-in email_change template.
-//
-// The reference has no template of its own here: it reuses its verification
-// sender and verification template for this mail (wire-contract §2, "there is no
-// dedicated change-email template"). This port ships email_change already, in en
-// and it, and nothing called it until now — so the better-worded template wins.
-// The choice is invisible on the wire: the route answers {"success":true} either
-// way, and only the mail body differs.
+// address the verify-email template (TemplateVerifyEmail) under the
+// change-email confirmation link, which is exactly what the reference does:
+// /change-email/request has no template of its own and calls
+// sendVerificationEmail with its own link (auth.router.ts:1027-1032,
+// mailer.service.ts:200-203). The 0.3.x email_change template is an alias of
+// the same id now (see templateAliases); a deployment that wants different
+// wording for this mail registers it under TemplateVerifyEmail on a separate
+// templater, or stores an override.
 type EmailChangeMailer struct{ TokenMailer }
 
 // NewEmailChangeMailer builds an EmailChangeMailer with the built-in templates.
@@ -388,6 +455,51 @@ func (m *EmailChangeMailer) Send(ctx context.Context, delivery EmailChangeDelive
 	if m == nil {
 		return errors.New("auth: email change mailer is nil")
 	}
-	return m.send(ctx, delivery.Lang, "email_change", delivery.NewEmail, delivery.Token,
+	return m.send(ctx, delivery.Lang, TemplateVerifyEmail, delivery.NewEmail, delivery.Token,
 		m.link(EmailChangeConfirmURL, delivery.LinkBase, delivery.Token))
+}
+
+// EmailChangedMailer is the ready-made EmailChangedSender: it renders the
+// email-changed template (TemplateEmailChanged) with the new address as its
+// data and mails it to the old one, as the reference's sendEmailChanged does
+// (mailer.service.ts:205-208). It has no BaseURL because the notice carries no
+// link.
+//
+//	auth.WithEmailChangedSender(auth.NewEmailChangedMailer(mailer, "Example App").Send)
+type EmailChangedMailer struct {
+	// Transport delivers the rendered message. Required.
+	Transport MailerTransport
+	// Locale is what TokenMailer.Locale is. The routes hand this mailer no
+	// language at all (EmailChangedDelivery.Lang), so it is usually the rule
+	// here rather than the default.
+	Locale string
+	// Templates renders subject and bodies. NewEmailChangedMailer fills this in.
+	Templates *MailTemplater
+}
+
+// NewEmailChangedMailer builds an EmailChangedMailer with the built-in
+// templates.
+func NewEmailChangedMailer(transport MailerTransport, appName string) *EmailChangedMailer {
+	return &EmailChangedMailer{Transport: transport, Templates: NewMailTemplater(appName)}
+}
+
+// Send renders and delivers the notice to the old address. Its signature is
+// EmailChangedSender's.
+func (m *EmailChangedMailer) Send(ctx context.Context, delivery EmailChangedDelivery) error {
+	if m == nil || m.Transport == nil {
+		return errors.New("auth: email changed mailer has no transport")
+	}
+	templates := m.Templates
+	if templates == nil {
+		templates = NewMailTemplater("")
+	}
+	// newEmail is the one key the reference renders this template with
+	// (mailer.service.ts:206).
+	rendered, err := templates.RenderMail(ctx, resolveLang(delivery.Lang, m.Locale), TemplateEmailChanged, MailTemplateData{
+		NewEmail: delivery.NewEmail,
+	})
+	if err != nil {
+		return err
+	}
+	return m.Transport.Send(ctx, MailMessage{To: delivery.OldEmail, Subject: rendered.Subject, Body: rendered.HTML, IsHTML: true, Text: rendered.Text})
 }

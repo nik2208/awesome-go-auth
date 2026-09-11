@@ -101,6 +101,19 @@ type Config struct {
 	SendPasswordReset     PasswordResetSender
 	SendEmailVerification EmailVerificationSender
 	SendEmailChange       EmailChangeSender
+	// SendEmailChanged is the reference's config.email.sendEmailChanged
+	// (auth-config.model.ts:252-257): the notice POST <prefix>/change-email/confirm
+	// mails to the OLD address once the change is applied (auth.router.ts:
+	// 1060-1066). Optional; nil is silence, as for the three above. A failure is
+	// the reference's generic 500 with the change already committed — see
+	// Service.ConfirmEmailChange.
+	SendEmailChanged EmailChangedSender
+	// Templates is the reference's config.templateStore
+	// (auth-config.model.ts:400, read by mailer.service.ts:146): a TemplateStore whose
+	// templates override the built-ins for every ready-made mailer the service
+	// calls, and which will hold the UI translations once the UI router reads
+	// them. Optional; nil renders the built-ins. WithTemplateStore sets it.
+	Templates TemplateStore
 	// SiteURLs is the reference's config.email.siteUrl, which may be one string
 	// or an array of them (auth-config.model.ts). Two things are read off it:
 	//

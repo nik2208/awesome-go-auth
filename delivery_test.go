@@ -387,12 +387,18 @@ func TestMagicLinkMailerRendersAndSends(t *testing.T) {
 	if !msg.IsHTML {
 		t.Error("the built-in templates are HTML")
 	}
-	if msg.Subject != "Example App - Magic Link Login" {
+	// The reference's subject (mailer.service.ts:52), no app name in front.
+	if msg.Subject != "Your magic sign-in link" {
 		t.Errorf("Subject = %q", msg.Subject)
 	}
 	link := "https://app.example.com/auth/magic-link/verify?token=tok123"
 	if !strings.Contains(msg.Body, link) {
 		t.Errorf("body does not carry the link %q: %s", link, msg.Body)
+	}
+	// The text alternative is the reference's text template (:57): the link,
+	// no markup.
+	if !strings.Contains(msg.Text, link) || strings.Contains(msg.Text, "<") {
+		t.Errorf("Text = %q, want the plain-text body carrying %q", msg.Text, link)
 	}
 }
 
@@ -400,10 +406,10 @@ func TestMagicLinkMailerRendersAndSends(t *testing.T) {
 // English rather than failing to send.
 func TestMagicLinkMailerLocale(t *testing.T) {
 	for locale, wantSubject := range map[string]string{
-		"it": "Example App - Magic Link Accesso",
-		"en": "Example App - Magic Link Login",
-		"":   "Example App - Magic Link Login",
-		"de": "Example App - Magic Link Login",
+		"it": "Il tuo link di accesso",
+		"en": "Your magic sign-in link",
+		"":   "Your magic sign-in link",
+		"de": "Your magic sign-in link",
 	} {
 		transport := &recordingMailer{}
 		mailer := NewMagicLinkMailer(transport, "Example App", "https://app.example.com/auth")
@@ -440,28 +446,28 @@ func TestMagicLinkMailerHonoursThePerRequestBaseAndLang(t *testing.T) {
 			locale:      "en",
 			delivery:    MagicLinkDelivery{Email: "l@example.com", Token: "t", LinkBase: "https://app.example.com/auth/ui", Lang: "it"},
 			wantLink:    "https://app.example.com/auth/ui/magic-link/verify?token=t",
-			wantSubject: "Example App - Magic Link Accesso",
+			wantSubject: "Il tuo link di accesso",
 		},
 		{
 			name:        "an empty LinkBase and Lang defer to BaseURL and Locale",
 			locale:      "it",
 			delivery:    MagicLinkDelivery{Email: "l@example.com", Token: "t"},
 			wantLink:    "https://static.example.com/auth/magic-link/verify?token=t",
-			wantSubject: "Example App - Magic Link Accesso",
+			wantSubject: "Il tuo link di accesso",
 		},
 		{
 			name:        "a Lang that is neither it nor en defers to Locale",
 			locale:      "it",
 			delivery:    MagicLinkDelivery{Email: "l@example.com", Token: "t", Lang: "de"},
 			wantLink:    "https://static.example.com/auth/magic-link/verify?token=t",
-			wantSubject: "Example App - Magic Link Accesso",
+			wantSubject: "Il tuo link di accesso",
 		},
 		{
 			name:        "en overrides an it Locale",
 			locale:      "it",
 			delivery:    MagicLinkDelivery{Email: "l@example.com", Token: "t", Lang: "en"},
 			wantLink:    "https://static.example.com/auth/magic-link/verify?token=t",
-			wantSubject: "Example App - Magic Link Login",
+			wantSubject: "Your magic sign-in link",
 		},
 	}
 	for _, tc := range cases {

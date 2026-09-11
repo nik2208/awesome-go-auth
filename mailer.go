@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
+	htmltemplate "html/template"
+	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
+	"sync"
+	texttemplate "text/template"
 	"time"
 )
 
@@ -225,134 +229,516 @@ func (t *gatewayMailerTransport) Send(ctx context.Context, msg MailMessage) erro
 	return nil
 }
 
-// MailTemplateData holds the common variables injected into mail templates.
+// -----------------------------------------------------------------------------
+// templates
+// -----------------------------------------------------------------------------
+
+// The six template ids the reference renders, as its MailerService names them
+// (mailer.service.ts:186, 191, 196, 201, 206, 211). They are the ids a
+// TemplateStore is asked for and the ids Register, RenderMail and Render take.
+const (
+	TemplatePasswordReset = "password-reset"
+	TemplateMagicLink     = "magic-link"
+	TemplateWelcome       = "welcome"
+	TemplateVerifyEmail   = "verify-email"
+	TemplateEmailChanged  = "email-changed"
+	TemplateInvitation    = "invitation"
+)
+
+// templateAliases maps the ids this port used before it adopted the reference's
+// to the reference id each one is. They keep working everywhere an id is
+// accepted and are resolved before a store is consulted, so a stored
+// "password-reset" also serves a caller still asking for "reset_password".
+//
+// Deprecated: reset_password, magic_link and verify_email are aliases of
+// TemplatePasswordReset, TemplateMagicLink and TemplateVerifyEmail. email_change
+// is an alias of TemplateVerifyEmail too: the reference mails its verification
+// template on /change-email/request (auth.router.ts:1027-1032, calling
+// sendVerificationEmail) and has no confirm-the-new-address template of its
+// own, so the port's stops existing as a separate one — its "valid for 24
+// hours" wording over a one-hour token is the reference's, reproduced. Use the
+// constants; the aliases go with v1.0.0.
+var templateAliases = map[string]string{
+	"reset_password": TemplatePasswordReset,
+	"magic_link":     TemplateMagicLink,
+	"verify_email":   TemplateVerifyEmail,
+	"email_change":   TemplateVerifyEmail,
+}
+
+func canonicalTemplateID(id string) string {
+	if canonical, ok := templateAliases[id]; ok {
+		return canonical
+	}
+	return id
+}
+
+// MailTemplateData holds the variables a template is rendered with.
+//
+// A built-in template, or one added with Register, reads them as Go template
+// fields — {{.link}}, {{.token}} … — and a stored template reads the same keys
+// as {{link}}, {{token}} … (see RenderMail). The keys are the reference's, so a
+// stored template written for it renders here unchanged:
+//
+//	token     Token                  (mailer.service.ts:186, 191, 201)
+//	link      URL, for every id but welcome           (:186, 191, 201, 211)
+//	loginUrl  URL, for welcome only — the name its template reads (:62); the
+//	          reference's router passes {loginUrl} there (auth.router.ts:724)
+//	newEmail  NewEmail               (:206)
+//	…         every Extra entry under its own key, formatted with fmt.Sprint;
+//	          the welcome template's tempPassword (:63) travels here
+//	appName   AppName, the templater's, when it has one  (a key of this port's)
+//	name      UserName                                   (a key of this port's)
+//	code      Code                                       (a key of this port's)
+//	oldEmail  OldEmail                                   (a key of this port's)
+//
+// An empty field is left out rather than set to "", so a stored template naming
+// a key the caller did not supply shows the reference's "[key]" placeholder.
+// The reference never passes appName, name, code or oldEmail, and they are
+// absent here too until set, so a stored template written for it sees exactly
+// the keys it sees there: {link, token} for password-reset, magic-link and
+// verify-email (:186, :191, :201), {link} for invitation (:211), {newEmail} for
+// email-changed (:206), {loginUrl, tempPassword} for welcome
+// (auth.router.ts:724). The ready-made mailers supply what the reference's
+// senders do and nothing else. A field set on the struct wins over an Extra
+// entry of the same key.
 type MailTemplateData struct {
 	AppName  string
 	UserName string
 	Token    string
 	URL      string
 	Code     string
+	// NewEmail and OldEmail are the two addresses of the email-changed notice.
+	NewEmail string
+	OldEmail string
 	Extra    map[string]any
 }
 
-// MailTemplater renders localized mail templates.
-type MailTemplater struct {
-	appName string
-	tmpls   map[string]*template.Template
-}
-
-// NewMailTemplater creates a templater with built-in en and it templates.
-func NewMailTemplater(appName string) *MailTemplater {
-	m := &MailTemplater{appName: appName, tmpls: make(map[string]*template.Template)}
-
-	// Built-in English templates
-	m.addTemplate("en/reset_password", `<!DOCTYPE html><html><body>
-<h2>Password Reset - {{.AppName}}</h2>
-<p>Hello {{.UserName}},</p>
-<p>Click the link below to reset your password. This link expires in 1 hour.</p>
-<p><a href="{{.URL}}">Reset Password</a></p>
-<p>If you did not request this, please ignore this email.</p>
-</body></html>`)
-
-	m.addTemplate("en/magic_link", `<!DOCTYPE html><html><body>
-<h2>Magic Link Login - {{.AppName}}</h2>
-<p>Hello {{.UserName}},</p>
-<p>Click the link below to sign in. This link expires in 15 minutes.</p>
-<p><a href="{{.URL}}">Sign In</a></p>
-</body></html>`)
-
-	m.addTemplate("en/verify_email", `<!DOCTYPE html><html><body>
-<h2>Verify Your Email - {{.AppName}}</h2>
-<p>Hello {{.UserName}},</p>
-<p>Please verify your email address by clicking the link below.</p>
-<p><a href="{{.URL}}">Verify Email</a></p>
-</body></html>`)
-
-	m.addTemplate("en/email_change", `<!DOCTYPE html><html><body>
-<h2>Confirm Email Change - {{.AppName}}</h2>
-<p>Hello {{.UserName}},</p>
-<p>Click the link below to confirm your new email address.</p>
-<p><a href="{{.URL}}">Confirm Email Change</a></p>
-</body></html>`)
-
-	// Built-in Italian templates
-	m.addTemplate("it/reset_password", `<!DOCTYPE html><html><body>
-<h2>Reimpostazione Password - {{.AppName}}</h2>
-<p>Ciao {{.UserName}},</p>
-<p>Clicca sul link sottostante per reimpostare la tua password. Il link scade tra 1 ora.</p>
-<p><a href="{{.URL}}">Reimposta Password</a></p>
-<p>Se non hai richiesto questo, ignora questa email.</p>
-</body></html>`)
-
-	m.addTemplate("it/magic_link", `<!DOCTYPE html><html><body>
-<h2>Accesso Magic Link - {{.AppName}}</h2>
-<p>Ciao {{.UserName}},</p>
-<p>Clicca sul link sottostante per accedere. Il link scade tra 15 minuti.</p>
-<p><a href="{{.URL}}">Accedi</a></p>
-</body></html>`)
-
-	m.addTemplate("it/verify_email", `<!DOCTYPE html><html><body>
-<h2>Verifica Email - {{.AppName}}</h2>
-<p>Ciao {{.UserName}},</p>
-<p>Verifica il tuo indirizzo email cliccando sul link sottostante.</p>
-<p><a href="{{.URL}}">Verifica Email</a></p>
-</body></html>`)
-
-	m.addTemplate("it/email_change", `<!DOCTYPE html><html><body>
-<h2>Conferma Cambio Email - {{.AppName}}</h2>
-<p>Ciao {{.UserName}},</p>
-<p>Clicca sul link per confermare il tuo nuovo indirizzo email.</p>
-<p><a href="{{.URL}}">Conferma Cambio Email</a></p>
-</body></html>`)
-
-	return m
-}
-
-func (m *MailTemplater) addTemplate(key, body string) {
-	t, err := template.New(key).Parse(body)
-	if err == nil {
-		m.tmpls[key] = t
+// values is the key -> value map both template kinds render from. id is the
+// canonical template id: it decides which name URL travels under.
+func (d MailTemplateData) values(id string) map[string]string {
+	out := make(map[string]string, len(d.Extra)+8)
+	for k, v := range d.Extra {
+		if v == nil {
+			// `data[key] ?? '[KEY]'`: a null value is as absent (mailer.service.ts:167).
+			continue
+		}
+		out[k] = fmt.Sprint(v)
 	}
-}
-
-// Render produces the subject and HTML body for the given locale and template name.
-func (m *MailTemplater) Render(locale, name string, data MailTemplateData) (subject, body string, err error) {
-	data.AppName = m.appName
-	key := locale + "/" + name
-	t, ok := m.tmpls[key]
-	if !ok {
-		// Fall back to English
-		key = "en/" + name
-		t, ok = m.tmpls[key]
-		if !ok {
-			return "", "", fmt.Errorf("auth: mail template %q not found", name)
+	set := func(key, value string) {
+		if value != "" {
+			out[key] = value
 		}
 	}
+	set("appName", d.AppName)
+	set("name", d.UserName)
+	set("token", d.Token)
+	if id == TemplateWelcome {
+		// The welcome data is {loginUrl, tempPassword?} (auth.router.ts:724,
+		// mailer.service.ts:62-63): the sign-in URL under the name the
+		// template reads, and no link.
+		set("loginUrl", d.URL)
+	} else {
+		set("link", d.URL)
+	}
+	set("code", d.Code)
+	set("newEmail", d.NewEmail)
+	set("oldEmail", d.OldEmail)
+	return out
+}
+
+// MailRendered is a rendered mail: what RenderMail returns and what a
+// ready-made mailer hands its transport as Subject, Body (the HTML) and Text.
+type MailRendered struct {
+	Subject string
+	HTML    string
+	Text    string
+}
+
+// MailTemplater renders localized mail templates: the reference's six
+// built-ins in en and it, any the host registers over them, and — when a
+// TemplateStore is reachable — the stored override for an id.
+//
+// It is the port's MailerService.render (mailer.service.ts:149-181): the store
+// is consulted first and used when it holds both bodies; otherwise the
+// registered template renders. Register is meant for set-up time; RenderMail
+// and Render are safe to call concurrently, with each other and with Register.
+type MailTemplater struct {
+	// Store is the template store RenderMail consults. Nil means the one the
+	// service put on the context — Config.Templates, set with WithTemplateStore,
+	// which reaches every sender the service calls — and, when there is none
+	// there either, the built-ins only. Set it to render from a store outside a
+	// service call, or from a store other than the configured one.
+	Store TemplateStore
+
+	appName string
+	mu      sync.RWMutex
+	tmpls   map[string]*mailTemplate
+}
+
+// mailTemplate is one registered (locale, id) pair. All three parts are Go
+// templates, so a registered subject can carry {{.appName}}: text/template for
+// the subject and the text body, html/template — contextual escaping included
+// — for the HTML body. err is a parse failure, reported on render rather than
+// at Register, which has no error return.
+type mailTemplate struct {
+	subject *texttemplate.Template
+	html    *htmltemplate.Template
+	text    *texttemplate.Template
+	err     error
+}
+
+// NewMailTemplater creates a templater with the built-in en and it templates
+// for the six reference ids. appName is what a template mentioning
+// {{.appName}} shows; the built-ins mention none, as the reference's do not,
+// and it is carried as the appName data key for stored and registered ones.
+func NewMailTemplater(appName string) *MailTemplater {
+	t := &MailTemplater{appName: appName, tmpls: make(map[string]*mailTemplate)}
+	for _, b := range builtinMailTemplates {
+		t.Register(b.locale, b.id, b.subject, b.html, b.text)
+	}
+	return t
+}
+
+// Register adds or replaces the template rendered for id in locale. The three
+// parts are Go templates over the keys MailTemplateData lists — {{.link}},
+// {{.appName}} … — html/template for html, text/template for subject and text.
+// It is what NewMailTemplater fills the built-ins in with, and the way a host
+// replaces one, or adds a locale or an id of its own, without a TemplateStore.
+// An alias id registers under the id it is an alias of.
+//
+// A part that does not parse is kept and reported by RenderMail for that
+// (locale, id) rather than dropped: a typo must surface, and Register has no
+// error return to surface it through.
+func (t *MailTemplater) Register(locale, id, subject, html, text string) {
+	id = canonicalTemplateID(id)
+	entry := &mailTemplate{}
+	var err error
+	if entry.subject, err = texttemplate.New(id + "/subject").Option("missingkey=zero").Parse(subject); err != nil {
+		entry.err = fmt.Errorf("auth: mail template %s/%s subject: %w", locale, id, err)
+	} else if entry.html, err = htmltemplate.New(id + "/html").Option("missingkey=zero").Parse(html); err != nil {
+		entry.err = fmt.Errorf("auth: mail template %s/%s html: %w", locale, id, err)
+	} else if entry.text, err = texttemplate.New(id + "/text").Option("missingkey=zero").Parse(text); err != nil {
+		entry.err = fmt.Errorf("auth: mail template %s/%s text: %w", locale, id, err)
+	}
+	t.mu.Lock()
+	if t.tmpls == nil {
+		// A zero-value MailTemplater has no built-ins and no map; Register on
+		// it must add, not panic.
+		t.tmpls = make(map[string]*mailTemplate)
+	}
+	t.tmpls[locale+"/"+id] = entry
+	t.mu.Unlock()
+}
+
+// lookup finds the registered template for id in locale, falling back to en.
+func (t *MailTemplater) lookup(locale, id string) *mailTemplate {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if entry, ok := t.tmpls[locale+"/"+id]; ok {
+		return entry
+	}
+	return t.tmpls["en/"+id]
+}
+
+// storeFor is the store RenderMail consults: Store, else the one the service
+// put on ctx, else none.
+func (t *MailTemplater) storeFor(ctx context.Context) TemplateStore {
+	if t.Store != nil {
+		return t.Store
+	}
+	return templateStoreFromContext(ctx)
+}
+
+// RenderMail renders template id in locale: subject, HTML body and text body.
+//
+// It is the reference's MailerService.render (mailer.service.ts:149-181):
+//
+//   - A stored template is looked up first — through Store, or the store the
+//     service put on ctx (Config.Templates) — and used only when both its
+//     BaseHTML and BaseText are non-empty (:158). A store error is returned.
+//   - Its translations are those for locale, else for "en", else none (:159).
+//     Every {{T.key}} becomes translations[key], or "[key]" when that is
+//     missing or empty (:163); then every remaining {{key}} becomes the data
+//     value for key — the keys MailTemplateData lists, which for a template
+//     written against the reference are exactly the ones it passes — or
+//     "[key]" when there is none (:165-168). The subject is
+//     translations["subject"], else the registered subject for the language,
+//     interpolated the same way (:172-177). Values are substituted as they
+//     are, in the HTML body included — no HTML escaping, because the
+//     reference does none (:167). A stored BaseHTML is the deployment's own
+//     markup, but not every value is: newEmail is the address the user typed
+//     on /change-email/request, lowercased and trimmed and nothing more, and
+//     an Extra entry is whatever the caller put there. A stored template that
+//     shows them mails them verbatim, as the reference's does; the built-ins,
+//     rendered by html/template, escape them.
+//   - Otherwise the registered template for locale renders — the built-in one
+//     unless Register replaced it — falling back to "en" when locale has none,
+//     with html/template's contextual escaping in the HTML body.
+//
+// locale is used as given; the ready-made mailers pass what resolveLang
+// picked. The four pre-reference ids are accepted as aliases (see
+// templateAliases). An id with neither a usable stored template nor a
+// registered one is an error.
+func (t *MailTemplater) RenderMail(ctx context.Context, locale, id string, data MailTemplateData) (MailRendered, error) {
+	if t == nil {
+		return MailRendered{}, errors.New("auth: nil mail templater")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id = canonicalTemplateID(id)
+	data.AppName = t.appName
+	values := data.values(id)
+	registered := t.lookup(locale, id)
+
+	if store := t.storeFor(ctx); store != nil {
+		stored, ok, err := store.GetMailTemplate(ctx, id)
+		if err != nil {
+			return MailRendered{}, fmt.Errorf("auth: mail template %q: %w", id, err)
+		}
+		if ok && stored.BaseHTML != "" && stored.BaseText != "" {
+			return renderStoredTemplate(id, stored, locale, values, registered)
+		}
+	}
+	if registered == nil {
+		return MailRendered{}, fmt.Errorf("auth: mail template %q not found", id)
+	}
+	return registered.render(id, values)
+}
+
+// Render produces the subject and HTML body for the given locale and template
+// id: RenderMail without a context and without the text body, kept for the
+// callers that want exactly that. The store the service configured is only
+// reachable through the context, so a Render outside a service call sees
+// Store and the built-ins.
+func (t *MailTemplater) Render(locale, name string, data MailTemplateData) (subject, body string, err error) {
+	rendered, err := t.RenderMail(context.Background(), locale, name, data)
+	if err != nil {
+		return "", "", err
+	}
+	return rendered.Subject, rendered.HTML, nil
+}
+
+func (m *mailTemplate) render(id string, values map[string]string) (MailRendered, error) {
+	if m.err != nil {
+		return MailRendered{}, m.err
+	}
+	subject, err := executeTemplate(m.subject, values)
+	if err != nil {
+		return MailRendered{}, fmt.Errorf("auth: render mail template %q subject: %w", id, err)
+	}
+	html, err := executeTemplate(m.html, values)
+	if err != nil {
+		return MailRendered{}, fmt.Errorf("auth: render mail template %q: %w", id, err)
+	}
+	text, err := executeTemplate(m.text, values)
+	if err != nil {
+		return MailRendered{}, fmt.Errorf("auth: render mail template %q text: %w", id, err)
+	}
+	return MailRendered{Subject: subject, HTML: html, Text: text}, nil
+}
+
+// templateExecutor is what html/template and text/template have in common.
+type templateExecutor interface {
+	Execute(w io.Writer, data any) error
+}
+
+func executeTemplate(tmpl templateExecutor, values map[string]string) (string, error) {
 	var buf strings.Builder
-	if err := t.Execute(&buf, data); err != nil {
-		return "", "", fmt.Errorf("auth: render mail template %q: %w", name, err)
+	if err := tmpl.Execute(&buf, values); err != nil {
+		return "", err
 	}
+	return buf.String(), nil
+}
 
-	enSubjects := map[string]string{
-		"reset_password": m.appName + " - Password Reset",
-		"magic_link":     m.appName + " - Magic Link Login",
-		"verify_email":   m.appName + " - Verify Your Email",
-		"email_change":   m.appName + " - Confirm Email Change",
+// renderStoredTemplate is the store branch of RenderMail (mailer.service.ts:
+// 158-177). registered supplies the fallback subject and may be nil.
+func renderStoredTemplate(id string, stored MailTemplate, locale string, values map[string]string, registered *mailTemplate) (MailRendered, error) {
+	translations := pickTranslations(stored.Translations, locale)
+	subject := translations["subject"]
+	if subject == "" && registered != nil {
+		if registered.err != nil {
+			return MailRendered{}, registered.err
+		}
+		fallback, err := executeTemplate(registered.subject, values)
+		if err != nil {
+			return MailRendered{}, fmt.Errorf("auth: render mail template %q subject: %w", id, err)
+		}
+		subject = fallback
 	}
-	itSubjects := map[string]string{
-		"reset_password": m.appName + " - Reimposta Password",
-		"magic_link":     m.appName + " - Magic Link Accesso",
-		"verify_email":   m.appName + " - Verifica Email",
-		"email_change":   m.appName + " - Conferma Cambio Email",
-	}
+	return MailRendered{
+		Subject: interpolateStored(subject, translations, values),
+		HTML:    interpolateStored(stored.BaseHTML, translations, values),
+		Text:    interpolateStored(stored.BaseText, translations, values),
+	}, nil
+}
 
-	subjects := enSubjects
-	if locale == "it" {
-		subjects = itSubjects
+// pickTranslations is `translations[lang] || translations['en'] || {}`
+// (mailer.service.ts:159). Presence decides, as JavaScript's || does on an
+// object: a language whose map is empty is still that language's map.
+func pickTranslations(all map[string]map[string]string, locale string) map[string]string {
+	if m, ok := all[locale]; ok && m != nil {
+		return m
 	}
-	subject = subjects[name]
-	if subject == "" {
-		subject = m.appName + " - " + name
+	if m, ok := all["en"]; ok && m != nil {
+		return m
 	}
-	return subject, buf.String(), nil
+	return map[string]string{}
+}
+
+// The two placeholder shapes of a stored template, the reference's regular
+// expressions verbatim (mailer.service.ts:163, 165).
+var (
+	storedTranslationPattern = regexp.MustCompile(`\{\{T\.([^}]+)\}\}`)
+	storedDataPattern        = regexp.MustCompile(`\{\{([^}]+)\}\}`)
+)
+
+// interpolateStored is the reference's interpolate (mailer.service.ts:161-170):
+// translations first, data second, each missing one left as its bracketed key.
+// A translation that is present but empty counts as missing (`||`, :163); a
+// data value that is present but empty does not (`??`, :167).
+func interpolateStored(s string, translations, values map[string]string) string {
+	s = storedTranslationPattern.ReplaceAllStringFunc(s, func(match string) string {
+		key := match[len("{{T.") : len(match)-len("}}")]
+		if v := translations[key]; v != "" {
+			return v
+		}
+		return "[" + key + "]"
+	})
+	return storedDataPattern.ReplaceAllStringFunc(s, func(match string) string {
+		key := match[len("{{") : len(match)-len("}}")]
+		if strings.HasPrefix(key, "T.") {
+			// Already handled above (:166): a translation that itself reads
+			// {{T.x}} is left as it is, not resolved twice.
+			return match
+		}
+		if v, ok := values[key]; ok {
+			return v
+		}
+		return "[" + key + "]"
+	})
+}
+
+// builtinMailTemplates are the reference's built-in templates — subject, html
+// and text for each of the six ids in en and it (mailer.service.ts:19-127; the
+// invitation fallback :211-225) — with its ${…} interpolations as the Go
+// template fields MailTemplateData lists. The wording is the reference's,
+// which is what keeps a mailbox from telling the two ports apart.
+var builtinMailTemplates = []struct {
+	locale, id, subject, html, text string
+}{
+	// password-reset (:19-38)
+	{"en", TemplatePasswordReset, "Reset your password",
+		`<p>You requested a password reset.</p>
+<p>Click the link below to proceed (valid for 1 hour):</p>
+<p><a href="{{.link}}">{{.link}}</a></p>
+<p>If you did not request this, please ignore this email.</p>`,
+		`You requested a password reset.
+
+Click the link below (valid for 1 hour):
+{{.link}}
+
+If you did not request this, please ignore this email.`},
+	{"it", TemplatePasswordReset, "Reimposta la tua password",
+		`<p>Hai richiesto di reimpostare la tua password.</p>
+<p>Clicca sul link seguente per procedere (valido 1 ora):</p>
+<p><a href="{{.link}}">{{.link}}</a></p>
+<p>Se non hai richiesto questo, ignora questa email.</p>`,
+		`Hai richiesto di reimpostare la tua password.
+
+Clicca sul link seguente (valido 1 ora):
+{{.link}}
+
+Se non hai richiesto questo, ignora questa email.`},
+
+	// magic-link (:40-59)
+	{"en", TemplateMagicLink, "Your magic sign-in link",
+		`<p>You requested a sign-in link.</p>
+<p>Click the link below to sign in (valid for 15 minutes):</p>
+<p><a href="{{.link}}">{{.link}}</a></p>
+<p>If you did not request this, please ignore this email.</p>`,
+		`You requested a sign-in link.
+
+Click the link below (valid for 15 minutes):
+{{.link}}
+
+If you did not request this, please ignore this email.`},
+	{"it", TemplateMagicLink, "Il tuo link di accesso",
+		`<p>Hai richiesto un link di accesso.</p>
+<p>Clicca sul link seguente per accedere (valido 15 minuti):</p>
+<p><a href="{{.link}}">{{.link}}</a></p>
+<p>Se non hai richiesto questo, ignora questa email.</p>`,
+		`Hai richiesto un link di accesso.
+
+Clicca sul link seguente (valido 15 minuti):
+{{.link}}
+
+Se non hai richiesto questo, ignora questa email.`},
+
+	// welcome (:61-89): the temporary-password line appears only when one is
+	// supplied, as the reference's passwordLine / passwordText do (:66-69, 78-81).
+	{"en", TemplateWelcome, "Welcome! Your account has been created",
+		`<p>Your account has been created successfully.</p>
+{{if .tempPassword}}<p>Temporary password: <strong>{{.tempPassword}}</strong></p>{{end}}
+<p>Sign in here: <a href="{{.loginUrl}}">{{.loginUrl}}</a></p>`,
+		`Your account has been created successfully.
+{{if .tempPassword}}Temporary password: {{.tempPassword}}
+{{end}}Sign in here: {{.loginUrl}}`},
+	{"it", TemplateWelcome, "Benvenuto! Il tuo account è stato creato",
+		`<p>Il tuo account è stato creato con successo.</p>
+{{if .tempPassword}}<p>Password temporanea: <strong>{{.tempPassword}}</strong></p>{{end}}
+<p>Accedi qui: <a href="{{.loginUrl}}">{{.loginUrl}}</a></p>`,
+		`Il tuo account è stato creato con successo.
+{{if .tempPassword}}Password temporanea: {{.tempPassword}}
+{{end}}Accedi qui: {{.loginUrl}}`},
+
+	// verify-email (:91-110)
+	{"en", TemplateVerifyEmail, "Verify your email address",
+		`<p>Thank you for signing up.</p>
+<p>Click the link below to verify your email address (valid for 24 hours):</p>
+<p><a href="{{.link}}">{{.link}}</a></p>
+<p>If you did not create an account, please ignore this email.</p>`,
+		`Thank you for signing up.
+
+Click the link below to verify your email address (valid for 24 hours):
+{{.link}}
+
+If you did not create an account, please ignore this email.`},
+	{"it", TemplateVerifyEmail, "Verifica il tuo indirizzo email",
+		`<p>Grazie per esserti registrato.</p>
+<p>Clicca sul link seguente per verificare il tuo indirizzo email (valido 24 ore):</p>
+<p><a href="{{.link}}">{{.link}}</a></p>
+<p>Se non hai creato un account, ignora questa email.</p>`,
+		`Grazie per esserti registrato.
+
+Clicca sul link seguente per verificare il tuo indirizzo email (valido 24 ore):
+{{.link}}
+
+Se non hai creato un account, ignora questa email.`},
+
+	// email-changed (:112-127)
+	{"en", TemplateEmailChanged, "Your email address has been updated",
+		`<p>This is a notice that your email address has been updated to <strong>{{.newEmail}}</strong>.</p>
+<p>If you did not request this change, please contact support immediately.</p>`,
+		`Your email address has been updated to {{.newEmail}}.
+
+If you did not request this change, please contact support immediately.`},
+	{"it", TemplateEmailChanged, "Il tuo indirizzo email è stato aggiornato",
+		`<p>Questo è un avviso che il tuo indirizzo email è stato aggiornato a <strong>{{.newEmail}}</strong>.</p>
+<p>Se non hai richiesto questa modifica, contatta immediatamente il supporto.</p>`,
+		`Il tuo indirizzo email è stato aggiornato a {{.newEmail}}.
+
+Se non hai richiesto questa modifica, contatta immediatamente il supporto.`},
+
+	// invitation (:211-225)
+	{"en", TemplateInvitation, "Invitation to join",
+		`<p>You have been invited.</p><p><a href="{{.link}}">{{.link}}</a></p>`,
+		`You have been invited.
+
+{{.link}}`},
+	{"it", TemplateInvitation, "Invito ad unirsi",
+		`<p>Sei stato invitato.</p><p><a href="{{.link}}">{{.link}}</a></p>`,
+		`Sei stato invitato.
+
+{{.link}}`},
 }

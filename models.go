@@ -252,6 +252,12 @@ type ChangeEmailRequestInput struct {
 
 type ConfirmEmailChangeInput struct {
 	Token string
+	// Lang is copied onto EmailChangedDelivery for the notice to the old
+	// address. The adapters leave it empty: the reference's route reads only
+	// token from the body and calls sendEmailChanged without a language
+	// (auth.router.ts:1046, 1062, 1065), so the notice renders in the mailer's
+	// default. It is here for a caller driving the service directly.
+	Lang string
 }
 
 // UpdateProfileInput is the payload behind PATCH /profile. FirstName and

@@ -356,7 +356,7 @@ func (s *Service) SendMagicLink(ctx context.Context, in MagicLinkSendInput) (str
 	// LinkBase and Lang are the request's, copied through untouched: the
 	// reference hands the strategy its siteUrlOverride and lang as built and as
 	// received (auth.router.ts:1104/1114 → magic-link.strategy.ts:25-29).
-	if err := s.cfg.SendMagicLink(ctx, MagicLinkDelivery{
+	if err := s.cfg.SendMagicLink(s.senderContext(ctx), MagicLinkDelivery{
 		UserID:    user.ID,
 		TenantID:  user.TenantID,
 		Email:     user.Email,
@@ -545,14 +545,26 @@ func (s *Service) RequestEmailChange(ctx context.Context, in ChangeEmailRequestI
 	// Store first, then send, and send to the *new* address: this mail verifies
 	// that the new mailbox exists (auth.router.ts:1024 then :1027-1032, which mails
 	// newEmail). The notice the reference sends to the old address happens on
-	// /change-email/confirm and has no sender in this port — see
-	// EmailChangeDelivery.
+	// /change-email/confirm — see ConfirmEmailChange.
 	if err := s.deliverEmailChange(ctx, user, in.NewEmail, token, expiresAt, in.LinkBase, in.Lang); err != nil {
 		return "", err
 	}
 	return token, nil
 }
 
+// ConfirmEmailChange spends an email-change token: the pending address becomes
+// the account's, the token is cleared, and then the OLD address is sent the
+// email-changed notice through Config.SendEmailChanged — the reference's order
+// (auth.router.ts:1056-1066: oldEmail and newEmail read off the user,
+// updateEmail, updateEmailChangeToken(null…), then sendEmailChanged(oldEmail,
+// newEmail)).
+//
+// A failing notice is returned as an error, joined to ErrDeliveryFailed, with
+// the change already applied. That is the reference's behaviour, reproduced
+// rather than softened: its sendEmailChanged call is inside the route's try
+// block, so a throwing mailer reaches handleError and the route answers the
+// generic 500 for a change that has been committed (:1068-1069). Nothing is
+// rolled back, in either port — the token is spent and the address has moved.
 func (s *Service) ConfirmEmailChange(ctx context.Context, in ConfirmEmailChangeInput) error {
 	ecs, ok := s.users.(EmailChangeStore)
 	if !ok {
@@ -562,10 +574,15 @@ func (s *Service) ConfirmEmailChange(ctx context.Context, in ConfirmEmailChangeI
 	if err != nil || user.EmailChangeTokenExpiry == nil || s.now().After(user.EmailChangeTokenExpiry.Add(s.cfg.ClockSkew)) {
 		return ErrInvalidToken
 	}
+	// Read before the store moves them (auth.router.ts:1056-1057).
+	oldEmail, newEmail := user.Email, user.PendingEmail
 	if err := ecs.ApplyEmailChange(ctx, user.ID, user.TenantID); err != nil {
 		return err
 	}
-	return ecs.ClearEmailChangeToken(ctx, user.ID, user.TenantID)
+	if err := ecs.ClearEmailChangeToken(ctx, user.ID, user.TenantID); err != nil {
+		return err
+	}
+	return s.deliverEmailChanged(ctx, user, oldEmail, newEmail, in.Lang)
 }
 
 func (s *Service) SetupTOTP(ctx context.Context, userID, tenantID string) (string, error) {
