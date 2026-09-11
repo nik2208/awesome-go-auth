@@ -75,8 +75,11 @@ func (m *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (m *MCPServer) handleToolsList(w http.ResponseWriter, req mcpRequest) {
 	tools := []mcpTool{
 		{
-			Name:        "auth_get_config",
-			Description: "Returns the current auth service configuration (issuer, TTLs, feature flags).",
+			Name: "auth_get_config",
+			Description: "Returns the current auth service configuration (issuer, TTLs, feature flags). " +
+				"require_2fa is the static configuration term; require_2fa_effective is the policy " +
+				"actually enforced, which also reflects the runtime settings store, and is absent " +
+				"when that store cannot be read.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
@@ -157,8 +160,22 @@ func (m *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, req 
 			"issuer":            m.authSvc.cfg.Issuer,
 			"access_token_ttl":  m.authSvc.cfg.AccessTokenTTL.String(),
 			"refresh_token_ttl": m.authSvc.cfg.RefreshTokenTTL.String(),
-			"require_2fa":       m.authSvc.cfg.Require2FA,
-			"min_password_len":  m.authSvc.cfg.MinPasswordLen,
+			// The static Config.Require2FA, which is what this tool has always
+			// reported and what its name has always meant: a configuration value,
+			// in a tool that returns configuration. It stopped being the whole of
+			// the policy when the settings store landed — POST <prefix>/2fa/disable
+			// refuses on Config.Require2FA OR the stored require2FA — so the
+			// effective answer is reported beside it rather than in place of it,
+			// which would have been a silent change of meaning for a field a client
+			// already reads.
+			"require_2fa":      m.authSvc.cfg.Require2FA,
+			"min_password_len": m.authSvc.cfg.MinPasswordLen,
+		}
+		// Absent rather than wrong when the settings store cannot be read: the
+		// policy is unknown at that point, and the route it governs answers 500
+		// rather than guessing, so this must not guess either.
+		if effective, err := m.authSvc.twoFactorPolicy(ctx); err == nil {
+			result["require_2fa_effective"] = effective
 		}
 		mcpWriteJSON(w, mcpResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"content": result}})
 

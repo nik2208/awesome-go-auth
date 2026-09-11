@@ -110,6 +110,32 @@ func (s *losableUserStore) GetUserByID(ctx context.Context, id, tenantID string)
 	return s.MemoryUserStore.GetUserByID(ctx, id, tenantID)
 }
 
+// failingSettingsStore is a settings store that is never reachable, which is
+// what the /2fa/disable fail-closed case needs: the route has to answer 500
+// rather than read the failure as permission to turn the second factor off.
+type failingSettingsStore struct{}
+
+func (failingSettingsStore) GetSettings(context.Context) (auth.AuthSettings, error) {
+	return auth.AuthSettings{}, errors.New("settings store unavailable")
+}
+
+func (failingSettingsStore) UpdateSettings(context.Context, auth.AuthSettings) (auth.AuthSettings, error) {
+	return auth.AuthSettings{}, errors.New("settings store unavailable")
+}
+
+// seedSettings returns a memory settings store already holding settings, the
+// state an administrator leaves behind after using the Control panel.
+func seedSettings(t *testing.T, settings auth.AuthSettings) auth.SettingsStore {
+	t.Helper()
+	store := auth.NewMemorySettingsStore()
+	if _, err := store.UpdateSettings(context.Background(), settings); err != nil {
+		t.Fatalf("seeding the settings store: %v", err)
+	}
+	return store
+}
+
+func boolPtr(b bool) *bool { return &b }
+
 // totpCode is an independent RFC 6238 implementation. Generating the code with
 // the library's own helper would make every TOTP assertion here tautological.
 func totpCode(t *testing.T, secret string, at time.Time) string {
@@ -1113,6 +1139,84 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 
 		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
 		AssertError(t, rec, http.StatusForbidden, "Cannot disable 2FA: required by system policy", auth.CodeTwoFactorRequired)
+	})
+
+	// The reference's own term for the same refusal: require2FA read from the
+	// settings store an administrator writes through the Control panel, checked
+	// after the per-user flag (auth.router.ts:890-896). The two refusals share
+	// the 2FA_REQUIRED code and differ only in the message.
+	t.Run("disable refuses under a seeded settings store", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(),
+			auth.WithSettingsStore(seedSettings(t, auth.AuthSettings{Require2FA: boolPtr(true)})))
+		_, tokens := env.Seed("settingspolicy@example.com")
+		// Enrolled first, so the refusal is protecting a factor that exists: the
+		// same 403 would come back for a user who never set one up, and that case
+		// would prove nothing about the policy.
+		enrolTOTP(t, env, tokens.AccessToken)
+
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
+		AssertError(t, rec, http.StatusForbidden, "Cannot disable 2FA: required by system policy", auth.CodeTwoFactorRequired)
+
+		me := env.Do(passwordlessBearer(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/me", nil), tokens.AccessToken))
+		if Body(t, me)["isTotpEnabled"] != true {
+			t.Fatal("the factor was disabled despite the stored require2FA")
+		}
+	})
+
+	// The order of the two refusals, which is the only thing that decides which
+	// message a client sees when both terms hold: the reference checks the
+	// per-user flag first (:884-888) and the stored setting second (:890-896), so
+	// a user carrying require2FA on a deployment whose store also requires it is
+	// told it is required for their account, not by system policy. Without this
+	// case the two checks could be swapped and every other assertion here would
+	// still pass.
+	t.Run("disable reports the per-user reason when both terms hold", func(t *testing.T) {
+		store := require2FAUserStore{MemoryUserStore: auth.NewMemoryUserStore()}
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithUserStore(store),
+			auth.WithSettingsStore(seedSettings(t, auth.AuthSettings{Require2FA: boolPtr(true)})))
+		_, tokens := env.Seed("bothterms@example.com")
+
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
+		AssertError(t, rec, http.StatusForbidden, "Cannot disable 2FA: required for your account", auth.CodeTwoFactorRequired)
+	})
+
+	// A store that holds settings but not this one changes nothing: the
+	// email-verification settings are stored and never consulted, here or at
+	// login (reference-issues N36, reproduced deliberately).
+	t.Run("disable succeeds when the settings store does not require 2FA", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(),
+			auth.WithSettingsStore(seedSettings(t, auth.AuthSettings{
+				Require2FA:               boolPtr(false),
+				RequireEmailVerification: boolPtr(true),
+			})))
+		_, tokens := env.Seed("settingsallows@example.com")
+		enrolTOTP(t, env, tokens.AccessToken)
+
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
+		AssertStatus(t, rec, http.StatusOK)
+		AssertKeys(t, Body(t, rec), "success")
+	})
+
+	// Fail closed. A settings store that cannot answer must not be read as
+	// permission to drop the factor, and the status is the reference's: its
+	// getSettings throw leaves the route through handleError, which answers 500
+	// {"error":"Internal server error"} with no code (auth.router.ts:899-901,
+	// :189-195).
+	t.Run("disable answers 500 when the settings store fails", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(),
+			auth.WithSettingsStore(failingSettingsStore{}))
+		_, tokens := env.Seed("settingsdown@example.com")
+		enrolTOTP(t, env, tokens.AccessToken)
+
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/disable", nil), tokens.AccessToken))
+		AssertError(t, rec, http.StatusInternalServerError, "Internal server error", "")
+
+		// And the factor is still on: the refusal is a refusal, not a 500 after
+		// the disable went through.
+		me := env.Do(passwordlessBearer(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+"/me", nil), tokens.AccessToken))
+		if Body(t, me)["isTotpEnabled"] != true {
+			t.Fatal("the factor was disabled behind a failing settings store")
+		}
 	})
 
 	// The enrolment routes are the only three in this section behind the auth

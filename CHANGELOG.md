@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`SettingsStore`, `AuthSettings` and `MemorySettingsStore`** — the reference's
+  `ISettingsStore` (`settings-store.interface.ts:28-40`), the global switches an
+  administrator flips at run time through its admin Control panel, wired with
+  `WithSettingsStore(store)` (`Config.Settings`). `AuthSettings` carries the
+  reference's fields under the reference's JSON names, every one optional:
+  `requireEmailVerification`, `emailVerificationMode`,
+  `lazyEmailVerificationGracePeriodDays`, `require2FA`, `enabledWebhookActions`
+  and `ui` (`UISettings` with `primaryColor`, `secondaryColor`, `logoUrl`,
+  `siteName`, `logoPath`, `bgColor`, `bgImage`, `cardBg`), so a stored document
+  round-trips between this port and a node-auth deployment unchanged — including
+  a *cleared* `enabledWebhookActions`, which `AuthSettings.MarshalJSON` writes as
+  `[]` rather than letting `omitempty` drop the key, because an absent key merges
+  as "keep" and would silently switch the old allowlist back on.
+  `UpdateSettings` applies its patch as the reference's shallow spread,
+  `merged = {...current, ...settings}` (`:20-24` is the JSDoc example, `:36-38`
+  the interface comment; the reference ships no `ISettingsStore` implementation
+  under `src/`, and the closest one beside it is
+  `examples/in-memory-user-store.ts:266-268`) — a nil field keeps what is stored,
+  a set field replaces it, and `ui` is one key of that spread, so
+  a patch carrying it replaces the branding block whole rather than merging into
+  it (which is why the reference's own admin route merges the sub-object itself
+  before writing it back, `admin.router.ts:979-981`). `MergeSettings(current,
+  patch)` is that rule, exported so a database-backed store applies the same one.
+  The store is optional: without one nothing changes, as in the reference.
+  See README_DETAILED.md, "Runtime settings".
+- **`POST /auth/2fa/disable` now refuses on the stored `require2FA` too.** The
+  reference's own system-wide term (`auth.router.ts:890-896`): with a settings
+  store holding `require2FA: true`, the route answers
+  `403 {"error":"Cannot disable 2FA: required by system policy","code":"2FA_REQUIRED"}`
+  — the same body `Config.Require2FA` already produced, now reachable the way the
+  reference reaches it. The per-user `User.Require2FA` refusal is checked first
+  and keeps its own message, as there. A settings store that cannot answer fails
+  the route closed with `500 {"error":"Internal server error"}` and no `code`,
+  the status the reference produces when its `getSettings` throws
+  (`handleError`, `:899-901`, `:189-195`); an unreachable policy store is not
+  permission to drop a second factor. The error is logged through `Config.Logger`
+  before that body goes out, since the body carries none of it — as the reference
+  logs it in `handleError` (`:193`). Covered by the wiretest suite on all four
+  adapters.
+- **Documented: the email-verification settings are stored and deliberately not
+  consulted.** `requireEmailVerification`, `emailVerificationMode` and
+  `lazyEmailVerificationGracePeriodDays` written to the store change nothing
+  about who may log in, because they change nothing in the reference either: no
+  route that decides a login reads the store there, and its local strategy reads
+  the static `config.emailVerificationMode` (`src/strategies/local/local.strategy.ts:32-35`).
+  Catalogued upstream as reference-issues N36.
+  `Config.EmailVerificationMode` is the knob that does decide a login here, as
+  `config.emailVerificationMode` is there. No deviation entry, because there is
+  no wire difference: every route answers what the reference answers for the same
+  stored settings. `enabledWebhookActions` and `ui` are likewise stored and read
+  by nothing here yet; the reference's only other readers of the store are
+  `GET <prefix>/ui/config`, which reads `ui` for branding
+  (`src/router/ui.router.ts:99`, `:126-133`), and the tools router, which reads
+  `enabledWebhookActions` and swallows a store failure rather than failing closed
+  (`src/router/tools.router.ts:261-262`). Neither is ported yet.
+- **Deviation register: `config-require2fa-is-a-system-policy-term`.**
+  `Config.Require2FA` is a third term in two decisions the reference makes with
+  two — the `/2fa/disable` system-policy refusal and the login 2FA challenge —
+  and the reference has no config-level `require2FA` at all
+  (`auth.router.ts:880-902`, `:552`). The behaviour predates this release; this
+  is the release that made that route's policy term the subject, so it is now in
+  `compatibility.go` and the generated README section rather than in prose alone.
+
+### Changed
+- **BREAKING (minor surface): `(*Auth).TwoFactorPolicy()` is now
+  `TwoFactorPolicy(ctx context.Context) (bool, error)`.** It is the OR of
+  `Config.Require2FA` and the stored `require2FA`, which is why it needs a
+  context to read the store and an error to report the store failing. The static
+  term is checked first and short-circuits, so a deployment that already requires
+  the factor never pays for a store read. Go has no overloading, so the old
+  zero-argument spelling could only have survived under a different name that
+  nothing would call; it is dropped instead. The method is used by the adapters'
+  `/2fa/disable` handlers, which are in this repository, and by nothing in the
+  downstream product — checked by grep over `awesome-lambda-auth`'s 84 Go files,
+  which contain no occurrence of `TwoFactorPolicy`.
+- **MCP `auth_get_config` reports the effective 2FA policy as well as the
+  configured one.** `require_2fa` still carries the static `Config.Require2FA`,
+  which is what the field has always meant in a tool that returns configuration;
+  the new `require_2fa_effective` carries what `/2fa/disable` actually enforces
+  (that term OR the stored `require2FA`), and is omitted when the settings store
+  cannot be read, since the route it mirrors answers `500` rather than guessing.
+  MCP is out of parity scope; the change is additive.
+
 ## [0.5.0] - 2026-09-11
 
 The claims and identity-provider milestone: custom claims can be built from

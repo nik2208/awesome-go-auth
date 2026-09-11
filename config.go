@@ -119,6 +119,18 @@ type Config struct {
 	// calls, and which will hold the UI translations once the UI router reads
 	// them. Optional; nil renders the built-ins. WithTemplateStore sets it.
 	Templates TemplateStore
+	// Settings is the reference's routerOptions.settingsStore
+	// (auth.router.ts:92, read at :890-896): the global switches an
+	// administrator flips at run time. Optional; nil means the settings check is
+	// skipped altogether, as it is in the reference without a store.
+	//
+	// One setting reaches this library: AuthSettings.Require2FA, which
+	// Auth.TwoFactorPolicy ORs with Require2FA above and
+	// POST <prefix>/2fa/disable refuses on. The email-verification settings are
+	// stored and are deliberately not consulted at login, because the reference
+	// does not consult them either — see settings_store.go and README_DETAILED,
+	// "Runtime settings". WithSettingsStore sets it.
+	Settings SettingsStore
 	// SiteURLs is the reference's config.email.siteUrl, which may be one string
 	// or an array of them (auth-config.model.ts). Two things are read off it:
 	//
