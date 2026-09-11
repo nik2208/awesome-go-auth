@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-11
+
+A one-line patch for the shipped clients, cut so that consumers can pin a tag
+instead of the pseudo-version they had to use for it.
+
+### Fixed
+- **`GET /me` carries `sub` alongside `id`, plus `role` when set.** Both
+  official clients cast `sub` non-nullably (Flutter `json['sub'] as String`,
+  Angular `sub: string`), so a `/me` body without it crashed the Flutter app on
+  a Dart `TypeError` instead of showing a logged-out state. `id` shipped in
+  0.2.0 and both clients read it as optional, so emitting both breaks nobody.
+  The new test is written against the clients' casts rather than the
+  reference's field list. (#46)
+
 ## [0.3.0] - 2026-08-15
 
 Makes the 0.2.0 surface actually usable end to end. Two things were missing
