@@ -233,11 +233,13 @@ func TestStartTOTPEnrolmentIsStatelessAndFresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
-	// The issuer label is Config.Issuer; the parameters are spelled out so that a
-	// client cannot enrol against a different step or digit count than
-	// validateTOTPCode checks. The account label is escaped the way the
-	// reference's otplib escapes it — encodeURIComponent, so the @ is %40.
-	want := "otpauth://totp/enrol%40example.com?algorithm=SHA1&digits=6&issuer=awesome-go-auth&period=30&secret=" + first.Secret
+	// With no TwoFactorAppName the issuer is Config.Issuer; the parameters are
+	// spelled out so that a client cannot enrol against a different step or digit
+	// count than validateTOTPCode checks. The label is otplib's issuer:account,
+	// escaped the way the reference's otplib escapes it — encodeURIComponent on
+	// each piece, so the @ is %40 and the separating colon is bare. The issuer
+	// cases themselves are in totp_test.go.
+	want := "otpauth://totp/awesome-go-auth:enrol%40example.com?algorithm=SHA1&digits=6&issuer=awesome-go-auth&period=30&secret=" + first.Secret
 	if first.OTPAuthURL != want {
 		t.Fatalf("otpauth url = %q, want %q", first.OTPAuthURL, want)
 	}

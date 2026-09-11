@@ -173,6 +173,21 @@ func WithRequire2FA(enabled bool) Option {
 	}
 }
 
+// WithTwoFactorAppName sets Config.TwoFactorAppName: the issuer an
+// authenticator app shows for a TOTP enrolment made through POST
+// <prefix>/2fa/setup. It is the reference's `twoFactor.appName`.
+//
+//	auth.WithTwoFactorAppName("Example App")
+//
+// Left unset, the URI carries Config.Issuer, as it always has — see
+// Config.TwoFactorAppName. Passing "" is the same as not calling it.
+func WithTwoFactorAppName(name string) Option {
+	return func(b *authBuilder) error {
+		b.cfg.TwoFactorAppName = name
+		return nil
+	}
+}
+
 // WithTokenClaimsBuilder customizes token claims creation. The hook may add
 // claims and override the six base claims; the session claims (sid, tid, jti,
 // typ, iss, iat, exp) are reserved and cannot be set from it — see
