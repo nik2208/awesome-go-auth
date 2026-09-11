@@ -60,6 +60,42 @@ type MagicLinkDelivery struct {
 	// additionally allows Config.ClockSkew past it, so a message that quotes this
 	// value understates the window slightly rather than overstating it.
 	ExpiresAt time.Time
+	// LinkBase is the base the link is built under for this request —
+	// "https://app.example.com/auth" — resolved by the adapter from the request's
+	// Origin or Referer against Config.SiteURLs (Auth.ResolveSiteURL, then
+	// HTTPConfig.LinkBase), which is the reference's siteUrlOverride argument
+	// (auth.router.ts:1104/1114 → magic-link.strategy.ts:25). It wins over
+	// MagicLinkMailer.BaseURL when set; empty when no site URL is configured or
+	// the service was called directly, in which case that static base applies.
+	LinkBase string
+	// Lang is the request's emailLang body field, passed through untouched
+	// (auth.router.ts:1080, 1104/1114). "it" and "en" select the built-in
+	// template set over MagicLinkMailer.Locale; anything else, the empty string
+	// included, defers to it (resolveLang, mailer.service.ts:255-259).
+	Lang string
+}
+
+// resolveLang is the reference's MailerService.resolveLang
+// (mailer.service.ts:255-259): "it" and "en" are honoured as given, anything
+// else — including the empty string a request without emailLang produces — is
+// the configured default. fallback stands in for config.defaultLang; an unknown
+// fallback then renders as English in MailTemplater.Render, which is the
+// reference's `?? 'en'`.
+func resolveLang(lang, fallback string) string {
+	switch lang {
+	case "it", "en":
+		return lang
+	}
+	return fallback
+}
+
+// linkBaseOr is the precedence between the two bases a ready-made mailer knows:
+// the one the delivery carries for this request, then the mailer's static one.
+func linkBaseOr(perRequest, static string) string {
+	if perRequest != "" {
+		return perRequest
+	}
+	return static
 }
 
 // SMSCodeDelivery is what an SMSCodeSender is handed. See MagicLinkDelivery for
@@ -98,10 +134,11 @@ const MagicLinkVerifyPath = "/magic-link/verify"
 // base is the address the auth routes are reachable at from a mailbox —
 // "https://app.example.com/auth". The reference derives it per request from
 // email.siteUrl and the request Origin (resolveSiteUrl / buildUiLink,
-// wire-contract §4); this port has neither a siteUrl config field nor origin
-// resolution yet, so the base is the sender's to supply. An empty base yields a
-// relative link, which the reference also produces when siteUrl is unset — it
-// is a misconfiguration in both, not a special case handled here.
+// wire-contract §4), and so do the adapters here: MagicLinkDelivery.LinkBase is
+// that value (Auth.ResolveSiteURL, HTTPConfig.LinkBase), and a custom sender
+// passes it straight in. An empty base yields a relative link, which the
+// reference also produces when siteUrl is unset — it is a misconfiguration in
+// both, not a special case handled here.
 //
 // The token is interpolated raw. randomToken emits base64url, whose alphabet
 // needs no query escaping, and the reference interpolates its hex token raw for
@@ -144,16 +181,18 @@ func SMSCodeMessage(code string) string {
 type MagicLinkMailer struct {
 	// Transport delivers the rendered message. Required.
 	Transport MailerTransport
-	// BaseURL is what MagicLinkURL builds the link under.
+	// BaseURL is what MagicLinkURL builds the link under when the delivery
+	// carries no LinkBase of its own: the static fallback for a deployment with
+	// no Config.SiteURLs, or for a service called directly. A delivery's
+	// LinkBase — the base the adapter resolved for the request — wins over it.
 	BaseURL string
 	// Locale selects the built-in template set: "en" (the default) or "it". An
 	// unknown locale falls back to English, as MailTemplater.Render does.
 	//
-	// It is static because the reference's per-request override (the emailLang
-	// body field) has no counterpart on these routes yet: the port's send
-	// requests do not carry the field, so threading a locale from the wire is a
-	// change to the request shape and belongs with the rest of the template
-	// configuration.
+	// It is the default, not the rule: a delivery whose Lang is "it" or "en" —
+	// the request's emailLang body field — renders in that language instead,
+	// and any other Lang defers to this (resolveLang, mailer.service.ts:255-259,
+	// where Locale plays config.defaultLang).
 	Locale string
 	// Templates renders subject and body. NewMagicLinkMailer fills this in.
 	Templates *MailTemplater
@@ -181,10 +220,10 @@ func (m *MagicLinkMailer) Send(ctx context.Context, delivery MagicLinkDelivery) 
 	}
 	// The address stands in for the recipient's name: the delivery carries no
 	// name, and the reference's own magic-link template greets nobody at all.
-	subject, body, err := templates.Render(m.Locale, "magic_link", MailTemplateData{
+	subject, body, err := templates.Render(resolveLang(delivery.Lang, m.Locale), "magic_link", MailTemplateData{
 		UserName: delivery.Email,
 		Token:    delivery.Token,
-		URL:      MagicLinkURL(m.BaseURL, delivery.Token),
+		URL:      MagicLinkURL(linkBaseOr(delivery.LinkBase, m.BaseURL), delivery.Token),
 	})
 	if err != nil {
 		return err

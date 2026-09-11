@@ -322,6 +322,13 @@ func openAPIPaths(prefix string) map[string]any {
 		"enum":        []string{"login", StepUpMode},
 		"description": "Only the literal `" + StepUpMode + "` selects the step-up branch; absent, empty and anything else mean login.",
 	}
+	// emailLang is the body field the four mailing routes share. It is passed to
+	// the configured sender as the delivery's Lang; the built-in mailers honour
+	// `it` and `en` and fall back to their configured locale for anything else.
+	emailLang := map[string]any{
+		"type":        "string",
+		"description": "Language of the mail: `it` or `en`; anything else means the deployment's default.",
+	}
 	// POST /login is the one route with two answers per status, which the catalog
 	// cannot express: a 200 is either a session or a second-factor challenge, and a
 	// 403 is either EMAIL_NOT_VERIFIED or the 2FA_SETUP_REQUIRED envelope. Neither
@@ -526,7 +533,7 @@ func openAPIPaths(prefix string) map[string]any {
 				"requestBody": body(inline([]string{"email"}, map[string]any{
 					"email":     map[string]any{"type": "string", "format": "email"},
 					"tenantId":  str,
-					"emailLang": map[string]any{"type": "string", "description": "Accepted for wire compatibility."},
+					"emailLang": emailLang,
 				})),
 				"responses": respond(http.StatusOK, "Reset email sent, or the address is unknown", schema("Success"),
 					HTTPErrInvalidBody, HTTPErrResetTokenStoreMissing),
@@ -568,7 +575,7 @@ func openAPIPaths(prefix string) map[string]any {
 				"parameters":  protected,
 				"requestBody": map[string]any{
 					"required": false,
-					"content":  jsonContent(inline(nil, map[string]any{"emailLang": str})),
+					"content":  jsonContent(inline(nil, map[string]any{"emailLang": emailLang})),
 				},
 				"responses": respond(http.StatusOK, "Verification email sent", schema("Success"),
 					HTTPErrEmailAlreadyVerified, HTTPErrEmailVerificationStoreMissing,
@@ -597,7 +604,7 @@ func openAPIPaths(prefix string) map[string]any {
 				"parameters":  protected,
 				"requestBody": body(inline([]string{"newEmail"}, map[string]any{
 					"newEmail":  map[string]any{"type": "string", "format": "email"},
-					"emailLang": str,
+					"emailLang": emailLang,
 				})),
 				"responses": respond(http.StatusOK, "Confirmation email sent", schema("Success"),
 					HTTPErrInvalidBody, HTTPErrEmailInUse, HTTPErrPasswordRequired,
@@ -664,6 +671,7 @@ func openAPIPaths(prefix string) map[string]any {
 					"mode":      mode,
 					"tempToken": map[string]any{"type": "string", "description": "Required in `" + StepUpMode + "` mode."},
 					"tenantId":  str,
+					"emailLang": emailLang,
 				})),
 				"responses": respond(http.StatusOK, "Link sent, or the address is unknown", schema("Success"),
 					HTTPErrInvalidBody, HTTPErrPasswordlessEmailRequired, HTTPErrTempTokenRequired,

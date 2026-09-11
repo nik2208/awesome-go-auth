@@ -424,6 +424,114 @@ func TestMagicLinkMailerWithoutATransport(t *testing.T) {
 	}
 }
 
+// The delivery's per-request base and language win over the mailer's static
+// BaseURL and Locale; an empty base and a language that is neither "it" nor
+// "en" defer to them (magic-link.strategy.ts:25, mailer.service.ts:255-259).
+func TestMagicLinkMailerHonoursThePerRequestBaseAndLang(t *testing.T) {
+	cases := []struct {
+		name        string
+		locale      string
+		delivery    MagicLinkDelivery
+		wantLink    string
+		wantSubject string
+	}{
+		{
+			name:        "LinkBase and Lang win",
+			locale:      "en",
+			delivery:    MagicLinkDelivery{Email: "l@example.com", Token: "t", LinkBase: "https://app.example.com/auth/ui", Lang: "it"},
+			wantLink:    "https://app.example.com/auth/ui/magic-link/verify?token=t",
+			wantSubject: "Example App - Magic Link Accesso",
+		},
+		{
+			name:        "an empty LinkBase and Lang defer to BaseURL and Locale",
+			locale:      "it",
+			delivery:    MagicLinkDelivery{Email: "l@example.com", Token: "t"},
+			wantLink:    "https://static.example.com/auth/magic-link/verify?token=t",
+			wantSubject: "Example App - Magic Link Accesso",
+		},
+		{
+			name:        "a Lang that is neither it nor en defers to Locale",
+			locale:      "it",
+			delivery:    MagicLinkDelivery{Email: "l@example.com", Token: "t", Lang: "de"},
+			wantLink:    "https://static.example.com/auth/magic-link/verify?token=t",
+			wantSubject: "Example App - Magic Link Accesso",
+		},
+		{
+			name:        "en overrides an it Locale",
+			locale:      "it",
+			delivery:    MagicLinkDelivery{Email: "l@example.com", Token: "t", Lang: "en"},
+			wantLink:    "https://static.example.com/auth/magic-link/verify?token=t",
+			wantSubject: "Example App - Magic Link Login",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := &recordingMailer{}
+			mailer := NewMagicLinkMailer(transport, "Example App", "https://static.example.com/auth")
+			mailer.Locale = tc.locale
+			if err := mailer.Send(context.Background(), tc.delivery); err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			msg := transport.sent[0]
+			if msg.Subject != tc.wantSubject {
+				t.Errorf("Subject = %q, want %q", msg.Subject, tc.wantSubject)
+			}
+			if !strings.Contains(msg.Body, tc.wantLink) {
+				t.Errorf("body does not carry %q: %s", tc.wantLink, msg.Body)
+			}
+		})
+	}
+}
+
+// TestResolveLang pins mailer.service.ts:255-259 directly: "it" and "en" as
+// given, anything else — the empty string included — is the fallback, and the
+// fallback is returned as-is (Render turns an unknown one into English).
+func TestResolveLang(t *testing.T) {
+	cases := []struct{ lang, fallback, want string }{
+		{"it", "en", "it"},
+		{"en", "it", "en"},
+		{"", "it", "it"},
+		{"de", "it", "it"},
+		{"IT", "en", "en"},
+		{"", "", ""},
+	}
+	for _, tc := range cases {
+		if got := resolveLang(tc.lang, tc.fallback); got != tc.want {
+			t.Errorf("resolveLang(%q, %q) = %q, want %q", tc.lang, tc.fallback, got, tc.want)
+		}
+	}
+}
+
+// SendMagicLink copies the request's LinkBase and Lang onto the delivery as
+// given: the service resolves neither, exactly as the reference hands the
+// strategy its siteUrlOverride and lang untouched (auth.router.ts:1104/1114,
+// magic-link.strategy.ts:25-29).
+func TestSendMagicLinkPropagatesLinkBaseAndLang(t *testing.T) {
+	spy := &deliverySpy{}
+	svc := newDeliverySvc(t, spy, true, false)
+	user := seedUser(t, svc, "linkbase@example.com")
+
+	if _, err := svc.SendMagicLink(context.Background(), MagicLinkSendInput{
+		Email: user.Email, TenantID: "t1", LinkBase: "https://app.example.com/auth", Lang: "it",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(spy.magicLinks) != 1 {
+		t.Fatalf("sender was called %d times, want 1", len(spy.magicLinks))
+	}
+	if got := spy.magicLinks[0]; got.LinkBase != "https://app.example.com/auth" || got.Lang != "it" {
+		t.Errorf("delivery LinkBase/Lang = %q/%q, want the input's", got.LinkBase, got.Lang)
+	}
+
+	// Omitted on the input, empty on the delivery — nothing is defaulted here.
+	if _, err := svc.SendMagicLink(context.Background(), MagicLinkSendInput{Email: user.Email, TenantID: "t1"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if got := spy.magicLinks[1]; got.LinkBase != "" || got.Lang != "" {
+		t.Errorf("delivery LinkBase/Lang = %q/%q, want both empty", got.LinkBase, got.Lang)
+	}
+}
+
 type recordingSMS struct {
 	phones   []string
 	messages []string

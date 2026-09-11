@@ -406,6 +406,12 @@ type HTTPConfig struct {
 	APIPrefix string
 	Cookies   CookieOptions
 	CSRF      CSRFConfig
+	// UIEnabled is the reference's config.ui.enabled as far as emailed links are
+	// concerned: when set, UILink points a link at <prefix>/ui/<path> — the
+	// static UI's page for it — instead of at the bare API route
+	// (buildUiLink, auth.router.ts:265-266). It mounts nothing by itself; the
+	// deployment that sets it serves the UI under that path.
+	UIEnabled bool
 }
 
 // DefaultHTTPConfig returns the conventions an adapter uses when the host app
@@ -461,6 +467,125 @@ func (c HTTPConfig) resolve(accessTTL, refreshTTL time.Duration) HTTPConfig {
 func (a *Auth) ResolveHTTPConfig(cfg HTTPConfig) HTTPConfig {
 	access, refresh := a.service.TokenTTLs()
 	return cfg.resolve(access, refresh)
+}
+
+// ── emailed links ────────────────────────────────────────────────────────────
+//
+// The reference builds every emailed link per request, from the site URL the
+// request came from and the mount prefix (auth.router.ts:785-786, 954-955,
+// 1025-1026, 1104/1114). The three pieces of that are below: UILink is its
+// buildUiLink, LinkBase is the base the URL builders in delivery.go take, and
+// Auth.ResolveSiteURL is its resolveSiteUrl over the allowlist it derives from
+// config.email.siteUrl and the CORS origins.
+
+// UILink is the reference's buildUiLink (auth.router.ts:261-271): the link to
+// path under siteURL, through the static UI when UIEnabled and straight at the
+// API route otherwise.
+//
+//	<siteURL><prefix>/ui/<path>   when UIEnabled
+//	<siteURL><prefix>/<path>      otherwise
+//
+// prefix is Prefix() — the reference strips one trailing slash from its
+// apiPrefix (:263), which Prefix() already does along with the rest of this
+// port's normalisation — and one leading slash is dropped from path (:264), so
+// UILink("https://app.example.com", "/reset-password?token=t") is
+// "https://app.example.com/auth/reset-password?token=t". siteURL is used as
+// given: an empty one yields a relative link, exactly as the reference does
+// with no siteUrl configured.
+func (c HTTPConfig) UILink(siteURL, path string) string {
+	prefix := strings.TrimSuffix(c.Prefix(), "/")
+	path = strings.TrimPrefix(path, "/")
+	if c.UIEnabled {
+		return siteURL + prefix + "/ui/" + path
+	}
+	return siteURL + prefix + "/" + path
+}
+
+// LinkBase is the base MagicLinkURL, PasswordResetURL, EmailVerificationURL and
+// EmailChangeConfirmURL take, resolved for one site URL: UILink(siteURL, "")
+// with the trailing slash removed, which is what the reference does with that
+// value on the one route that passes an empty path
+// (magic-link.strategy.ts:25-27). "https://app.example.com" becomes
+// "https://app.example.com/auth", or "https://app.example.com/auth/ui" under
+// UIEnabled. The adapters put it on each delivery as LinkBase.
+//
+// An empty siteURL yields "" rather than the bare prefix: no site URL is known
+// for the request, and a delivery with no LinkBase lets a ready-made mailer fall
+// back to its static BaseURL — which a deployment configured before
+// Config.SiteURLs existed relies on. The reference has no such static base and
+// builds a relative link in that case; the port keeps the link that used to be
+// sent.
+func (c HTTPConfig) LinkBase(siteURL string) string {
+	if siteURL == "" {
+		return ""
+	}
+	return strings.TrimSuffix(c.UILink(siteURL, ""), "/")
+}
+
+// ResolveSiteURL is the reference's resolveSiteUrl (auth.router.ts:233-246) for
+// one request: the Origin header when it is allowlisted, else the origin of the
+// Referer when that is, else the default site URL. The result is always either
+// an allowlist entry or the default, which is what keeps a caller from steering
+// a link — or an OAuth redirect — at an origin of its choosing.
+//
+// The allowlist is buildAllowedOrigins (auth.router.ts:213-219): Config.SiteURLs
+// followed by OAuthWiring.AllowedOrigins — the port's spelling of the
+// reference's cors.origins for this purpose — deduplicated with the first
+// occurrence's position kept. With an empty allowlist the headers are not
+// consulted at all and the default is returned.
+//
+// The default is the first Config.SiteURLs entry (getDefaultSiteUrl,
+// auth.router.ts:202-206), unless OAuthWiring.SiteURL is set: that field
+// predates SiteURLs, is documented as the same first siteUrl entry, and stays
+// the override so that a deployment configured through it keeps its links and
+// redirects. With neither the default is "".
+//
+// It shares resolveSiteURL with OAuthBegin and LinkRequest, so an emailed link
+// and an OAuth redirect resolve identically for the same request.
+func (a *Auth) ResolveSiteURL(r *http.Request) string {
+	var origin, referer string
+	if r != nil {
+		origin, referer = r.Header.Get("Origin"), r.Header.Get("Referer")
+	}
+	return resolveSiteURL(origin, referer, a.allowedOrigins(), a.defaultSiteURL())
+}
+
+// allowedOrigins is the reference's buildAllowedOrigins (auth.router.ts:213-219).
+func (a *Auth) allowedOrigins() []string {
+	var cors []string
+	if a.oauth != nil {
+		cors = a.oauth.AllowedOrigins
+	}
+	return dedupeOrigins(a.service.cfg.SiteURLs, cors)
+}
+
+// dedupeOrigins is `[...new Set([...fromSiteUrl, ...fromCors])]`: the lists
+// concatenated in order, each value kept where it first appeared.
+func dedupeOrigins(lists ...[]string) []string {
+	seen := make(map[string]struct{})
+	var merged []string
+	for _, list := range lists {
+		for _, origin := range list {
+			if _, dup := seen[origin]; dup {
+				continue
+			}
+			seen[origin] = struct{}{}
+			merged = append(merged, origin)
+		}
+	}
+	return merged
+}
+
+// defaultSiteURL is the reference's getDefaultSiteUrl (auth.router.ts:202-206)
+// with OAuthWiring.SiteURL as the override — see ResolveSiteURL.
+func (a *Auth) defaultSiteURL() string {
+	if a.oauth != nil && a.oauth.SiteURL != "" {
+		return a.oauth.SiteURL
+	}
+	if urls := a.service.cfg.SiteURLs; len(urls) > 0 {
+		return urls[0]
+	}
+	return ""
 }
 
 // TokenTTLs reports the configured access and refresh token lifetimes. The HTTP

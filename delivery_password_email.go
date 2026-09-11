@@ -75,6 +75,12 @@ type PasswordResetDelivery struct {
 	// message quoting this value understates the window rather than overstating
 	// it.
 	ExpiresAt time.Time
+	// LinkBase and Lang are what MagicLinkDelivery's are: the base the adapter
+	// resolved for this request (auth.router.ts:785-786) and the request's
+	// emailLang (:779, :788). LinkBase wins over PasswordResetMailer.BaseURL when
+	// set; a Lang of "it" or "en" wins over its Locale.
+	LinkBase string
+	Lang     string
 }
 
 // EmailVerificationDelivery is what an EmailVerificationSender is handed. The
@@ -86,6 +92,10 @@ type EmailVerificationDelivery struct {
 	// Token is the plaintext token GET <prefix>/verify-email accepts.
 	Token     string
 	ExpiresAt time.Time
+	// LinkBase and Lang are what PasswordResetDelivery's are
+	// (auth.router.ts:941, 954-957).
+	LinkBase string
+	Lang     string
 }
 
 // EmailChangeDelivery is what an EmailChangeSender is handed.
@@ -111,6 +121,10 @@ type EmailChangeDelivery struct {
 	// Token is the plaintext token POST <prefix>/change-email/confirm accepts.
 	Token     string
 	ExpiresAt time.Time
+	// LinkBase and Lang are what PasswordResetDelivery's are
+	// (auth.router.ts:1025-1028).
+	LinkBase string
+	Lang     string
 }
 
 // PasswordResetSender delivers a password-reset token.
@@ -141,8 +155,9 @@ const (
 //
 // base is the address the auth routes are reachable at from a mailbox. The
 // reference derives it per request (resolveSiteUrl / buildUiLink, wire-contract
-// §4); this port has neither a siteUrl config field nor origin resolution yet, so
-// the base is the sender's to supply, exactly as for MagicLinkURL.
+// §4) and so do the adapters here — each delivery's LinkBase is that value, see
+// MagicLinkURL — so a custom sender passes delivery.LinkBase in, falling back to
+// a base of its own when it is empty.
 //
 // One caveat carries over from the reference and is worth knowing before these
 // links reach a real mailbox: /reset-password and /change-email/confirm are
@@ -175,7 +190,12 @@ func EmailChangeConfirmURL(base, token string) string {
 // nothing and still succeeds. A failing sender returns an error joining
 // ErrDeliveryFailed and the transport's own, which is what lets /forgot-password
 // swallow one failure mode without swallowing store failures too.
-func (s *Service) deliverPasswordReset(ctx context.Context, user User, token string, expiresAt time.Time) error {
+//
+// linkBase and lang are the request's, copied from the service input onto the
+// delivery untouched: the service neither resolves nor validates them, exactly
+// as the reference's routes hand `link` and `emailLang` to the sender as built
+// and as received (auth.router.ts:788, 957, 1028).
+func (s *Service) deliverPasswordReset(ctx context.Context, user User, token string, expiresAt time.Time, linkBase, lang string) error {
 	if s.cfg.SendPasswordReset == nil {
 		return nil
 	}
@@ -185,6 +205,8 @@ func (s *Service) deliverPasswordReset(ctx context.Context, user User, token str
 		Email:     user.Email,
 		Token:     token,
 		ExpiresAt: expiresAt,
+		LinkBase:  linkBase,
+		Lang:      lang,
 	})
 	if err != nil {
 		return fmt.Errorf("auth: deliver password reset: %w: %w", ErrDeliveryFailed, err)
@@ -192,7 +214,7 @@ func (s *Service) deliverPasswordReset(ctx context.Context, user User, token str
 	return nil
 }
 
-func (s *Service) deliverEmailVerification(ctx context.Context, user User, token string, expiresAt time.Time) error {
+func (s *Service) deliverEmailVerification(ctx context.Context, user User, token string, expiresAt time.Time, linkBase, lang string) error {
 	if s.cfg.SendEmailVerification == nil {
 		return nil
 	}
@@ -202,6 +224,8 @@ func (s *Service) deliverEmailVerification(ctx context.Context, user User, token
 		Email:     user.Email,
 		Token:     token,
 		ExpiresAt: expiresAt,
+		LinkBase:  linkBase,
+		Lang:      lang,
 	})
 	if err != nil {
 		return fmt.Errorf("auth: deliver email verification: %w: %w", ErrDeliveryFailed, err)
@@ -209,7 +233,7 @@ func (s *Service) deliverEmailVerification(ctx context.Context, user User, token
 	return nil
 }
 
-func (s *Service) deliverEmailChange(ctx context.Context, user User, newEmail, token string, expiresAt time.Time) error {
+func (s *Service) deliverEmailChange(ctx context.Context, user User, newEmail, token string, expiresAt time.Time, linkBase, lang string) error {
 	if s.cfg.SendEmailChange == nil {
 		return nil
 	}
@@ -219,6 +243,8 @@ func (s *Service) deliverEmailChange(ctx context.Context, user User, newEmail, t
 		NewEmail:  newEmail,
 		Token:     token,
 		ExpiresAt: expiresAt,
+		LinkBase:  linkBase,
+		Lang:      lang,
 	})
 	if err != nil {
 		return fmt.Errorf("auth: deliver email change: %w: %w", ErrDeliveryFailed, err)
@@ -238,14 +264,16 @@ func (s *Service) deliverEmailChange(ctx context.Context, user User, newEmail, t
 type TokenMailer struct {
 	// Transport delivers the rendered message. Required.
 	Transport MailerTransport
-	// BaseURL is what the URL builders above build the link under.
+	// BaseURL is what the URL builders above build the link under when the
+	// delivery carries no LinkBase of its own — the static fallback, as
+	// MagicLinkMailer.BaseURL is. A delivery's LinkBase wins over it.
 	BaseURL string
 	// Locale selects the built-in template set: "en" (the default) or "it". An
 	// unknown locale falls back to English, as MailTemplater.Render does.
 	//
-	// It is static for the same reason MagicLinkMailer.Locale is: the reference's
-	// per-request override is the emailLang body field, which these routes accept
-	// on the wire and no adapter threads any further yet.
+	// It is the default, as MagicLinkMailer.Locale is: a delivery whose Lang is
+	// "it" or "en" — the request's emailLang body field — renders in that
+	// language instead, and any other Lang defers to this (resolveLang).
 	Locale string
 	// Templates renders subject and body. The constructors fill this in.
 	Templates *MailTemplater
@@ -255,10 +283,18 @@ func newTokenMailer(transport MailerTransport, appName, baseURL string) TokenMai
 	return TokenMailer{Transport: transport, BaseURL: baseURL, Templates: NewMailTemplater(appName)}
 }
 
-// send renders one of the built-in templates and hands the result to the
-// transport. The recipient address stands in for the recipient's name: a delivery
-// carries no name, and the built-in templates greet the value they are given.
-func (m TokenMailer) send(ctx context.Context, template, to, token, link string) error {
+// link resolves the base for one delivery — its own LinkBase, else BaseURL —
+// and builds the link with the given builder.
+func (m TokenMailer) link(build func(base, token string) string, linkBase, token string) string {
+	return build(linkBaseOr(linkBase, m.BaseURL), token)
+}
+
+// send renders one of the built-in templates in the language resolved for the
+// delivery — lang over Locale, per resolveLang — and hands the result to the
+// transport. The recipient address stands in for the recipient's name: a
+// delivery carries no name, and the built-in templates greet the value they are
+// given.
+func (m TokenMailer) send(ctx context.Context, lang, template, to, token, link string) error {
 	if m.Transport == nil {
 		return errors.New("auth: mailer has no transport")
 	}
@@ -266,7 +302,7 @@ func (m TokenMailer) send(ctx context.Context, template, to, token, link string)
 	if templates == nil {
 		templates = NewMailTemplater("")
 	}
-	subject, body, err := templates.Render(m.Locale, template, MailTemplateData{
+	subject, body, err := templates.Render(resolveLang(lang, m.Locale), template, MailTemplateData{
 		UserName: to,
 		Token:    token,
 		URL:      link,
@@ -305,7 +341,8 @@ func (m *PasswordResetMailer) Send(ctx context.Context, delivery PasswordResetDe
 	if m == nil {
 		return errors.New("auth: password reset mailer is nil")
 	}
-	return m.send(ctx, "reset_password", delivery.Email, delivery.Token, PasswordResetURL(m.BaseURL, delivery.Token))
+	return m.send(ctx, delivery.Lang, "reset_password", delivery.Email, delivery.Token,
+		m.link(PasswordResetURL, delivery.LinkBase, delivery.Token))
 }
 
 // EmailVerificationMailer is the ready-made EmailVerificationSender, rendering
@@ -325,7 +362,8 @@ func (m *EmailVerificationMailer) Send(ctx context.Context, delivery EmailVerifi
 	if m == nil {
 		return errors.New("auth: email verification mailer is nil")
 	}
-	return m.send(ctx, "verify_email", delivery.Email, delivery.Token, EmailVerificationURL(m.BaseURL, delivery.Token))
+	return m.send(ctx, delivery.Lang, "verify_email", delivery.Email, delivery.Token,
+		m.link(EmailVerificationURL, delivery.LinkBase, delivery.Token))
 }
 
 // EmailChangeMailer is the ready-made EmailChangeSender. It mails the pending
@@ -350,5 +388,6 @@ func (m *EmailChangeMailer) Send(ctx context.Context, delivery EmailChangeDelive
 	if m == nil {
 		return errors.New("auth: email change mailer is nil")
 	}
-	return m.send(ctx, "email_change", delivery.NewEmail, delivery.Token, EmailChangeConfirmURL(m.BaseURL, delivery.Token))
+	return m.send(ctx, delivery.Lang, "email_change", delivery.NewEmail, delivery.Token,
+		m.link(EmailChangeConfirmURL, delivery.LinkBase, delivery.Token))
 }

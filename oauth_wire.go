@@ -177,12 +177,21 @@ type OAuthWiring struct {
 	// opaque string and both single-use: the in-flight OAuth state (so a nonce
 	// cannot be replayed) and the account-link token issued by /link-request.
 	PendingLinks PendingLinkStore
-	// AllowedOrigins is the redirect allowlist. An empty allowlist accepts the
-	// origin embedded in the state, matching the reference — safe here only
-	// because the state is signed.
+	// AllowedOrigins is the port's spelling of the reference's cors.origins for
+	// origin resolution: together with Config.SiteURLs — the two lists merged in
+	// that order and deduplicated, as buildAllowedOrigins does
+	// (auth.router.ts:213-219) — it is the allowlist an initiating request's
+	// Origin or Referer is matched against, and the allowlist a state's origin
+	// has to be in to be redirected to. It is the same list Auth.ResolveSiteURL
+	// uses for emailed links. An empty merged allowlist accepts the origin
+	// embedded in the state, matching the reference — safe here only because
+	// the state is signed.
 	AllowedOrigins []string
 	// SiteURL is the fallback redirect target, the reference's first
-	// config.email.siteUrl entry.
+	// config.email.siteUrl entry. It predates Config.SiteURLs and stays as the
+	// override: when set it is the default site URL for the OAuth routes and for
+	// Auth.ResolveSiteURL alike; when empty the first Config.SiteURLs entry is.
+	// A deployment configuring only SiteURLs may leave it unset.
 	SiteURL string
 	// TenantID scopes users created or resolved by the callback.
 	TenantID string
@@ -324,9 +333,12 @@ func pkceChallengeS256(verifier string) string {
 
 // ── redirect resolution ──────────────────────────────────────────────────────
 
-// resolveSiteURL is the reference's initiation-time origin resolution: match
-// the Origin header against the allowlist, then the origin of the Referer,
-// otherwise fall back to the configured site URL.
+// resolveSiteURL is the reference's initiation-time origin resolution
+// (resolveSiteUrl, auth.router.ts:233-246): match the Origin header against the
+// allowlist, then the origin of the Referer, otherwise fall back to the
+// configured site URL. The OAuth routes call it with the same allowlist and
+// default Auth.ResolveSiteURL uses for emailed links (wire.go), which is how
+// the reference arranges it too — one allowedOrigins, one getDefaultSiteUrl.
 func resolveSiteURL(origin, referer string, allowed []string, siteURL string) string {
 	if len(allowed) > 0 {
 		if candidate := strings.TrimSpace(origin); originAllowed(candidate, allowed) {
@@ -464,7 +476,7 @@ func (a *Auth) OAuthBegin(ctx context.Context, in OAuthBeginInput) (OAuthBeginRe
 		return OAuthBeginResult{}, err
 	}
 	secret := a.service.cfg.Secret
-	origin := resolveSiteURL(in.Origin, in.Referer, wiring.AllowedOrigins, wiring.SiteURL)
+	origin := resolveSiteURL(in.Origin, in.Referer, a.allowedOrigins(), a.defaultSiteURL())
 	state, err := encodeOAuthState(oauthState{
 		N: nonce,
 		O: origin,
@@ -545,7 +557,7 @@ func (a *Auth) OAuthComplete(ctx context.Context, in OAuthCompleteInput) (OAuthC
 		}
 	}
 
-	redirectTo := resolveOAuthRedirect(state, wiring.AllowedOrigins, wiring.SiteURL)
+	redirectTo := resolveOAuthRedirect(state, a.allowedOrigins(), a.defaultSiteURL())
 	info, err := wiring.Service.ExchangeCodePKCE(ctx, in.Provider, in.Code, pkceVerifier(secret, state.N))
 	if err != nil {
 		return OAuthCompleteResult{RedirectTo: redirectTo}, err
@@ -721,7 +733,7 @@ func (a *Auth) LinkRequest(ctx context.Context, in LinkRequestInput) (LinkReques
 	// The reference resolves the link's origin per request rather than always
 	// using the default site url, so a deployment serving several front-ends mails
 	// a link back to the one that asked (auth.router.ts:1528).
-	siteURL := resolveSiteURL(in.Origin, in.Referer, wiring.AllowedOrigins, wiring.SiteURL)
+	siteURL := resolveSiteURL(in.Origin, in.Referer, a.allowedOrigins(), a.defaultSiteURL())
 	prefix := strings.TrimSuffix(strings.TrimSpace(in.APIPrefix), "/")
 	link := siteURL + prefix + "/link-verify?token=" + url.QueryEscape(token)
 	result := LinkRequestResult{Token: token, URL: link}

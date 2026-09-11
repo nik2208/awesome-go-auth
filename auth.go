@@ -261,6 +261,21 @@ func WithEmailChangeSender(sender EmailChangeSender) Option {
 	}
 }
 
+// WithSiteURLs sets Config.SiteURLs: the base URLs the front ends are served
+// from. The first is canonical, every one of them is allowlisted for the
+// per-request origin match — see Config.SiteURLs and Auth.ResolveSiteURL.
+//
+//	auth.WithSiteURLs("https://www.example.com", "https://app.example.com")
+//
+// Calling it with no arguments leaves the list empty, which is the reference's
+// "no siteUrl configured" and not an error.
+func WithSiteURLs(urls ...string) Option {
+	return func(b *authBuilder) error {
+		b.cfg.SiteURLs = append([]string(nil), urls...)
+		return nil
+	}
+}
+
 // WithLogger provides optional library logging callback.
 func WithLogger(fn func(format string, args ...any)) Option {
 	return func(b *authBuilder) error {

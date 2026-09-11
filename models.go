@@ -153,6 +153,14 @@ type LoginInput struct {
 type ForgotPasswordInput struct {
 	Email    string
 	TenantID string
+	// LinkBase is the per-request base the reset link is built under, copied
+	// onto PasswordResetDelivery.LinkBase. The adapters fill it from
+	// HTTPConfig.LinkBase(Auth.ResolveSiteURL(r)); a direct caller may leave it
+	// empty, in which case a ready-made mailer uses its static BaseURL.
+	LinkBase string
+	// Lang is the request's emailLang body field, copied onto
+	// PasswordResetDelivery.Lang untouched (auth.router.ts:779, 788).
+	Lang string
 }
 
 type ResetPasswordInput struct {
@@ -163,6 +171,10 @@ type ResetPasswordInput struct {
 type MagicLinkSendInput struct {
 	Email    string
 	TenantID string
+	// LinkBase and Lang are what ForgotPasswordInput's are, for
+	// MagicLinkDelivery (auth.router.ts:1104, 1114).
+	LinkBase string
+	Lang     string
 }
 
 type MagicLinkVerifyInput struct {
@@ -192,6 +204,10 @@ type ChangePasswordInput struct {
 type EmailVerificationInput struct {
 	UserID   string
 	TenantID string
+	// LinkBase and Lang are what ForgotPasswordInput's are, for
+	// EmailVerificationDelivery (auth.router.ts:941, 955-957).
+	LinkBase string
+	Lang     string
 }
 
 type VerifyEmailInput struct {
@@ -202,6 +218,10 @@ type ChangeEmailRequestInput struct {
 	UserID   string
 	TenantID string
 	NewEmail string
+	// LinkBase and Lang are what ForgotPasswordInput's are, for
+	// EmailChangeDelivery (auth.router.ts:1026-1028).
+	LinkBase string
+	Lang     string
 }
 
 type ConfirmEmailChangeInput struct {

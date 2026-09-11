@@ -356,3 +356,215 @@ func TestRefreshTokenFromRequestFallsBackToTheCookie(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// emailed links: UILink, LinkBase, ResolveSiteURL
+// -----------------------------------------------------------------------------
+
+// TestHTTPConfigUILink pins buildUiLink (auth.router.ts:261-271) branch by
+// branch: the /ui segment under UIEnabled, one trailing slash stripped from the
+// prefix, one leading slash stripped from the path, and the site URL used as
+// given.
+func TestHTTPConfigUILink(t *testing.T) {
+	const site = "https://app.example.com"
+	cases := []struct {
+		name string
+		cfg  HTTPConfig
+		site string
+		path string
+		want string
+	}{
+		{"default prefix, API route", HTTPConfig{}, site, "/reset-password?token=t", site + "/auth/reset-password?token=t"},
+		{"default prefix, static UI", HTTPConfig{UIEnabled: true}, site, "/reset-password?token=t", site + "/auth/ui/reset-password?token=t"},
+		{"trailing-slash prefix, API route", HTTPConfig{APIPrefix: "/api/auth/"}, site, "/verify-email?token=t", site + "/api/auth/verify-email?token=t"},
+		{"trailing-slash prefix, static UI", HTTPConfig{APIPrefix: "/api/auth/", UIEnabled: true}, site, "/verify-email?token=t", site + "/api/auth/ui/verify-email?token=t"},
+		{"root prefix", HTTPConfig{APIPrefix: "/"}, site, "/verify-email?token=t", site + "/verify-email?token=t"},
+		{"path without a leading slash", HTTPConfig{}, site, "verify-email?token=t", site + "/auth/verify-email?token=t"},
+		// The reference's empty-path shape keeps its trailing slash (:269); the
+		// strip belongs to LinkBase, where the reference strips it too.
+		{"empty path, API route", HTTPConfig{}, site, "", site + "/auth/"},
+		{"empty path, static UI", HTTPConfig{UIEnabled: true}, site, "", site + "/auth/ui/"},
+		// No site URL is a relative link, as in the reference with siteUrl unset.
+		{"no site URL", HTTPConfig{}, "", "/reset-password?token=t", "/auth/reset-password?token=t"},
+	}
+	for _, tc := range cases {
+		if got := tc.cfg.UILink(tc.site, tc.path); got != tc.want {
+			t.Errorf("%s: UILink = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestHTTPConfigLinkBase pins the base the URL builders take: UILink with an
+// empty path and the trailing slash removed (magic-link.strategy.ts:25-27), so
+// that MagicLinkURL(LinkBase(site), tok) is exactly what the reference mails —
+// and "" for no site URL, which is what lets a mailer's static BaseURL apply.
+func TestHTTPConfigLinkBase(t *testing.T) {
+	const site = "https://app.example.com"
+	cases := []struct {
+		name string
+		cfg  HTTPConfig
+		want string
+	}{
+		{"default prefix", HTTPConfig{}, site + "/auth"},
+		{"static UI", HTTPConfig{UIEnabled: true}, site + "/auth/ui"},
+		{"trailing-slash prefix", HTTPConfig{APIPrefix: "/api/auth/"}, site + "/api/auth"},
+		{"root prefix", HTTPConfig{APIPrefix: "/"}, site},
+	}
+	for _, tc := range cases {
+		if got := tc.cfg.LinkBase(site); got != tc.want {
+			t.Errorf("%s: LinkBase = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if got := (HTTPConfig{}).LinkBase(""); got != "" {
+		t.Errorf("LinkBase(\"\") = %q, want \"\" so the mailer's BaseURL applies", got)
+	}
+	// The composition the adapters and the mailers rely on.
+	ui := HTTPConfig{UIEnabled: true}
+	if got := MagicLinkURL(ui.LinkBase(site), "tok"); got != site+"/auth/ui/magic-link/verify?token=tok" {
+		t.Errorf("MagicLinkURL over LinkBase = %q", got)
+	}
+}
+
+// siteURLAuth builds an Auth with the given site URLs and, when wiring is not
+// nil, the given OAuth wiring — the two inputs ResolveSiteURL reads.
+func siteURLAuth(t *testing.T, siteURLs []string, wiring *OAuthWiring) *Auth {
+	t.Helper()
+	opts := []Option{WithSiteURLs(siteURLs...)}
+	if wiring != nil {
+		opts = append(opts, WithOAuth(*wiring))
+	}
+	a, err := New(opts...)
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	return a
+}
+
+func requestWith(headers map[string]string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/auth/forgot-password", nil)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	return req
+}
+
+// TestResolveSiteURL pins resolveSiteUrl (auth.router.ts:233-246) over the
+// allowlist buildAllowedOrigins builds (:213-219) and the default
+// getDefaultSiteUrl returns (:202-206).
+func TestResolveSiteURL(t *testing.T) {
+	const (
+		www = "https://www.example.com"
+		app = "https://app.example.com"
+		api = "https://api.example.com"
+	)
+
+	t.Run("an allowlisted Origin wins", func(t *testing.T) {
+		a := siteURLAuth(t, []string{www, app}, nil)
+		if got := a.ResolveSiteURL(requestWith(map[string]string{"Origin": app})); got != app {
+			t.Errorf("got %q, want %q", got, app)
+		}
+	})
+
+	t.Run("an allowlisted Referer origin wins when there is no Origin", func(t *testing.T) {
+		a := siteURLAuth(t, []string{www, app}, nil)
+		got := a.ResolveSiteURL(requestWith(map[string]string{"Referer": app + "/account/settings?tab=security"}))
+		if got != app {
+			t.Errorf("got %q, want %q", got, app)
+		}
+	})
+
+	t.Run("Origin outranks Referer", func(t *testing.T) {
+		a := siteURLAuth(t, []string{www, app}, nil)
+		got := a.ResolveSiteURL(requestWith(map[string]string{"Origin": www, "Referer": app + "/login"}))
+		if got != www {
+			t.Errorf("got %q, want %q", got, www)
+		}
+	})
+
+	t.Run("an unlisted Origin and Referer fall back to the first site URL", func(t *testing.T) {
+		a := siteURLAuth(t, []string{www, app}, nil)
+		got := a.ResolveSiteURL(requestWith(map[string]string{"Origin": "https://evil.example", "Referer": "https://evil.example/x"}))
+		if got != www {
+			t.Errorf("got %q, want the first site URL %q", got, www)
+		}
+	})
+
+	t.Run("no headers fall back to the first site URL", func(t *testing.T) {
+		a := siteURLAuth(t, []string{www, app}, nil)
+		if got := a.ResolveSiteURL(requestWith(nil)); got != www {
+			t.Errorf("got %q, want %q", got, www)
+		}
+		if got := a.ResolveSiteURL(nil); got != www {
+			t.Errorf("nil request: got %q, want %q", got, www)
+		}
+	})
+
+	// The reference matches exactly (`allowedOrigins.includes(origin)`): a
+	// trailing slash or a different case is a different origin.
+	t.Run("the match is exact", func(t *testing.T) {
+		a := siteURLAuth(t, []string{www, app}, nil)
+		for _, origin := range []string{app + "/", "https://APP.example.com", "http://app.example.com"} {
+			if got := a.ResolveSiteURL(requestWith(map[string]string{"Origin": origin})); got != www {
+				t.Errorf("Origin %q resolved to %q, want the default %q", origin, got, www)
+			}
+		}
+	})
+
+	t.Run("OAuthWiring.AllowedOrigins extend the allowlist", func(t *testing.T) {
+		a := siteURLAuth(t, []string{www}, &OAuthWiring{AllowedOrigins: []string{app}})
+		if got := a.ResolveSiteURL(requestWith(map[string]string{"Origin": app})); got != app {
+			t.Errorf("got %q, want the CORS origin %q", got, app)
+		}
+	})
+
+	t.Run("an empty allowlist ignores the headers and yields the default", func(t *testing.T) {
+		a := siteURLAuth(t, nil, nil)
+		if got := a.ResolveSiteURL(requestWith(map[string]string{"Origin": app, "Referer": app + "/"})); got != "" {
+			t.Errorf("got %q, want \"\" with nothing configured", got)
+		}
+		// OAuthWiring.SiteURL alone is a default, not an allowlist entry: the
+		// reference only allowlists what siteUrl and cors.origins hold.
+		a = siteURLAuth(t, nil, &OAuthWiring{SiteURL: api})
+		if got := a.ResolveSiteURL(requestWith(map[string]string{"Origin": app})); got != api {
+			t.Errorf("got %q, want the wiring's site URL %q", got, api)
+		}
+	})
+
+	t.Run("OAuthWiring.SiteURL overrides the first site URL as the default", func(t *testing.T) {
+		a := siteURLAuth(t, []string{www, app}, &OAuthWiring{SiteURL: api})
+		if got := a.ResolveSiteURL(requestWith(nil)); got != api {
+			t.Errorf("got %q, want the override %q", got, api)
+		}
+		// The site URLs are still the allowlist.
+		if got := a.ResolveSiteURL(requestWith(map[string]string{"Origin": app})); got != app {
+			t.Errorf("got %q, want %q", got, app)
+		}
+	})
+
+	t.Run("WithSiteURLs copies its arguments", func(t *testing.T) {
+		urls := []string{www, app}
+		a := siteURLAuth(t, urls, nil)
+		urls[0] = "https://changed.example"
+		if got := a.ResolveSiteURL(requestWith(nil)); got != www {
+			t.Errorf("got %q: the option aliased the caller's slice", got)
+		}
+	})
+}
+
+// TestAllowedOriginsDedupeKeepsOrder pins `[...new Set([...siteUrl, ...cors])]`
+// (auth.router.ts:218): site URLs first, then the CORS origins, each value at
+// its first position.
+func TestAllowedOriginsDedupeKeepsOrder(t *testing.T) {
+	a := siteURLAuth(t,
+		[]string{"https://a.example", "https://b.example", "https://a.example"},
+		&OAuthWiring{AllowedOrigins: []string{"https://b.example", "https://c.example", "https://a.example", "https://d.example"}},
+	)
+	got := strings.Join(a.allowedOrigins(), " ")
+	want := "https://a.example https://b.example https://c.example https://d.example"
+	if got != want {
+		t.Errorf("allowedOrigins = [%s], want [%s]", got, want)
+	}
+	if got := dedupeOrigins(nil, nil); len(got) != 0 {
+		t.Errorf("dedupeOrigins(nil, nil) = %v, want empty", got)
+	}
+}

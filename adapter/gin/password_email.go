@@ -27,6 +27,14 @@ func (ad *Adapter) mountPasswordEmail(group gin.IRoutes, prefix string) {
 	group.POST(prefix+"/change-email/confirm", ad.guard(ad.changeEmailConfirm))
 }
 
+// linkBase resolves the base an emailed link is built under for this request —
+// the request's Origin or Referer against the site URL allowlist, then the
+// mount prefix — exactly as the net/http adapter does, so the four adapters mail
+// the same link for the same request. Empty when no site URL is configured.
+func (ad *Adapter) linkBase(r *http.Request) string {
+	return ad.cfg.LinkBase(ad.auth.ResolveSiteURL(r))
+}
+
 // forgotPassword always answers 200 {"success":true}, unknown address included:
 // the anti-enumeration guarantee is the reason the route exists.
 func (ad *Adapter) forgotPassword(c *gin.Context) {
@@ -41,7 +49,13 @@ func (ad *Adapter) forgotPassword(c *gin.Context) {
 	// The reset token is a credential: it never reaches the body. The service
 	// delivers it through Config.SendPasswordReset, and neither a missing sender
 	// nor a failing one changes this answer.
-	if _, err := ad.auth.ForgotPassword(c.Request.Context(), auth.ForgotPasswordInput{Email: req.Email, TenantID: req.TenantID}); err != nil {
+	in := auth.ForgotPasswordInput{
+		Email:    req.Email,
+		TenantID: req.TenantID,
+		LinkBase: ad.linkBase(c.Request),
+		Lang:     req.EmailLang,
+	}
+	if _, err := ad.auth.ForgotPassword(c.Request.Context(), in); err != nil {
 		auth.WriteHTTPError(c.Writer, auth.ForgotPasswordHTTPError(err))
 		return
 	}
@@ -106,7 +120,13 @@ func (ad *Adapter) sendVerificationEmail(c *gin.Context) {
 	if !auth.DecodeOptionalJSON(c.Writer, c.Request, &req) {
 		return
 	}
-	token, err := ad.auth.SendVerificationEmailToken(c.Request.Context(), auth.EmailVerificationInput{UserID: user.ID, TenantID: user.TenantID})
+	in := auth.EmailVerificationInput{
+		UserID:   user.ID,
+		TenantID: user.TenantID,
+		LinkBase: ad.linkBase(c.Request),
+		Lang:     req.EmailLang,
+	}
+	token, err := ad.auth.SendVerificationEmailToken(c.Request.Context(), in)
 	if err != nil {
 		auth.WriteHTTPError(c.Writer, auth.SendVerificationEmailHTTPError(err))
 		return
@@ -152,7 +172,14 @@ func (ad *Adapter) changeEmailRequest(c *gin.Context) {
 		auth.WriteHTTPError(c.Writer, httpErr)
 		return
 	}
-	if _, err := ad.auth.RequestEmailChange(c.Request.Context(), auth.ChangeEmailRequestInput{UserID: user.ID, TenantID: user.TenantID, NewEmail: req.NewEmail}); err != nil {
+	in := auth.ChangeEmailRequestInput{
+		UserID:   user.ID,
+		TenantID: user.TenantID,
+		NewEmail: req.NewEmail,
+		LinkBase: ad.linkBase(c.Request),
+		Lang:     req.EmailLang,
+	}
+	if _, err := ad.auth.RequestEmailChange(c.Request.Context(), in); err != nil {
 		auth.WriteHTTPError(c.Writer, auth.ChangeEmailRequestHTTPError(err))
 		return
 	}

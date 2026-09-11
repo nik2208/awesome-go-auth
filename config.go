@@ -80,7 +80,23 @@ type Config struct {
 	SendPasswordReset     PasswordResetSender
 	SendEmailVerification EmailVerificationSender
 	SendEmailChange       EmailChangeSender
-	Logger                func(format string, args ...any)
+	// SiteURLs is the reference's config.email.siteUrl, which may be one string
+	// or an array of them (auth-config.model.ts). Two things are read off it:
+	//
+	//   - The first entry is the canonical base URL for an emailed link
+	//     (getDefaultSiteUrl, auth.router.ts:202-206): what a link points at when
+	//     the request that asked for it carries no allowlisted Origin or Referer.
+	//   - Every entry, together with OAuthWiring.AllowedOrigins, forms the origin
+	//     allowlist Auth.ResolveSiteURL matches a request against
+	//     (buildAllowedOrigins, auth.router.ts:213-219), so a deployment serving
+	//     several front ends mails each one a link back to itself.
+	//
+	// Entries are matched exactly, as the reference's `includes` does: no trailing
+	// slash normalisation, no case folding. Optional; with none configured the
+	// adapters hand the ready-made mailers no per-request base and their static
+	// BaseURL applies, as it did before this field existed. WithSiteURLs sets it.
+	SiteURLs []string
+	Logger   func(format string, args ...any)
 }
 
 // DefaultConfig returns secure defaults for development and production bootstrap.

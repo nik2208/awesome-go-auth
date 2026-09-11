@@ -733,6 +733,83 @@ func TestSectionTwoMailerLocale(t *testing.T) {
 	}
 }
 
+// The delivery's per-request base and language win over the mailer's static
+// BaseURL and Locale, and an empty base or a language that is neither "it" nor
+// "en" defers to them — the same contract MagicLinkMailer has, pinned for all
+// three because each Send method builds its own link.
+func TestSectionTwoMailersHonourThePerRequestBaseAndLang(t *testing.T) {
+	const (
+		static     = "https://static.example.com/auth"
+		perRequest = "https://app.example.com/auth/ui"
+	)
+	t.Run("password reset", func(t *testing.T) {
+		transport := &recordingMailer{}
+		mailer := NewPasswordResetMailer(transport, "Example App", static)
+		if err := mailer.Send(context.Background(), PasswordResetDelivery{Email: "r@example.com", Token: "t", LinkBase: perRequest, Lang: "it"}); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+		assertMailed(t, transport, "r@example.com", "Example App - Reimposta Password", perRequest+"/reset-password?token=t")
+	})
+	t.Run("email verification", func(t *testing.T) {
+		transport := &recordingMailer{}
+		mailer := NewEmailVerificationMailer(transport, "Example App", static)
+		if err := mailer.Send(context.Background(), EmailVerificationDelivery{Email: "v@example.com", Token: "t", LinkBase: perRequest, Lang: "it"}); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+		assertMailed(t, transport, "v@example.com", "Example App - Verifica Email", perRequest+"/verify-email?token=t")
+	})
+	t.Run("email change", func(t *testing.T) {
+		transport := &recordingMailer{}
+		mailer := NewEmailChangeMailer(transport, "Example App", static)
+		if err := mailer.Send(context.Background(), EmailChangeDelivery{NewEmail: "new@example.com", Token: "t", LinkBase: perRequest, Lang: "it"}); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+		assertMailed(t, transport, "new@example.com", "Example App - Conferma Cambio Email", perRequest+"/change-email/confirm?token=t")
+	})
+	t.Run("an empty base and an unknown language defer to the mailer", func(t *testing.T) {
+		transport := &recordingMailer{}
+		mailer := NewPasswordResetMailer(transport, "Example App", static)
+		mailer.Locale = "it"
+		if err := mailer.Send(context.Background(), PasswordResetDelivery{Email: "r@example.com", Token: "t", Lang: "de"}); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+		assertMailed(t, transport, "r@example.com", "Example App - Reimposta Password", static+"/reset-password?token=t")
+	})
+}
+
+// The three service methods copy the input's LinkBase and Lang onto the
+// delivery untouched (auth.router.ts:788, 957, 1028): nothing is resolved or
+// defaulted below the adapter.
+func TestSectionTwoServicesPropagateLinkBaseAndLang(t *testing.T) {
+	const base = "https://app.example.com/auth"
+	spy := &passwordEmailSpy{}
+	svc := newPasswordEmailSvc(t, spy)
+
+	reset := seedUser(t, svc, "linkreset@example.com")
+	if _, err := svc.ForgotPassword(context.Background(), ForgotPasswordInput{Email: reset.Email, TenantID: "t1", LinkBase: base, Lang: "it"}); err != nil {
+		t.Fatalf("forgot password: %v", err)
+	}
+	if len(spy.resets) != 1 || spy.resets[0].LinkBase != base || spy.resets[0].Lang != "it" {
+		t.Errorf("reset deliveries = %+v, want one carrying %q/it", spy.resets, base)
+	}
+
+	verify := seedUnverifiedUser(t, svc, "linkverify@example.com")
+	if _, err := svc.SendVerificationEmailToken(context.Background(), EmailVerificationInput{UserID: verify.ID, TenantID: "t1", LinkBase: base, Lang: "en"}); err != nil {
+		t.Fatalf("send verification: %v", err)
+	}
+	if len(spy.verifications) != 1 || spy.verifications[0].LinkBase != base || spy.verifications[0].Lang != "en" {
+		t.Errorf("verification deliveries = %+v, want one carrying %q/en", spy.verifications, base)
+	}
+
+	change := seedUser(t, svc, "linkchange@example.com")
+	if _, err := svc.RequestEmailChange(context.Background(), ChangeEmailRequestInput{UserID: change.ID, TenantID: "t1", NewEmail: "linkchanged@example.com", LinkBase: base, Lang: "de"}); err != nil {
+		t.Fatalf("request email change: %v", err)
+	}
+	if len(spy.changes) != 1 || spy.changes[0].LinkBase != base || spy.changes[0].Lang != "de" {
+		t.Errorf("change deliveries = %+v, want one carrying %q/de as given", spy.changes, base)
+	}
+}
+
 // A mailer with no transport fails rather than reporting a delivery that did not
 // happen — the same contract MagicLinkMailer has.
 func TestSectionTwoMailersWithoutATransport(t *testing.T) {
