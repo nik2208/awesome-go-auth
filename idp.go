@@ -24,6 +24,22 @@ const defaultAuthCodeTTL = 5 * time.Minute
 // jwks.service.ts:184).
 const DefaultIDPKeyID = "provisioner-key-1"
 
+// DefaultJWKSPath is where the adapters serve the JWKS document, below the
+// mount prefix, when IDPConfig.JWKSPath is empty: the reference's
+// `idProvider.jwksPath ?? '/.well-known/jwks.json'` (auth.router.ts:475).
+const DefaultJWKSPath = "/.well-known/jwks.json"
+
+// jwksCacheControl is the caching directive the reference sets on every JWKS
+// response (auth.router.ts:502). A relying party fetches the document once per
+// key rotation, not once per token, so an hour of shared caching is what makes
+// RS256 verification cheap at the edge.
+const jwksCacheControl = "public, max-age=3600"
+
+// jwksWildcardOrigin is the Access-Control-Allow-Origin the reference sends
+// when jwksCorsOrigins is absent or is the literal string "*"
+// (auth.router.ts:492-494).
+const jwksWildcardOrigin = "*"
+
 // The lifetimes of the IdP token pair when IDPConfig leaves them zero: the
 // reference's tokenExpiry default of 30d and refreshTokenExpiry default of 90d
 // (token.service.ts:80 and :91).
@@ -104,6 +120,54 @@ type IDPConfig struct {
 	// CodeTTL bounds how long a code issued by /authorize can be redeemed at
 	// /token. Zero (or negative) resolves to defaultAuthCodeTTL, five minutes.
 	CodeTTL time.Duration
+
+	// JWKSPath is where the JWKS document is served, relative to the adapter's
+	// mount prefix: the reference's idProvider.jwksPath (auth.router.ts:475).
+	// Empty resolves to DefaultJWKSPath. NewIDP refuses a path that the four
+	// adapters and RegisterHandlers cannot all route as the same literal path:
+	// it must start with "/" and must not end with one, must not contain "{",
+	// "}", "?", "#" or "//", and must not collide with a path RegisterHandlers
+	// already mounts (/authorize, /token, /userinfo,
+	// /.well-known/openid-configuration).
+	//
+	// An Auth built WithIDP makes every adapter serve GET <prefix><JWKSPath>,
+	// public and ahead of any middleware, exactly where the reference registers
+	// it (auth.router.ts:473-475).
+	JWKSPath string
+	// JWKSCORSOrigins is the allowlist for the Access-Control-Allow-Origin
+	// header on the JWKS response: the reference's idProvider.jwksCorsOrigins
+	// (auth.router.ts:492-500).
+	//
+	// Nil is the reference's default, "*". Otherwise the request's Origin is
+	// echoed back when it appears in the list, and no Access-Control-Allow-Origin
+	// header is sent at all when it does not — not an empty one, and not a
+	// refusal: the body is served either way, since CORS bounds what a browser
+	// script may read, not what the server answers.
+	//
+	// The reference's type is `string | string[]`, and only its string form is
+	// the wildcard: it compares the whole value against "*" (auth.router.ts:493),
+	// so every array is an allowlist and an entry "*" inside one is an ordinary
+	// entry, matching only an Origin header of literally "*" — one no browser
+	// sends. Go has no such union, so the one-element slice {"*"} stands in for
+	// the string form and is the single configuration that reads differently
+	// from the reference; see the jwks-cors-wildcard-string-form entry in
+	// compatibility.go.
+	//
+	// Neither the reference nor this port sends Vary: Origin, while both send
+	// Cache-Control: public, max-age=3600 (auth.router.ts:492-502). An
+	// allowlisted response must therefore not reach a shared cache, which would
+	// store one origin's header and replay it to another, or store the
+	// header-less variant and break the allowlisted origin: front an allowlist
+	// with a private cache, or leave this nil so every origin may read the
+	// document.
+	JWKSCORSOrigins []string
+	// JWKSURL overrides the jwks_uri of the discovery document RegisterHandlers
+	// serves. Empty derives it as Issuer + JWKSPath, which is the canonical
+	// location whenever Issuer carries the mount prefix — the convention every
+	// other endpoint in that document already follows, since they are all
+	// derived from Issuer alone. Set it when the IdP is reached through a
+	// gateway whose external URL is not Issuer + the mounted path.
+	JWKSURL string
 }
 
 // IDPClient represents a registered OIDC client application.
@@ -141,6 +205,9 @@ type IDP struct {
 // cfg.Codes falls back to an in-process MemoryAuthCodeStore; see
 // IDPConfig.Codes for when that is not enough.
 func NewIDP(cfg IDPConfig, authSvc *Service, clients ...IDPClient) (*IDP, error) {
+	if err := validateJWKSPath(cfg.JWKSPath); err != nil {
+		return nil, err
+	}
 	idp := &IDP{cfg: cfg, authSvc: authSvc, now: time.Now}
 	signer := cfg.Signer
 	if signer == nil {
@@ -223,6 +290,126 @@ func (idp *IDP) JWKS() JWKS {
 	keys = append(keys, idp.signerJWK)
 	keys = append(keys, idp.cfg.PublicKeys...)
 	return JWKS{Keys: keys}
+}
+
+// jwksReservedPaths are the suffixes RegisterHandlers already mounts below its
+// basePath. A JWKSPath equal to one of them would register the same ServeMux
+// pattern twice, which panics at mount time — inside the host's own
+// initialisation, far from the configuration that caused it.
+var jwksReservedPaths = []string{
+	"/authorize",
+	"/token",
+	"/userinfo",
+	"/.well-known/openid-configuration",
+}
+
+// validateJWKSPath refuses an IDPConfig.JWKSPath that the four adapters and
+// RegisterHandlers cannot all route as the same literal path. Empty is the
+// default and is accepted; everything else is checked here, at construction,
+// rather than at the first request or at mount time.
+//
+// The path is concatenated onto the mount prefix, so it must start with "/" — a
+// relative one would mount <prefix>jwks.json and be served from nowhere anybody
+// looks. It must not end in "/", which is a subtree pattern in net/http and a
+// literal trailing segment in chi. It must not contain "{" or "}", which chi,
+// gin and echo read as a wildcard parameter, nor "?" or "#", which are not part
+// of a path at all, nor "//", which is an empty segment the routers normalise
+// differently. And it must not collide with a path RegisterHandlers mounts.
+func validateJWKSPath(path string) error {
+	if path == "" {
+		return nil
+	}
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("auth: idp: JWKSPath %q must start with %q", path, "/")
+	}
+	if strings.HasSuffix(path, "/") {
+		return fmt.Errorf("auth: idp: JWKSPath %q must not end with %q: a trailing slash is a "+
+			"subtree pattern in net/http and a literal segment in chi", path, "/")
+	}
+	for _, bad := range []string{"{", "}", "?", "#", "//"} {
+		if strings.Contains(path, bad) {
+			return fmt.Errorf("auth: idp: JWKSPath %q must not contain %q: the routers read it as a "+
+				"wildcard or a delimiter rather than as part of a literal path", path, bad)
+		}
+	}
+	for _, reserved := range jwksReservedPaths {
+		if path == reserved {
+			return fmt.Errorf("auth: idp: JWKSPath %q is a path RegisterHandlers already mounts: "+
+				"registering the same pattern twice panics in http.ServeMux", path)
+		}
+	}
+	return nil
+}
+
+// JWKSPath reports where the JWKS document is served relative to the mount
+// prefix: IDPConfig.JWKSPath, or DefaultJWKSPath when that is empty. It always
+// starts with "/", because NewIDP refuses a path that does not. The adapters
+// call it to build the route they mount.
+func (idp *IDP) JWKSPath() string {
+	if idp.cfg.JWKSPath == "" {
+		return DefaultJWKSPath
+	}
+	return idp.cfg.JWKSPath
+}
+
+// jwksURI is the absolute URL the discovery document advertises as jwks_uri:
+// IDPConfig.JWKSURL, else Issuer + JWKSPath.
+func (idp *IDP) jwksURI() string {
+	if idp.cfg.JWKSURL != "" {
+		return idp.cfg.JWKSURL
+	}
+	return strings.TrimSuffix(idp.cfg.Issuer, "/") + idp.JWKSPath()
+}
+
+// jwksAllowedOrigin resolves the Access-Control-Allow-Origin header for a
+// request carrying this Origin, and reports whether the header is sent at all:
+// the transcription of auth.router.ts:492-500.
+//
+// Nil origins answer "*" whatever the request says, and so does the one-element
+// slice {"*"}, which is how this port spells the reference's wildcard string —
+// the reference compares the whole value against "*" (auth.router.ts:493), so
+// the wildcard is never an entry. Every other slice is an allowlist: the Origin
+// is echoed when it is listed and no header is sent when it is not. The
+// reference sets none in that branch, which is what makes the browser refuse the
+// read while the document is still served to everything that is not a browser.
+func (idp *IDP) jwksAllowedOrigin(requestOrigin string) (string, bool) {
+	origins := idp.cfg.JWKSCORSOrigins
+	if origins == nil {
+		return jwksWildcardOrigin, true
+	}
+	if len(origins) == 1 && origins[0] == jwksWildcardOrigin {
+		return jwksWildcardOrigin, true
+	}
+	for _, origin := range origins {
+		if origin == requestOrigin {
+			return requestOrigin, true
+		}
+	}
+	return "", false
+}
+
+// JWKSHandler serves JWKS() with the headers the reference sets on that route:
+// Access-Control-Allow-Origin per JWKSCORSOrigins and
+// "Cache-Control: public, max-age=3600" (auth.router.ts:490-503).
+//
+// The document is built once, here, and not per request: the reference derives
+// it at router-creation time and closes over it (auth.router.ts:487), and
+// nothing an IDP holds can change it afterwards — the signer and
+// IDPConfig.PublicKeys are both fixed at construction.
+//
+// The handler is public by construction: no auth, no CSRF, no session. Mounting
+// it is what an adapter does for an Auth built WithIDP; a host that mounts it
+// by hand must keep it ahead of any middleware, as the reference does
+// (auth.router.ts:473-474).
+func (idp *IDP) JWKSHandler() http.Handler {
+	document := idp.JWKS()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin, ok := idp.jwksAllowedOrigin(r.Header.Get("Origin")); ok {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+		w.Header().Set("Cache-Control", jwksCacheControl)
+		WriteJSON(w, http.StatusOK, document)
+	})
 }
 
 // IssueIdPTokenPair mints the reference's RS256 token pair for user: the
@@ -314,12 +501,32 @@ func (idp *IDP) signWithLifetime(claims map[string]any, now time.Time, ttl time.
 }
 
 // RegisterHandlers mounts OIDC endpoints on the given mux.
+//
+// The JWKS document is served at basePath + JWKSPath(), the canonical location
+// the adapters mount and the one the discovery document points at.
+// <basePath>/jwks is kept as a deprecated alias of it, serving the identical
+// bytes and headers, for the relying parties configured against the path this
+// package published before v0.6.0; the alias is kept through the 0.x line and
+// removed in v1.0.0. The deprecated thing is that URL path, not this method:
+// the other four endpoints, and the canonical JWKS path, are current.
+//
+// Both JWKS patterns are registered for GET alone, as the reference registers
+// the route (router.get, auth.router.ts:490) and as the four adapters mount it.
+// net/http serves HEAD from a "GET " pattern itself, which is Express's own
+// fallback from HEAD to the GET handler; any other method misses the route.
 func (idp *IDP) RegisterHandlers(mux *http.ServeMux, basePath string) {
 	if !strings.HasSuffix(basePath, "/") {
 		basePath += "/"
 	}
+	jwks := idp.JWKSHandler()
+	canonical := basePath + strings.TrimPrefix(idp.JWKSPath(), "/")
 	mux.HandleFunc(basePath+".well-known/openid-configuration", idp.handleDiscovery)
-	mux.HandleFunc(basePath+"jwks", idp.handleJWKS)
+	mux.Handle("GET "+canonical, jwks)
+	// A JWKSPath of "/jwks" makes the alias the canonical path; registering it
+	// twice would panic in ServeMux.
+	if alias := basePath + "jwks"; alias != canonical {
+		mux.Handle("GET "+alias, jwks)
+	}
 	mux.HandleFunc(basePath+"authorize", idp.handleAuthorize)
 	mux.HandleFunc(basePath+"token", idp.handleToken)
 	mux.HandleFunc(basePath+"userinfo", idp.handleUserInfo)
@@ -332,7 +539,7 @@ func (idp *IDP) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"authorization_endpoint":                base + "/authorize",
 		"token_endpoint":                        base + "/token",
 		"userinfo_endpoint":                     base + "/userinfo",
-		"jwks_uri":                              base + "/jwks",
+		"jwks_uri":                              idp.jwksURI(),
 		"response_types_supported":              []string{"code"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
@@ -342,11 +549,6 @@ func (idp *IDP) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(doc) //nolint:errcheck
-}
-
-func (idp *IDP) handleJWKS(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(idp.JWKS()) //nolint:errcheck
 }
 
 func (idp *IDP) handleAuthorize(w http.ResponseWriter, r *http.Request) {

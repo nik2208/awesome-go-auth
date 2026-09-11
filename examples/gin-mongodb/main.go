@@ -78,9 +78,15 @@ func main() {
 	svc := a.Service()
 
 	// ── 2. OIDC IDP (optional) ─────────────────────────────────────────────
+	// Issuer carries the /oidc mount prefix below, because the discovery
+	// document derives every endpoint from it — including jwks_uri, which has to
+	// resolve to the JWKS route RegisterHandlers actually serves. That also puts
+	// /oidc in the iss claim of every token this IdP mints; a deployment that
+	// needs a bare iss leaves Issuer alone and sets IDPConfig.JWKSURL to the
+	// absolute JWKS URL instead. See README_DETAILED.md, "OIDC IDP".
 	idp, err := auth.NewIDP(
 		auth.IDPConfig{
-			Issuer:         "https://auth.example.com",
+			Issuer:         "https://auth.example.com/oidc",
 			AccessTokenTTL: 15 * time.Minute,
 			IDTokenTTL:     time.Hour,
 		},

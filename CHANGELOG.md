@@ -70,6 +70,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`auth.router.ts:880-902`, `:552`). The behaviour predates this release; this
   is the release that made that route's policy term the subject, so it is now in
   `compatibility.go` and the generated README section rather than in prose alone.
+- **The JWKS document at `GET <prefix>/.well-known/jwks.json` on every adapter,
+  with the reference's headers.** `auth.WithIDP(idp)` registers an `IDP` on the
+  `Auth`, and that is what makes net/http, chi, gin and echo mount the route —
+  public, ahead of every middleware, exactly where and under the same condition
+  as the reference (`auth.router.ts:473-475`). The response carries
+  `Cache-Control: public, max-age=3600` (`:502`) and an
+  `Access-Control-Allow-Origin` resolved as the reference resolves it
+  (`:492-500`): `*` by default, a listed `Origin` echoed back, and no such
+  header at all for an unlisted one — the document is served either way, since
+  CORS bounds what a browser script may read and not what the server answers.
+  `IDPConfig.JWKSPath` moves the route (empty → `DefaultJWKSPath`,
+  `/.well-known/jwks.json`; `NewIDP` refuses a path the routers cannot all treat
+  as the same literal path — one that does not start with `/`, ends with one,
+  contains `{`, `}`, `?`, `#` or `//`, or collides with a path
+  `RegisterHandlers` already mounts), `IDPConfig.JWKSCORSOrigins` is the
+  allowlist (nil → `*`), and `(*Auth).IDP()`, `(*Auth).JWKSHandler()`,
+  `(*IDP).JWKSHandler()` and `(*IDP).JWKSPath()` are the pieces a host mounting
+  it itself needs. An `IDP` built with a nil `Service` — the only order a caller
+  can write, since `NewIDP` wants one and `New` is what produces it — adopts the
+  `Auth`'s Service; one already bound to a different `Service` is refused with
+  an error rather than silently left pointing at the other one's user store.
+  `OpenAPIInfo.IDProvider` (with `OpenAPIInfo.JWKSPath`) adds the path and the
+  `JWK`/`JWKS` schemas it references to the generated document — and only then,
+  so a deployment with no IdP ships neither — and the wiretest harness's first
+  `conditionalRouteSet`, `jwks`, holds the flag and the four mounts to each
+  other in both directions, including the 404 without `WithIDP`. See
+  README_DETAILED.md, "OIDC IDP".
+- **A deviation entry, `jwks-cors-wildcard-string-form`.** The reference's
+  `jwksCorsOrigins` is `string | string[]` and only the *string* `'*'` is the
+  wildcard (`corsOrigins === '*'` on the whole value, `auth.router.ts:493`), so
+  every array there is an allowlist. Go has no such union: the one-element
+  `[]string{"*"}` stands in for the string form, while an entry `*` inside a
+  longer slice is an ordinary allowlist entry here exactly as in the reference.
+  Registered in `CompatibilityNotes()` and in README.md's generated section.
+- **`IDPConfig.JWKSURL`** overrides the `jwks_uri` of the discovery document
+  `RegisterHandlers` serves, for an IdP reached through a gateway whose external
+  URL is not `Issuer` + the mounted path.
 
 ### Changed
 - **BREAKING (minor surface): `(*Auth).TwoFactorPolicy()` is now
@@ -90,6 +127,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (that term OR the stored `require2FA`), and is omitted when the settings store
   cannot be read, since the route it mirrors answers `500` rather than guessing.
   MCP is out of parity scope; the change is additive.
+- **The discovery document's `jwks_uri` now points at the canonical JWKS path**
+  (`Issuer` + `IDPConfig.JWKSPath`) instead of `<base>/jwks`. A relying party
+  that reads the document follows it automatically; one configured by hand
+  against `<base>/jwks` keeps working — see below.
+
+### Deprecated
+- **`<base>/jwks`, the alias `(*IDP).RegisterHandlers` mounts alongside the
+  canonical path.** It serves the identical bytes and headers and is kept
+  through the 0.x line (upstream plan D-13); it is removed in v1.0.0. Point
+  relying parties at `<prefix>/.well-known/jwks.json`, or at whatever
+  `IDPConfig.JWKSPath` says. Its methods narrow as a side effect: both JWKS
+  patterns are now registered `GET`-only, as the reference registers the route
+  (`router.get`, `auth.router.ts:490`) and as the four adapters mount it, so
+  net/http serves `HEAD` from the `GET` pattern and answers 405 to every other
+  method where the alias previously answered the document to all of them.
 
 ## [0.5.0] - 2026-09-11
 

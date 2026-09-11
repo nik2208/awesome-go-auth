@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // The generated OpenAPI description of the mounted routes.
@@ -30,6 +31,22 @@ type OpenAPIInfo struct {
 	// and it must match the HTTPConfig the adapter was mounted with, otherwise
 	// the spec documents paths the server does not serve.
 	APIPrefix string
+	// IDProvider adds the IdP's public JWKS route to the document. Set it when
+	// the adapter was mounted on an Auth built WithIDP, and leave it false
+	// otherwise: that route exists only under that configuration, so a document
+	// that always carried it would advertise an endpoint most deployments
+	// answer 404 for.
+	IDProvider bool
+	// JWKSPath is where that route is served below APIPrefix. Empty means
+	// DefaultJWKSPath, and it must match the IDPConfig.JWKSPath of the IdP the
+	// adapter was mounted with. Read only when IDProvider is true.
+	//
+	// A missing leading "/" is added, since the value is a path below the
+	// prefix. A value that collides with a route this document already
+	// describes is ignored rather than allowed to replace it, which would drop
+	// a real endpoint from the spec; NewIDP refuses such a JWKSPath outright,
+	// so the collision can only come from this field disagreeing with the IdP.
+	JWKSPath string
 }
 
 // GenerateOpenAPISpec returns an OpenAPI 3.0 spec for the mounted auth endpoints.
@@ -47,6 +64,38 @@ func GenerateOpenAPISpec(info OpenAPIInfo) map[string]any {
 	servers := []map[string]any{}
 	if info.ServerURL != "" {
 		servers = append(servers, map[string]any{"url": info.ServerURL})
+	}
+
+	prefix := openAPIPrefix(info.APIPrefix)
+	paths := openAPIPaths(prefix)
+	schemas := openAPISchemas()
+	// The one conditional group so far: the JWKS route exists only on an Auth
+	// built WithIDP, so neither it nor the two schemas nothing else references
+	// are in the document unless the caller says so. See OpenAPIInfo.IDProvider
+	// and the "jwks" set in the wiretest harness, which holds this flag and the
+	// adapters' mounts to each other in both directions.
+	if info.IDProvider {
+		jwksPath := info.JWKSPath
+		if jwksPath == "" {
+			jwksPath = DefaultJWKSPath
+		}
+		// The field is a path below the prefix, like every other path in this
+		// document. A caller who dropped the leading "/" meant the same path, and
+		// would otherwise get the nonsense <prefix>jwks.json, so normalise it
+		// rather than emit that.
+		if !strings.HasPrefix(jwksPath, "/") {
+			jwksPath = "/" + jwksPath
+		}
+		// A JWKSPath colliding with a documented route would otherwise replace
+		// it silently, dropping a real endpoint from the spec. The documented
+		// route wins: it is the one the adapter certainly serves, whereas a
+		// colliding JWKSPath is a misconfiguration the host has to see.
+		if key := prefix + jwksPath; !openAPIHasPath(paths, key) {
+			paths[key] = openAPIJWKSPath()
+			for name, schema := range openAPIJWKSSchemas() {
+				schemas[name] = schema
+			}
+		}
 	}
 
 	return map[string]any{
@@ -81,9 +130,55 @@ func GenerateOpenAPISpec(info OpenAPIInfo) map[string]any {
 				},
 			},
 			"parameters": openAPIParameters(),
-			"schemas":    openAPISchemas(),
+			"schemas":    schemas,
 		},
-		"paths": openAPIPaths(openAPIPrefix(info.APIPrefix)),
+		"paths": paths,
+	}
+}
+
+// openAPIHasPath reports whether the document already describes this path, so a
+// conditional group can leave a documented route alone instead of replacing it.
+func openAPIHasPath(paths map[string]any, key string) bool {
+	_, taken := paths[key]
+	return taken
+}
+
+// openAPIJWKSPath describes GET <prefix><JWKSPath>, the IdP's public signing
+// keys. It is a path item on its own because it is added conditionally.
+func openAPIJWKSPath() map[string]any {
+	return map[string]any{
+		"get": map[string]any{
+			"summary": "The IdP's public signing keys (JWKS)",
+			"description": "Public: no credential, no CSRF, no session. Answers `Cache-Control: " +
+				jwksCacheControl + "`, and `Access-Control-Allow-Origin: *` unless " +
+				"`IDPConfig.JWKSCORSOrigins` restricts it, in which case a listed `Origin` is " +
+				"echoed back and an unlisted one gets no such header. Mounted only when the " +
+				"`Auth` was built with `WithIDP`.",
+			"operationId": "jwks",
+			"tags":        []string{"IdP"},
+			"responses": map[string]any{
+				"200": map[string]any{
+					"description": "The signing keys",
+					"content": map[string]any{
+						"application/json": map[string]any{
+							"schema": map[string]any{"$ref": "#/components/schemas/JWKS"},
+						},
+					},
+					"headers": map[string]any{
+						"Cache-Control": map[string]any{
+							"description": "Always `" + jwksCacheControl + "`.",
+							"schema":      map[string]any{"type": "string"},
+						},
+						"Access-Control-Allow-Origin": map[string]any{
+							"description": "Absent when the request's `Origin` is not allowlisted. No " +
+								"`Vary: Origin` is sent — the reference sends none either — so a response " +
+								"produced under an allowlist must not be stored by a shared cache.",
+							"schema": map[string]any{"type": "string"},
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -110,6 +205,39 @@ func openAPIParameters() map[string]any {
 				"the access-token middleware; mirror the `" + CSRFTokenCookieName + "` cookie value here.",
 			"required": false,
 			"schema":   map[string]any{"type": "string"},
+		},
+	}
+}
+
+// openAPIJWKSSchemas are the two schemas only the JWKS path item references.
+// They are merged into the component schemas alongside that path item and are
+// absent otherwise, so a deployment with no IdP does not ship a spec carrying
+// two definitions nothing points at.
+func openAPIJWKSSchemas() map[string]any {
+	return map[string]any{
+		"JWK": map[string]any{
+			"type":        "object",
+			"description": "One RSA public key, RFC 7517.",
+			"required":    []string{"kty", "use", "alg", "kid", "n", "e"},
+			"properties": map[string]any{
+				"kty": map[string]any{"type": "string", "enum": []string{"RSA"}},
+				"use": map[string]any{"type": "string", "enum": []string{"sig"}},
+				"alg": map[string]any{"type": "string", "enum": []string{"RS256"}},
+				"kid": map[string]any{"type": "string", "description": "Matches the `kid` header of the tokens this key signed."},
+				"n":   map[string]any{"type": "string", "description": "Modulus, unpadded base64url of the big-endian bytes."},
+				"e":   map[string]any{"type": "string", "description": "Exponent, unpadded base64url of the big-endian bytes."},
+			},
+		},
+		"JWKS": map[string]any{
+			"type":     "object",
+			"required": []string{"keys"},
+			"properties": map[string]any{
+				"keys": map[string]any{
+					"type":        "array",
+					"description": "The signing key first, then `IDPConfig.PublicKeys` in order.",
+					"items":       map[string]any{"$ref": "#/components/schemas/JWK"},
+				},
+			},
 		},
 	}
 }

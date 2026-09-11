@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -14,6 +15,9 @@ type Auth struct {
 	service *Service
 	// oauth is nil unless WithOAuth was supplied; see oauth_wire.go.
 	oauth *OAuthWiring
+	// idp is nil unless WithIDP was supplied. It is what makes the adapters
+	// mount the JWKS route; see JWKSHandler.
+	idp *IDP
 }
 
 // Option configures Auth initialization.
@@ -25,6 +29,7 @@ type authBuilder struct {
 	sessions SessionStore
 	svcOpts  []ServiceOption
 	oauth    *OAuthWiring
+	idp      *IDP
 }
 
 // New creates a configured Auth instance from the package defaults.
@@ -64,11 +69,41 @@ func NewWithConfig(cfg Config, opts ...Option) (*Auth, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Auth{service: svc, oauth: b.oauth}, nil
+	// An IdP built with a nil Service — the only order a host can write, since
+	// the Service does not exist until here — adopts this one. One already bound
+	// to a different Service is refused rather than silently adopted or silently
+	// left alone: either way its /token and /userinfo would read a different
+	// user store from this Auth's, and rebinding one that is already serving
+	// requests is a data race besides. See WithIDP.
+	if b.idp != nil {
+		if b.idp.authSvc != nil && b.idp.authSvc != svc {
+			return nil, errors.New("auth: WithIDP: the IDP is already bound to another Service")
+		}
+		b.idp.authSvc = svc
+	}
+	return &Auth{service: svc, oauth: b.oauth, idp: b.idp}, nil
 }
 
 // Service exposes the configured core service.
 func (a *Auth) Service() *Service { return a.service }
+
+// IDP reports the Identity Provider WithIDP configured, or nil. The adapters
+// consult it to decide whether to mount the JWKS route and where.
+func (a *Auth) IDP() *IDP { return a.idp }
+
+// JWKSHandler returns the handler serving the IdP's JWKS document with the
+// reference's headers, or nil when no WithIDP was given: the same handler the
+// adapters mount at <prefix><IDPConfig.JWKSPath>. See (*IDP).JWKSHandler.
+//
+// A host mounting it itself must keep it public and ahead of any middleware,
+// as the reference does (auth.router.ts:473-474): a relying party fetches the
+// document with no credential of any kind.
+func (a *Auth) JWKSHandler() http.Handler {
+	if a.idp == nil {
+		return nil
+	}
+	return a.idp.JWKSHandler()
+}
 
 // WithSecret configures the JWT signing secret.
 func WithSecret(secret string) Option {
@@ -348,6 +383,42 @@ func WithSettingsStore(store SettingsStore) Option {
 func WithSiteURLs(urls ...string) Option {
 	return func(b *authBuilder) error {
 		b.cfg.SiteURLs = append([]string(nil), urls...)
+		return nil
+	}
+}
+
+// WithIDP registers an OIDC Identity Provider on the Auth, which is what makes
+// every adapter mount its JWKS document at GET <prefix><IDPConfig.JWKSPath>,
+// public and ahead of any middleware. That is the one route the Option adds:
+// the discovery, authorize, token and userinfo endpoints stay where they were,
+// behind (*IDP).RegisterHandlers, and nothing about how /login, /refresh or the
+// session tokens work changes.
+//
+// The reference registers the same route from the same condition — an
+// idProvider block with a key, or enabled (auth.router.ts:473-475) — where here
+// the condition is having built an IDP and passed it here.
+//
+// An IDP built with a nil Service adopts the one this Auth is being built
+// around, which is the only order a host can write: NewIDP wants a *Service and
+// a *Service only exists once New has returned. So
+//
+//	idp, err := auth.NewIDP(auth.IDPConfig{Signer: key}, nil)
+//	a, err := auth.New(auth.WithUserStore(store), auth.WithIDP(idp))
+//
+// leaves idp fully wired.
+//
+// An IDP that already carries a different Service — one constructed directly, or
+// one a previous auth.New already bound — is refused, and New returns an error:
+// its /token and /userinfo would answer from that other Service's user store
+// while this Auth's routes answered from this one. Build a second IDP for a
+// second Auth. One IDP per Auth is also what keeps the binding free of a data
+// race, since nothing rebinds an IDP that may already be serving requests.
+func WithIDP(idp *IDP) Option {
+	return func(b *authBuilder) error {
+		if idp == nil {
+			return errors.New("auth: WithIDP: nil IDP")
+		}
+		b.idp = idp
 		return nil
 	}
 }

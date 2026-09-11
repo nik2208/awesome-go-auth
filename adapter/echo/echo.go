@@ -84,6 +84,17 @@ func (ad *Adapter) Middleware() echo.MiddlewareFunc {
 // Mount attaches the auth endpoints.
 func (ad *Adapter) Mount(group *echo.Group) {
 	prefix := ad.cfg.Prefix()
+	// IdP mode: the JWKS document, mounted first and bare — no CSRF, no auth —
+	// because the reference registers it ahead of every middleware
+	// (auth.router.ts:473-474) and only when an idProvider block is configured
+	// (:473); here that condition is auth.WithIDP. HEAD is registered next to
+	// GET because echo, unlike net/http and Express, does not fall back from one
+	// to the other.
+	if idp := ad.auth.IDP(); idp != nil {
+		jwks := serveHTTP(ad.auth.JWKSHandler())
+		group.GET(prefix+idp.JWKSPath(), jwks)
+		group.HEAD(prefix+idp.JWKSPath(), jwks)
+	}
 	group.POST(prefix+"/register", ad.guard(ad.register))
 	group.POST(prefix+"/login", ad.guard(ad.login))
 	group.POST(prefix+"/refresh", ad.guard(ad.refresh))

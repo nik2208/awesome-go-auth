@@ -840,7 +840,7 @@ func TestNewIDPEphemeralKeyWarnsOnce(t *testing.T) {
 		t.Fatalf("IssueIdPTokenPair: %v", err)
 	}
 	idp.JWKS()
-	idp.handleJWKS(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/jwks", nil))
+	idp.JWKSHandler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, DefaultJWKSPath, nil))
 	if got := logged(); len(got) != 1 || got[0] != want {
 		t.Fatalf("logged %q, want exactly one line %q", got, want)
 	}
