@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-11
+
+The claims and identity-provider milestone: custom claims can be built from
+configuration (StaticClaims, UserFieldClaims, ChainClaims) or from a signed,
+bounded, fail-closed claims webhook, the adapters authenticate without
+calling the claims hook so a webhook fires on issuance and on /me only, and
+the IdP signs with an injected key under a stable kid, publishes a proper
+JWKS document, parses PEM keys and mints the reference's RS256 token pair as
+a host-level API.
+
 ### Added
 - **`NewGatewayMailerTransport(MailerConfig)`: a mail transport that speaks the
   reference's gateway contract.** `POST {endpoint}` with an `X-API-Key` header and
