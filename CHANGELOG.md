@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-11
+
+The email-flows milestone, plus the first steps of the ones after it. Links in
+auth mail are now built from the request that asked for them, against a site
+URL allowlist, and rendered from a template store with the reference's six
+template ids and its en/it built-ins; a gateway transport speaks the
+reference's mailer contract and a delivery webhook can replace mail and SMS
+altogether. On the way: the session claims can no longer be overridden by a
+claims hook (a security fix), loginProvider joins the payload, the TOTP
+issuer is configurable with two registered deviations, OAuth providers gain
+additional auth params, the GitHub email fallback and a declarative
+profileMap, the IdP keeps its authorization codes in a store, and the
+wiretest harness can express conditional route sets.
+
 ### Added
 - **`NewGatewayMailerTransport(MailerConfig)`: a mail transport that speaks the
   reference's gateway contract.** `POST {endpoint}` with an `X-API-Key` header and
