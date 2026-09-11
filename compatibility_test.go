@@ -61,6 +61,8 @@ var wantDeviationIDs = []string{
 	"one-time-tokens-are-base64url",
 	"password-policy-on-reset-and-change",
 	"temp-token-is-typed-not-an-access-token",
+	"totp-accepts-one-step-of-skew",
+	"totp-issuer-defaults-to-config-issuer",
 	"totp-setup-omits-qrcode",
 }
 
@@ -73,6 +75,8 @@ var wantClaims = map[string][]string{
 	"link-request-exempts-bearer-from-csrf":        {"Bearer", "CSRF_INVALID", "CORS-safelisted"},
 	"password-policy-on-reset-and-change":          {"WEAK_PASSWORD", "400", "minLength: 8"},
 	"totp-setup-omits-qrcode":                      {"otpauthUrl", "qrCode"},
+	"totp-issuer-defaults-to-config-issuer":        {"otpauthUrl", "awesome-node-auth", "Config.Issuer", "TwoFactorAppName"},
+	"totp-accepts-one-step-of-skew":                {"TOTPSkew", "epochTolerance", "totp.strategy.ts"},
 	"one-time-tokens-are-base64url":                {"43", "64", "base64url"},
 	"advertised-2fa-methods-require-store-support": {"available2faMethods", "501"},
 	"csrf-cookie-not-reissued-with-tokens":         {"Set-Cookie", "setTokenCookies"},

@@ -223,6 +223,62 @@ revision the whole contract was extracted from.
   Rust port of this family does too. A client that displays the reference's PNG
   directly has to encode the URI instead.
 
+### The default TOTP issuer is `Config.Issuer`, not `awesome-node-auth`
+
+`totp-issuer-defaults-to-config-issuer`
+
+- **Surface**: `POST <prefix>/2fa/setup`, the issuer in `otpauthUrl`.
+- **This port**: Labels the provisioning URI with `Config.TwoFactorAppName` when
+  it is set and with `Config.Issuer` when it is not — `awesome-go-auth` on
+  `DefaultConfig` — as both the label prefix and the `issuer` parameter, in
+  otplib's `issuer:account` form.
+- **The reference**: Labels it with `config.twoFactor.appName` and falls back to
+  the literal `'awesome-node-auth'` — its own package name — when no app name is
+  configured (`auth.router.ts:830`, `totp.strategy.ts:11-17`).
+- **Why**: The reference's fallback names the library, not the deployment, which
+  is the wrong thing to show a user who opens their authenticator app. This port
+  has carried `Config.Issuer` there since the route existed, so enrolments made
+  before `TwoFactorAppName` was added sit under that name in users' apps, and
+  switching the default now would file every new enrolment under a different
+  name from the old ones on the same deployment. The difference is visible only
+  on a deployment that sets neither field: one that sets `TwoFactorAppName` —
+  the reference's `appName` — gets exactly the reference's label.
+- **Matching the reference exactly**: `WithTwoFactorAppName("awesome-node-auth")`.
+  Any name given is carried verbatim; only the fallback differs.
+
+### TOTP codes from the adjacent 30-second steps are accepted
+
+`totp-accepts-one-step-of-skew`
+
+- **Surface**: `POST <prefix>/2fa/verify-setup` and `POST <prefix>/2fa/verify`,
+  the two routes that check a TOTP code (`/2fa/disable` takes none, in either
+  implementation).
+- **This port**: Accepts a code from the previous or the next 30-second step as
+  well as the current one: `validateTOTPCode` tries `TOTPSkew = 1` step either
+  side of now (`totp.go`), so three codes are valid at any instant and each code
+  is accepted over a 90-second window — its own step and the 30 seconds before
+  and after it — where the reference's window is 30.
+- **The reference**: Accepts the current step only. `TotpStrategy.verify` in
+  `totp.strategy.ts` calls `totp.verify(token, { secret })` and sets no other
+  option, and otplib's `verify` — `@otplib/totp` 13.4.0, the version the
+  reference's package-lock.json pins for `otplib ^13.3.0` (13.4.1 today, same
+  default) — defaults its window to zero seconds either side of now:
+  `epochTolerance:f=0` in the `verify` method of `@otplib/totp`'s
+  `dist/index.js`, documented in its types as
+  `default: 0 = current period only`. A code is refused from the first second of
+  the step after its own (`totp.strategy.ts:22-25`, `auth.router.ts:846`,
+  `auth.router.ts:868`).
+- **Why**: An authenticator runs on the phone's clock, and a user reads a code
+  some seconds before the server sees it, so with no tolerance a code read in
+  the last seconds of a step — or on a phone a few seconds adrift — is refused
+  and the user has to try again, at every step boundary. RFC 6238 §5.2
+  recommends allowing one step for exactly that delay, and one step is the
+  tolerance mainstream verifiers ship with. The cost is that three of the
+  million possible codes are valid at any instant instead of one.
+- **Matching the reference exactly**: Not possible: `TOTPSkew` is a constant,
+  not a knob, and no knob is planned. A deployment gets the one-step window
+  whether or not it wants it.
+
 ### One-time tokens are base64url, not hex
 
 `one-time-tokens-are-base64url`

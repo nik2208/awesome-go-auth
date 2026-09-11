@@ -899,9 +899,31 @@ func testTwoFactor(t *testing.T, mount Mounter) {
 		if _, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret); err != nil || secret == "" {
 			t.Fatalf("secret = %q, want base32", secret)
 		}
-		// The label is percent-escaped as encodeURIComponent does it, which is what
-		// the reference's otplib emits: the @ is %40.
-		want := "otpauth://totp/setup2fa%40example.com?algorithm=SHA1&digits=6&issuer=awesome-go-auth&period=30&secret=" + secret
+		// The label is otplib's issuer:account, percent-escaped as
+		// encodeURIComponent does it, which is what the reference's otplib emits:
+		// the @ is %40, the separating colon is bare. With no app name configured
+		// the issuer is Config.Issuer, awesome-go-auth on the defaults (deviation
+		// totp-issuer-defaults-to-config-issuer).
+		want := "otpauth://totp/awesome-go-auth:setup2fa%40example.com?algorithm=SHA1&digits=6&issuer=awesome-go-auth&period=30&secret=" + secret
+		if body["otpauthUrl"] != want {
+			t.Fatalf("otpauthUrl = %v, want %q", body["otpauthUrl"], want)
+		}
+	})
+
+	// The reference's twoFactor.appName (auth.router.ts:830). It is the issuer
+	// the authenticator app displays, so it reaches the wire twice — as the label
+	// prefix and as the issuer parameter — and a space in it is %20 in both, as
+	// encodeURIComponent renders it; never the "+" of form encoding.
+	t.Run("setup labels the URI with the configured app name", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithTwoFactorAppName("Example App"))
+		_, tokens := env.Seed("appname@example.com")
+
+		rec := env.Do(passwordlessBearer(env.Request(http.MethodPost, "/2fa/setup", nil), tokens.AccessToken))
+
+		AssertStatus(t, rec, http.StatusOK)
+		body := Body(t, rec)
+		secret, _ := body["secret"].(string)
+		want := "otpauth://totp/Example%20App:appname%40example.com?algorithm=SHA1&digits=6&issuer=Example%20App&period=30&secret=" + secret
 		if body["otpauthUrl"] != want {
 			t.Fatalf("otpauthUrl = %v, want %q", body["otpauthUrl"], want)
 		}

@@ -61,6 +61,19 @@ type Config struct {
 	EmailChangeTTL        time.Duration
 	TempTokenTTL          time.Duration
 	Require2FA            bool
+	// TwoFactorAppName is the issuer an authenticator app files a TOTP
+	// enrolment under: the `issuer` of the otpauth:// URI POST <prefix>/2fa/setup
+	// returns, and the prefix of its label. It is the reference's
+	// `twoFactor.appName` (auth-config.model.ts:272-274, read at
+	// auth.router.ts:830).
+	//
+	// Empty means unset, and unset means Config.Issuer — which is what the URI
+	// carried before this field existed, so enrolments made then and enrolments
+	// made now sit under the same name in users' apps. The reference falls back
+	// to the literal 'awesome-node-auth' instead; that difference is registered
+	// as the deviation totp-issuer-defaults-to-config-issuer. WithTwoFactorAppName
+	// sets it.
+	TwoFactorAppName string
 	// BuildTokenClaims adds claims to every token minted — access, refresh and
 	// the 2FA step-up token — and fills CustomClaims on the enriched profile.
 	// Its result is spread over the six base claims (sub, email, role,
@@ -126,6 +139,16 @@ func DefaultConfig(secret string) Config {
 		EmailChangeTTL:        1 * time.Hour,
 		TempTokenTTL:          5 * time.Minute,
 	}
+}
+
+// totpIssuer is the issuer the TOTP provisioning URI carries: TwoFactorAppName
+// when set, Issuer otherwise. See Config.TwoFactorAppName for why the fallback
+// is not the reference's literal.
+func (c Config) totpIssuer() string {
+	if c.TwoFactorAppName != "" {
+		return c.TwoFactorAppName
+	}
+	return c.Issuer
 }
 
 func (c Config) validate() error {

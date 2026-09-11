@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // This file holds the vocabulary the passwordless entry points (magic link,
@@ -208,25 +209,62 @@ func (s *Service) StartTOTPEnrolment(ctx context.Context, userID, tenantID strin
 	if err != nil {
 		return TOTPSetup{}, err
 	}
-	return TOTPSetup{Secret: secret, OTPAuthURL: totpProvisioningURI(secret, user.Email, s.cfg.Issuer)}, nil
+	return TOTPSetup{Secret: secret, OTPAuthURL: totpProvisioningURI(secret, user.Email, s.cfg.totpIssuer())}, nil
 }
 
-// totpProvisioningURI renders the otpauth:// URI an authenticator app scans.
-// The parameters are spelled out rather than left to the app's defaults so that
-// a client rendering the URI as a QR code cannot enrol against a different step
-// or digit count than validateTOTPCode checks.
+// totpProvisioningURI renders the otpauth:// URI an authenticator app scans:
 //
-// The issuer label is Config.Issuer. The reference has a dedicated
-// twoFactor.appName for it; adding that config field belongs with the rest of
-// the config alignment.
+//	otpauth://totp/<issuer>:<account>?algorithm=SHA1&digits=6&issuer=<issuer>&period=30&secret=<secret>
+//
+// The label takes otplib's form, which is what the reference emits: its
+// `totp.toURI({label: email, issuer: appName, secret})` (totp.strategy.ts:17)
+// reaches @otplib/uri's generateTOTP, which builds the label as
+// `${issuer}:${label}` whenever an issuer is given and encodes each
+// colon-separated piece with encodeURIComponent, so the separator itself stays a
+// bare colon (@otplib/uri 13.4.1; the reference pins otplib ^13.3.0). With no
+// issuer at all the label is the bare account and the `issuer` parameter is
+// omitted, as there.
+//
+// The parameters are where this port and the reference part company, on
+// purpose: otplib leaves algorithm, digits and period out of the URI when they
+// are its defaults, and this port spells them out — from the same TOTP*
+// constants validateTOTPCode reads — so that a client rendering the URI as a QR
+// code cannot enrol against a different step or digit count than the verifier
+// checks. Every authenticator app reads the two forms identically.
+//
+// Values are escaped with escapeURIComponent throughout rather than
+// url.QueryEscape, whose "+" for a space in the issuer the reference never
+// emits (encodeURIComponent gives %20) and which not every URI parser folds
+// back. issuer is Config.totpIssuer(): TwoFactorAppName, else Issuer.
 func totpProvisioningURI(secret, account, issuer string) string {
-	params := url.Values{}
-	params.Set("algorithm", "SHA1")
-	params.Set("digits", "6")
-	params.Set("issuer", issuer)
-	params.Set("period", "30")
-	params.Set("secret", secret)
-	return "otpauth://totp/" + escapeURIComponent(account) + "?" + params.Encode()
+	label := escapeOTPAuthLabel(account)
+	if issuer != "" {
+		label = escapeOTPAuthLabel(issuer) + ":" + label
+	}
+	var b strings.Builder
+	b.WriteString("otpauth://totp/")
+	b.WriteString(label)
+	b.WriteString("?algorithm=" + TOTPAlgorithm)
+	b.WriteString("&digits=" + strconv.Itoa(TOTPDigits))
+	if issuer != "" {
+		b.WriteString("&issuer=" + escapeURIComponent(issuer))
+	}
+	b.WriteString("&period=" + strconv.Itoa(int(TOTPPeriod/time.Second)))
+	b.WriteString("&secret=" + escapeURIComponent(secret))
+	return b.String()
+}
+
+// escapeOTPAuthLabel escapes one half of the otpauth label the way otplib's
+// generate does the whole of it: split on ":", encodeURIComponent each piece,
+// join with a bare ":". Applying it to the issuer and the account separately
+// and joining them with ":" gives the same bytes as applying it once to
+// `${issuer}:${account}`, which is what the reference does.
+func escapeOTPAuthLabel(s string) string {
+	parts := strings.Split(s, ":")
+	for i, p := range parts {
+		parts[i] = escapeURIComponent(p)
+	}
+	return strings.Join(parts, ":")
 }
 
 // escapeURIComponent escapes a label the way the reference's otplib does, which

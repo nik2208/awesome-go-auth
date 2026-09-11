@@ -127,6 +127,7 @@ type Config struct {
     MinPasswordLen        int                           // default: 8
     BcryptCost            int                           // default: bcrypt.DefaultCost (10); 0 means unset
     Require2FA            bool
+    TwoFactorAppName      string                        // TOTP issuer shown by authenticator apps; empty = Issuer — see TwoFactorAppName
     BuildTokenClaims      func(ctx, User) (map[string]any, error)
     SendMagicLink         MagicLinkSender               // required by POST /auth/magic-link/send
     SendSMSCode           SMSCodeSender                 // required by POST /auth/sms/send
@@ -163,6 +164,35 @@ Two limitations apply to `strict`:
   deployment with no email block does, so a `strict` deployment either wires a
   sender or sends the mail itself from the token `SendVerificationEmailToken`
   returns.
+
+### `TwoFactorAppName` and the TOTP parameters
+
+`TwoFactorAppName` is the reference's `twoFactor.appName`: the issuer an
+authenticator app files a TOTP enrolment under. `POST /2fa/setup` returns
+
+```
+otpauth://totp/<issuer>:<email>?algorithm=SHA1&digits=6&issuer=<issuer>&period=30&secret=<secret>
+```
+
+where `<issuer>` is `TwoFactorAppName`, or `Issuer` when that is empty. The
+label takes otplib's `issuer:account` form, which is what the reference emits,
+and every piece is escaped as `encodeURIComponent` escapes it (`@` is `%40`, a
+space is `%20`). The reference falls back to the literal `'awesome-node-auth'`
+instead of `Issuer`; this port keeps `Issuer` so that enrolments made before the
+field existed and enrolments made after it sit under one name — registered as
+the deviation `totp-issuer-defaults-to-config-issuer` in [README.md](README.md).
+`WithTwoFactorAppName("awesome-node-auth")` reproduces the reference's label.
+
+The TOTP parameters are not knobs, in the reference or here. They are exported
+as constants, read by both the URI above and the verifier behind
+`/2fa/verify-setup` and `/2fa/verify`, so the two cannot drift:
+
+| Constant | Value | |
+|---|---|---|
+| `TOTPAlgorithm` | `"SHA1"` | otplib's default |
+| `TOTPDigits` | `6` | otplib's default |
+| `TOTPPeriod` | `30 * time.Second` | otplib's default |
+| `TOTPSkew` | `1` | steps either side of now a code is accepted for; this port's tolerance — otplib's `epochTolerance` defaults to `0`, registered as the deviation `totp-accepts-one-step-of-skew` in [README.md](README.md) |
 
 ### `DefaultConfig(secret string) Config`
 
@@ -307,6 +337,7 @@ Pass to `auth.New(...)`:
 | `WithTenantProvider(TenantStore)` | Enable multi-tenancy |
 | `WithBcryptCost(int)` | Password hashing cost, `bcrypt.MinCost`..`bcrypt.MaxCost` |
 | `WithRequire2FA(bool)` | Require 2FA for all users |
+| `WithTwoFactorAppName(string)` | Issuer of the TOTP provisioning URI, the reference's `twoFactor.appName`; empty keeps `Issuer` — see [TwoFactorAppName](#twofactorappname-and-the-totp-parameters) |
 | `WithTokenClaimsBuilder(func)` | Custom JWT claims |
 | `WithMagicLinkSender(MagicLinkSender)` | Deliver magic links — see [Delivery](#delivery) |
 | `WithSMSCodeSender(SMSCodeSender)` | Deliver SMS codes — see [Delivery](#delivery) |

@@ -138,6 +138,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `emailRes.ok` gate does. **`OAuthProvider.GitHubEmailsURL`** overrides the
   endpoint (empty means `UserInfoURL + "/emails"`); `GitHubProvider` sets it to
   `https://api.github.com/user/emails`.
+- **`Config.TwoFactorAppName string` and `WithTwoFactorAppName(name string) Option`**
+  — the reference's `twoFactor.appName` (`auth-config.model.ts:272-274`, read
+  at `auth.router.ts:830`): the issuer an authenticator app files a TOTP
+  enrolment under. `POST /2fa/setup` carries it in `otpauthUrl` twice, as the
+  label prefix and as the `issuer` parameter. Left empty, the URI keeps
+  carrying `Config.Issuer`, as it did before the field existed, so enrolments
+  made before and after this release sit under the same name; the reference's
+  fallback is the literal `'awesome-node-auth'`, and that difference is
+  registered as the deviation `totp-issuer-defaults-to-config-issuer`.
+- **`TOTPAlgorithm`, `TOTPDigits`, `TOTPPeriod`, `TOTPSkew`** — the TOTP
+  parameters as exported constants (`"SHA1"`, `6`, `30 * time.Second`, `1`),
+  read by both the provisioning URI and the verifier so that what an app is
+  told at enrolment cannot drift from what a code is later checked against.
+  The first three are the reference's otplib defaults, not knobs
+  (`totp.strategy.ts:5-8` constructs `TOTP` with only the crypto and base32
+  plugins). `TOTPSkew` is this port's existing ±1-step tolerance; otplib's
+  `epochTolerance` defaults to `0`, so the reference accepts the current step
+  only. No behaviour changed; the values were already these.
+- **The deviation `totp-accepts-one-step-of-skew` is registered.**
+  `POST /2fa/verify-setup` and `POST /2fa/verify` accept a code from the step
+  either side of the current one (`TOTPSkew = 1`); the reference accepts the
+  current step only, because `totp.strategy.ts:22-25` calls otplib's `verify`
+  with nothing but the secret and `@otplib/totp` 13.4.0 defaults
+  `epochTolerance` to `0`. The behaviour is unchanged — it is now recorded in
+  `CompatibilityNotes()` and the README's deviations section. There is no knob
+  to narrow the window to the reference's and none is planned.
 
 ### Changed
 - **Tests — the wiretest OpenAPI check can express conditional route sets.**
@@ -170,6 +196,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different values — rare, since OIDC providers send `sub` alone — now links by
   `id`. The `github` mapping prefers `name` and falls back to `login`
   (`github.strategy.ts:69`); it used the login unconditionally.
+- **The `otpauthUrl` label is `issuer:account`, as the reference emits it.**
+  `POST /2fa/setup` used to label the URI with the bare account
+  (`otpauth://totp/user%40example.com?…`); it is now
+  `otpauth://totp/<issuer>:user%40example.com?…`, which is what the
+  reference's `totp.toURI` (`totp.strategy.ts:17`) has produced all along:
+  `@otplib/uri` 13.4.0 (what the reference's package-lock.json pins for `otplib ^13.3.0`) builds the label
+  as `${issuer}:${label}` whenever an issuer is given and escapes each
+  colon-separated piece with `encodeURIComponent`. Query values are escaped the
+  same way — a space in the app name is `%20`, never the `+` of form encoding.
+  Authenticator apps read both forms identically; the `secret` is unchanged and
+  existing enrolments are unaffected. `algorithm`, `digits` and `period` stay
+  spelled out, which otplib omits at its defaults — see `totpProvisioningURI`.
 
 ### Deprecated
 - **`HTTPMailerTransport` and `NewHTTPMailerTransport`.** They POST `MailMessage`
