@@ -41,6 +41,7 @@ func (ad *Adapter) magicLinkSend(c *gin.Context) {
 		Mode      string `json:"mode"`
 		TempToken string `json:"tempToken"`
 		TenantID  string `json:"tenantId"`
+		EmailLang string `json:"emailLang"`
 	}
 	if !bindStepUpJSON(c, &req) {
 		return
@@ -64,7 +65,15 @@ func (ad *Adapter) magicLinkSend(c *gin.Context) {
 		auth.WriteHTTPError(c.Writer, auth.HTTPErrPasswordlessEmailRequired)
 		return
 	}
-	if _, err := ad.auth.SendMagicLink(c.Request.Context(), auth.MagicLinkSendInput{Email: email, TenantID: tenantID}); err != nil {
+	// The link base and language are resolved the same way in both modes
+	// (auth.router.ts:1104, 1114); see the net/http handler.
+	in := auth.MagicLinkSendInput{
+		Email:    email,
+		TenantID: tenantID,
+		LinkBase: ad.linkBase(c.Request),
+		Lang:     req.EmailLang,
+	}
+	if _, err := ad.auth.SendMagicLink(c.Request.Context(), in); err != nil {
 		auth.WriteServiceError(c.Writer, err)
 		return
 	}

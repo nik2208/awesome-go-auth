@@ -18,9 +18,21 @@ import (
 type forgotPasswordRequest struct {
 	Email    string `json:"email"`
 	TenantID string `json:"tenantId"`
-	// EmailLang selects the language of the email the reference sends. It is
-	// accepted for wire compatibility and unused until this port has a sender.
+	// EmailLang selects the language of the mail, as in the reference
+	// (auth.router.ts:779). It reaches the sender untouched as the delivery's
+	// Lang; the ready-made mailers honour "it" and "en" and fall back to their
+	// Locale for anything else.
 	EmailLang string `json:"emailLang"`
+}
+
+// linkBase resolves the base an emailed link is built under for this request:
+// the request's Origin or Referer matched against the site URL allowlist, then
+// the mount prefix (and /ui under HTTPConfig.UIEnabled) — the reference's
+// buildUiLink(resolveSiteUrl(req, …), …) pair (auth.router.ts:785-786). Empty
+// when no site URL is configured, which leaves a ready-made mailer on its
+// static BaseURL.
+func (a *Adapter) linkBase(r *http.Request) string {
+	return a.cfg.LinkBase(a.auth.ResolveSiteURL(r))
 }
 
 type resetPasswordRequest struct {
@@ -65,7 +77,13 @@ func (a *Adapter) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	// like a reference deployment with no email block — the route succeeds and no
 	// mail goes out. A sender that fails does not change the answer either, which
 	// is Auth.ForgotPassword's doing.
-	if _, err := a.auth.ForgotPassword(r.Context(), auth.ForgotPasswordInput{Email: req.Email, TenantID: req.TenantID}); err != nil {
+	in := auth.ForgotPasswordInput{
+		Email:    req.Email,
+		TenantID: req.TenantID,
+		LinkBase: a.linkBase(r),
+		Lang:     req.EmailLang,
+	}
+	if _, err := a.auth.ForgotPassword(r.Context(), in); err != nil {
 		auth.WriteHTTPError(w, auth.ForgotPasswordHTTPError(err))
 		return
 	}
@@ -129,7 +147,13 @@ func (a *Adapter) SendVerificationEmail(w http.ResponseWriter, r *http.Request) 
 	if !auth.DecodeOptionalJSON(w, r, &req) {
 		return
 	}
-	token, err := a.auth.SendVerificationEmailToken(r.Context(), auth.EmailVerificationInput{UserID: user.ID, TenantID: user.TenantID})
+	in := auth.EmailVerificationInput{
+		UserID:   user.ID,
+		TenantID: user.TenantID,
+		LinkBase: a.linkBase(r),
+		Lang:     req.EmailLang,
+	}
+	token, err := a.auth.SendVerificationEmailToken(r.Context(), in)
 	if err != nil {
 		auth.WriteHTTPError(w, auth.SendVerificationEmailHTTPError(err))
 		return
@@ -184,7 +208,14 @@ func (a *Adapter) ChangeEmailRequest(w http.ResponseWriter, r *http.Request) {
 	// a credential. The service mails it to the *new* address through
 	// Config.SendEmailChange, and unlike /forgot-password a failed send here is
 	// the reference's generic 500.
-	if _, err := a.auth.RequestEmailChange(r.Context(), auth.ChangeEmailRequestInput{UserID: user.ID, TenantID: user.TenantID, NewEmail: req.NewEmail}); err != nil {
+	in := auth.ChangeEmailRequestInput{
+		UserID:   user.ID,
+		TenantID: user.TenantID,
+		NewEmail: req.NewEmail,
+		LinkBase: a.linkBase(r),
+		Lang:     req.EmailLang,
+	}
+	if _, err := a.auth.RequestEmailChange(r.Context(), in); err != nil {
 		auth.WriteHTTPError(w, auth.ChangeEmailRequestHTTPError(err))
 		return
 	}

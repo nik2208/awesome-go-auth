@@ -57,6 +57,174 @@ func testPasswordEmailDelivery(t *testing.T, mount Mounter) {
 	t.Run("PasswordReset", func(t *testing.T) { testPasswordResetDelivery(t, mount) })
 	t.Run("EmailVerification", func(t *testing.T) { testEmailVerificationDelivery(t, mount) })
 	t.Run("EmailChange", func(t *testing.T) { testEmailChangeDelivery(t, mount) })
+	t.Run("LinkResolution", func(t *testing.T) {
+		t.Run("forgot-password", func(t *testing.T) { runLinkResolutionCases(t, mount, forgotPasswordProbe) })
+		t.Run("send-verification-email", func(t *testing.T) { runLinkResolutionCases(t, mount, sendVerificationEmailProbe) })
+		t.Run("change-email-request", func(t *testing.T) { runLinkResolutionCases(t, mount, changeEmailRequestProbe) })
+	})
+}
+
+// -----------------------------------------------------------------------------
+// per-request link base and language
+// -----------------------------------------------------------------------------
+
+// The reference builds every emailed link from the request that asked for it:
+// the Origin — or the Referer's origin — matched against the site URL
+// allowlist, else the first site URL, then the mount prefix and, with the
+// static UI enabled, /ui (resolveSiteUrl and buildUiLink, auth.router.ts:233-246
+// and 261-271, applied at :785-786, :954-955, :1025-1026 and :1104/:1114). The
+// emailLang body field travels to the sender as given (:788, :957, :1028,
+// :1104/:1114). The four routes that mail something are probed identically: a
+// probe mounts an env, fires one request and reports what its sender was
+// handed, and runLinkResolutionCases asserts the same table against each.
+//
+// What the sender receives is the whole assertion. The body is {"success":true}
+// either way, and nothing here pins the shape of the link a mailer builds from
+// the base — that is the root package's — only that every adapter resolves the
+// same base and forwards the same language for the same request.
+
+// linkProbe fires one request at a mailing route and reports the LinkBase and
+// Lang the recording sender received. site configures the site URLs, headers go
+// on the request, and emailLang goes in the body when non-empty.
+type linkProbe func(t *testing.T, mount Mounter, cfg auth.HTTPConfig, site []auth.Option, headers map[string]string, emailLang string) (linkBase, lang string)
+
+func withHeaders(req *http.Request, headers map[string]string) *http.Request {
+	for name, value := range headers {
+		req.Header.Set(name, value)
+	}
+	return req
+}
+
+func runLinkResolutionCases(t *testing.T, mount Mounter, probe linkProbe) {
+	const (
+		www = "https://www.example.com"
+		app = "https://app.example.com"
+	)
+	site := []auth.Option{auth.WithSiteURLs(www, app)}
+
+	check := func(t *testing.T, cfg auth.HTTPConfig, opts []auth.Option, headers map[string]string, emailLang, wantBase, wantLang string) {
+		t.Helper()
+		gotBase, gotLang := probe(t, mount, cfg, opts, headers, emailLang)
+		if gotBase != wantBase {
+			t.Errorf("delivered LinkBase = %q, want %q", gotBase, wantBase)
+		}
+		if gotLang != wantLang {
+			t.Errorf("delivered Lang = %q, want %q", gotLang, wantLang)
+		}
+	}
+
+	t.Run("an allowlisted Origin is the link base", func(t *testing.T) {
+		check(t, auth.DefaultHTTPConfig(), site, map[string]string{"Origin": app}, "", app+"/auth", "")
+	})
+
+	t.Run("an allowlisted Referer origin is the link base when there is no Origin", func(t *testing.T) {
+		check(t, auth.DefaultHTTPConfig(), site, map[string]string{"Referer": app + "/account/settings?tab=security"}, "", app+"/auth", "")
+	})
+
+	// The allowlist is what keeps a caller from steering somebody's link at an
+	// origin of its choosing: an unlisted Origin contributes nothing.
+	t.Run("an unlisted Origin falls back to the first site URL", func(t *testing.T) {
+		check(t, auth.DefaultHTTPConfig(), site, map[string]string{"Origin": "https://evil.example", "Referer": "https://evil.example/login"}, "", www+"/auth", "")
+	})
+
+	t.Run("no Origin and no Referer fall back to the first site URL", func(t *testing.T) {
+		check(t, auth.DefaultHTTPConfig(), site, nil, "", www+"/auth", "")
+	})
+
+	t.Run("the base follows the mount prefix", func(t *testing.T) {
+		cfg := auth.DefaultHTTPConfig()
+		cfg.APIPrefix = "/api/auth/"
+		check(t, cfg, site, map[string]string{"Origin": app}, "", app+"/api/auth", "")
+	})
+
+	t.Run("UIEnabled points the base at the static UI", func(t *testing.T) {
+		cfg := auth.DefaultHTTPConfig()
+		cfg.UIEnabled = true
+		check(t, cfg, site, map[string]string{"Origin": app}, "", app+"/auth/ui", "")
+	})
+
+	t.Run("emailLang reaches the sender as given", func(t *testing.T) {
+		check(t, auth.DefaultHTTPConfig(), site, map[string]string{"Origin": app}, "it", app+"/auth", "it")
+	})
+
+	// With no site URL configured the delivery carries no base at all, which is
+	// what leaves a ready-made mailer on the static BaseURL it was built with —
+	// the arrangement every deployment had before Config.SiteURLs existed.
+	t.Run("without site URLs the base is empty", func(t *testing.T) {
+		check(t, auth.DefaultHTTPConfig(), nil, map[string]string{"Origin": app}, "", "", "")
+	})
+}
+
+// The three §2 probes. Each starts from NewEnvWithoutDelivery and wires only
+// the sender it records, as senderEnv does.
+
+func forgotPasswordProbe(t *testing.T, mount Mounter, cfg auth.HTTPConfig, site []auth.Option, headers map[string]string, emailLang string) (string, string) {
+	t.Helper()
+	var delivered []auth.PasswordResetDelivery
+	opts := append([]auth.Option{auth.WithPasswordResetSender(func(_ context.Context, d auth.PasswordResetDelivery) error {
+		delivered = append(delivered, d)
+		return nil
+	})}, site...)
+	env := NewEnvWithoutDelivery(t, mount, cfg, opts...)
+	env.Seed("linkreset@example.com")
+
+	body := map[string]string{"email": "linkreset@example.com", "tenantId": testTenant}
+	if emailLang != "" {
+		body["emailLang"] = emailLang
+	}
+	assertSuccessBody(t, env.Do(withHeaders(env.Request(http.MethodPost, "/forgot-password", body), headers)))
+	if len(delivered) != 1 {
+		t.Fatalf("delivered %d resets, want 1", len(delivered))
+	}
+	return delivered[0].LinkBase, delivered[0].Lang
+}
+
+func sendVerificationEmailProbe(t *testing.T, mount Mounter, cfg auth.HTTPConfig, site []auth.Option, headers map[string]string, emailLang string) (string, string) {
+	t.Helper()
+	var delivered []auth.EmailVerificationDelivery
+	store := auth.NewMemoryUserStore()
+	opts := append([]auth.Option{
+		auth.WithUserStore(store),
+		auth.WithEmailVerificationSender(func(_ context.Context, d auth.EmailVerificationDelivery) error {
+			delivered = append(delivered, d)
+			return nil
+		}),
+	}, site...)
+	env := NewEnvWithoutDelivery(t, mount, cfg, opts...)
+	user, tokens := env.Seed("linkverify@example.com")
+	unverify(t, store, user)
+
+	// An empty body is valid on this route, so the language is the only field.
+	var body any
+	if emailLang != "" {
+		body = map[string]string{"emailLang": emailLang}
+	}
+	assertSuccessBody(t, env.Do(bearer(withHeaders(env.Request(http.MethodPost, "/send-verification-email", body), headers), tokens)))
+	if len(delivered) != 1 {
+		t.Fatalf("delivered %d verifications, want 1", len(delivered))
+	}
+	return delivered[0].LinkBase, delivered[0].Lang
+}
+
+func changeEmailRequestProbe(t *testing.T, mount Mounter, cfg auth.HTTPConfig, site []auth.Option, headers map[string]string, emailLang string) (string, string) {
+	t.Helper()
+	var delivered []auth.EmailChangeDelivery
+	opts := append([]auth.Option{auth.WithEmailChangeSender(func(_ context.Context, d auth.EmailChangeDelivery) error {
+		delivered = append(delivered, d)
+		return nil
+	})}, site...)
+	env := NewEnvWithoutDelivery(t, mount, cfg, opts...)
+	_, tokens := env.Seed("linkchange@example.com")
+
+	body := map[string]string{"newEmail": "linkchanged@example.com"}
+	if emailLang != "" {
+		body["emailLang"] = emailLang
+	}
+	assertSuccessBody(t, env.Do(bearer(withHeaders(env.Request(http.MethodPost, "/change-email/request", body), headers), tokens)))
+	if len(delivered) != 1 {
+		t.Fatalf("delivered %d changes, want 1", len(delivered))
+	}
+	return delivered[0].LinkBase, delivered[0].Lang
 }
 
 // -----------------------------------------------------------------------------

@@ -266,7 +266,7 @@ func (s *Service) ForgotPassword(ctx context.Context, in ForgotPasswordInput) (s
 	// (auth.router.ts:784 then :787-792). A delivery failure is reported to the
 	// caller and leaves the token in place; Auth.ForgotPassword is where the HTTP
 	// surface decides not to let it change the answer.
-	if err := s.deliverPasswordReset(ctx, user, resetToken, expiresAt); err != nil {
+	if err := s.deliverPasswordReset(ctx, user, resetToken, expiresAt, in.LinkBase, in.Lang); err != nil {
 		return "", err
 	}
 	return resetToken, nil
@@ -352,12 +352,18 @@ func (s *Service) SendMagicLink(ctx context.Context, in MagicLinkSendInput) (str
 	// that fails leaves a stored token nobody received, which is harmless: it is
 	// unguessable and expires on its own. Sending first would risk the opposite,
 	// a delivered link the store never learned about.
+	//
+	// LinkBase and Lang are the request's, copied through untouched: the
+	// reference hands the strategy its siteUrlOverride and lang as built and as
+	// received (auth.router.ts:1104/1114 → magic-link.strategy.ts:25-29).
 	if err := s.cfg.SendMagicLink(ctx, MagicLinkDelivery{
 		UserID:    user.ID,
 		TenantID:  user.TenantID,
 		Email:     user.Email,
 		Token:     magicToken,
 		ExpiresAt: expiresAt,
+		LinkBase:  in.LinkBase,
+		Lang:      in.Lang,
 	}); err != nil {
 		return "", fmt.Errorf("auth: deliver magic link: %w", err)
 	}
@@ -494,7 +500,7 @@ func (s *Service) SendVerificationEmailToken(ctx context.Context, in EmailVerifi
 	}
 	// Store first, then send (auth.router.ts:953 then :956-961). A failed send
 	// yields the reference's generic 500 and leaves the token stored.
-	if err := s.deliverEmailVerification(ctx, user, token, expiresAt); err != nil {
+	if err := s.deliverEmailVerification(ctx, user, token, expiresAt, in.LinkBase, in.Lang); err != nil {
 		return "", err
 	}
 	return token, nil
@@ -541,7 +547,7 @@ func (s *Service) RequestEmailChange(ctx context.Context, in ChangeEmailRequestI
 	// newEmail). The notice the reference sends to the old address happens on
 	// /change-email/confirm and has no sender in this port — see
 	// EmailChangeDelivery.
-	if err := s.deliverEmailChange(ctx, user, in.NewEmail, token, expiresAt); err != nil {
+	if err := s.deliverEmailChange(ctx, user, in.NewEmail, token, expiresAt, in.LinkBase, in.Lang); err != nil {
 		return "", err
 	}
 	return token, nil

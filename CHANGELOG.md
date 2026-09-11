@@ -21,6 +21,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the API key never appears in an error. `MailMessage.Text` (additive) carries
   the plain-text alternative; left empty, the HTML is sent as the text, as the
   reference's `sendCustom` does (`text ?? html`). No route changes.
+- **`Config.SiteURLs []string` and `WithSiteURLs(urls ...string) Option`** — the
+  reference's `config.email.siteUrl`, which is one string or an array of them.
+  The first entry is the canonical base for emailed links (`getDefaultSiteUrl`,
+  `auth.router.ts:202-206`); every entry, merged with `OAuthWiring.AllowedOrigins`
+  in that order and deduplicated, is the origin allowlist a request's `Origin` or
+  `Referer` is matched against (`buildAllowedOrigins`, `auth.router.ts:213-219`).
+  Matching is exact, as the reference's `includes` is.
+- **`(*Auth).ResolveSiteURL(r *http.Request) string`** — the reference's
+  `resolveSiteUrl` (`auth.router.ts:233-246`): the allowlisted `Origin`, else the
+  allowlisted origin of the `Referer`, else the default site URL. The default is
+  `SiteURLs[0]`; `OAuthWiring.SiteURL` stays the override for it, and when that is
+  empty `OAuthBegin`, `OAuthComplete` and `LinkRequest` now fall back to
+  `SiteURLs[0]` and match against the same merged allowlist — one allowlist and
+  one default for links and redirects alike, as the reference has.
+- **`HTTPConfig.UIEnabled bool`** and **`(HTTPConfig).UILink(siteURL, path string) string`**
+  — the reference's `buildUiLink` (`auth.router.ts:261-271`):
+  `<siteURL><prefix>/ui/<path>` with the UI enabled, `<siteURL><prefix>/<path>`
+  otherwise, one trailing slash stripped from the prefix and one leading slash
+  from the path. **`(HTTPConfig).LinkBase(siteURL string) string`** is
+  `UILink(siteURL, "")` with its trailing slash removed — the base
+  `MagicLinkURL`, `PasswordResetURL`, `EmailVerificationURL` and
+  `EmailChangeConfirmURL` take (`magic-link.strategy.ts:25-27`) — and `""` for an
+  empty site URL, so that a mailer's static `BaseURL` still applies.
+- **Per-request `LinkBase` and `Lang`** on `ForgotPasswordInput`,
+  `EmailVerificationInput`, `ChangeEmailRequestInput` and `MagicLinkSendInput`,
+  copied untouched onto `PasswordResetDelivery`, `EmailVerificationDelivery`,
+  `EmailChangeDelivery` and `MagicLinkDelivery`. All four adapters fill them from
+  the request — `LinkBase` is `cfg.LinkBase(auth.ResolveSiteURL(r))`, `Lang` is
+  the `emailLang` body field, which was decoded and dropped before — so a
+  deployment serving several front ends mails each one a link back to itself.
+  `POST /magic-link/send` now reads `emailLang` in both modes, as the reference
+  does (`auth.router.ts:1080`). `LinkTokenDelivery.EmailLang` is unchanged.
+- **The ready-made mailers honour the delivery over their static configuration.**
+  A non-empty `LinkBase` wins over `BaseURL`; a `Lang` of `it` or `en` wins over
+  `Locale` and anything else defers to it (`resolveLang`,
+  `mailer.service.ts:255-259`). With no `SiteURLs` configured a delivery carries
+  no base, so an existing deployment keeps the links and the language it had.
+- `GenerateOpenAPISpec` documents `emailLang` on `POST /magic-link/send` and
+  describes what it does on all four routes. No route was added.
 
 ### Changed
 - **Docs — the README parity snapshot now reflects the shipped surface.** It

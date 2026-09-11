@@ -47,6 +47,9 @@ type magicLinkSendRequest struct {
 	Mode      string `json:"mode"`
 	TempToken string `json:"tempToken"`
 	TenantID  string `json:"tenantId"`
+	// EmailLang is read in both modes (auth.router.ts:1080) and reaches the
+	// sender untouched as MagicLinkDelivery.Lang.
+	EmailLang string `json:"emailLang"`
 }
 
 type magicLinkVerifyRequest struct {
@@ -115,7 +118,18 @@ func (a *Adapter) MagicLinkSend(w http.ResponseWriter, r *http.Request) {
 	// An unknown address answers 200 as well: the send call is silent about
 	// whether it found anyone, which is what keeps this route from confirming
 	// that an address is registered.
-	if _, err := a.auth.SendMagicLink(r.Context(), auth.MagicLinkSendInput{Email: email, TenantID: tenantID}); err != nil {
+	//
+	// The link base is resolved the same way in both modes — the reference
+	// passes buildUiLink(resolveSiteUrl(req, …), '') to the strategy on each
+	// branch (auth.router.ts:1104, 1114) — so a step-up link points back at the
+	// front end that asked for it, like a login link does.
+	in := auth.MagicLinkSendInput{
+		Email:    email,
+		TenantID: tenantID,
+		LinkBase: a.linkBase(r),
+		Lang:     req.EmailLang,
+	}
+	if _, err := a.auth.SendMagicLink(r.Context(), in); err != nil {
 		auth.WriteServiceError(w, err)
 		return
 	}

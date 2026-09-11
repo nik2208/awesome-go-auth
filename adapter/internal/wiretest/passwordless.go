@@ -319,6 +319,36 @@ func testMagicLink(t *testing.T, mount Mounter) {
 		}
 	})
 
+	// The link base and the language are resolved from the request exactly as
+	// on the three §2 mailing routes — the same table, the same probe shape (see
+	// runLinkResolutionCases). The reference passes
+	// buildUiLink(resolveSiteUrl(req, …), '') and emailLang to the strategy on
+	// both branches (auth.router.ts:1104, 1114).
+	t.Run("link resolution", func(t *testing.T) {
+		runLinkResolutionCases(t, mount, magicLinkSendProbe)
+	})
+
+	// The 2fa branch resolves the same way, so a step-up link points back at the
+	// front end that asked for it (auth.router.ts:1104).
+	t.Run("send in 2fa mode resolves the link base and forwards emailLang too", func(t *testing.T) {
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig(), auth.WithSiteURLs("https://www.example.com", "https://app.example.com"))
+		subject, _ := env.Seed("magicstepuplink@example.com")
+
+		req := env.Request(http.MethodPost, "/magic-link/send", map[string]any{
+			"mode": auth.StepUpMode, "tempToken": tempTokenFor(t, env, subject), "emailLang": "it",
+		})
+		req.Header.Set("Origin", "https://app.example.com")
+		AssertStatus(t, env.Do(req), http.StatusOK)
+
+		if len(env.Delivered.MagicLinks) != 1 {
+			t.Fatalf("delivered %d links, want 1", len(env.Delivered.MagicLinks))
+		}
+		got := env.Delivered.MagicLinks[0]
+		if got.LinkBase != "https://app.example.com/auth" || got.Lang != "it" {
+			t.Errorf("delivered LinkBase/Lang = %q/%q, want https://app.example.com/auth/it", got.LinkBase, got.Lang)
+		}
+	})
+
 	t.Run("verify in cookie mode", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
 		user, _ := env.Seed("magicverify@example.com")
@@ -508,6 +538,26 @@ func seedUnverified(t *testing.T, store *auth.MemoryUserStore, email string) aut
 // magicLinkToken mints a link through the service. The send route delivers the
 // token rather than returning it, so a test that wants to verify a link asks for
 // one directly instead of digging it out of Env.Delivered.
+// magicLinkSendProbe is the /magic-link/send probe for runLinkResolutionCases:
+// one login-mode send, reporting the LinkBase and Lang the recording sender
+// NewEnv wires was handed.
+func magicLinkSendProbe(t *testing.T, mount Mounter, cfg auth.HTTPConfig, site []auth.Option, headers map[string]string, emailLang string) (string, string) {
+	t.Helper()
+	env := NewEnv(t, mount, cfg, site...)
+	env.Seed("linkmagic@example.com")
+
+	body := map[string]any{"email": "linkmagic@example.com", "tenantId": testTenant}
+	if emailLang != "" {
+		body["emailLang"] = emailLang
+	}
+	rec := env.Do(withHeaders(env.Request(http.MethodPost, "/magic-link/send", body), headers))
+	AssertStatus(t, rec, http.StatusOK)
+	if len(env.Delivered.MagicLinks) != 1 {
+		t.Fatalf("delivered %d links, want 1", len(env.Delivered.MagicLinks))
+	}
+	return env.Delivered.MagicLinks[0].LinkBase, env.Delivered.MagicLinks[0].Lang
+}
+
 func magicLinkToken(t *testing.T, env *Env, user auth.User) string {
 	t.Helper()
 	token, err := env.Auth.SendMagicLink(context.Background(), auth.MagicLinkSendInput{Email: user.Email, TenantID: user.TenantID})

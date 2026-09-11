@@ -133,6 +133,7 @@ type Config struct {
     SendPasswordReset     PasswordResetSender           // optional; POST /auth/forgot-password
     SendEmailVerification EmailVerificationSender       // optional; POST /auth/send-verification-email
     SendEmailChange       EmailChangeSender             // optional; POST /auth/change-email/request
+    SiteURLs              []string                      // first = canonical link base; all = origin allowlist — see Delivery
     Logger                func(format string, args ...any)
 }
 ```
@@ -308,6 +309,10 @@ Pass to `auth.New(...)`:
 | `WithTokenClaimsBuilder(func)` | Custom JWT claims |
 | `WithMagicLinkSender(MagicLinkSender)` | Deliver magic links — see [Delivery](#delivery) |
 | `WithSMSCodeSender(SMSCodeSender)` | Deliver SMS codes — see [Delivery](#delivery) |
+| `WithPasswordResetSender(PasswordResetSender)` | Deliver password-reset tokens — see [Delivery](#delivery) |
+| `WithEmailVerificationSender(EmailVerificationSender)` | Deliver email-verification tokens — see [Delivery](#delivery) |
+| `WithEmailChangeSender(EmailChangeSender)` | Deliver email-change tokens to the new address — see [Delivery](#delivery) |
+| `WithSiteURLs(urls ...string)` | Front-end base URLs: the first is the canonical link base, all are the origin allowlist — see [Per-request link base and language](#per-request-link-base-and-language) |
 | `WithLogger(func)` | Logging callback |
 
 Pass to `NewService(...)` as `ServiceOption`:
@@ -603,7 +608,9 @@ a, err := auth.New(
 | Helper | Purpose |
 |--------|---------|
 | `NewMagicLinkMailer(MailerTransport, appName, baseURL) *MagicLinkMailer` | Renders the built-in `magic_link` template and sends it; `.Locale` selects `en` (default) or `it` |
+| `NewPasswordResetMailer(…)`, `NewEmailVerificationMailer(…)`, `NewEmailChangeMailer(…)` | The same shape for `reset_password`, `verify_email` and `email_change`; use through `.Send` with `WithPasswordResetSender`, `WithEmailVerificationSender`, `WithEmailChangeSender` |
 | `MagicLinkURL(base, token) string` | The link shape the verify route and every family client expect: `<base>/magic-link/verify?token=<token>` |
+| `PasswordResetURL`, `EmailVerificationURL`, `EmailChangeConfirmURL(base, token) string` | Likewise `<base>/reset-password?token=…`, `<base>/verify-email?token=…`, `<base>/change-email/confirm?token=…` |
 | `SMSTransportSender(SMSTransport) SMSCodeSender` | Adapts a transport, formatting the code with `SMSCodeMessage` |
 | `SMSCodeMessage(code) string` | The family's handset text: `Your verification code is: <code>` |
 | `NewGatewayMailerTransport(MailerConfig) (MailerTransport, error)` | `POST` mail gateway with the reference's JSON body and `X-API-Key` — see [Mail gateway contract](#mail-gateway-contract) |
@@ -656,12 +663,57 @@ mail is rendered from is the mailers' `Locale`.
 The older `HTTPMailerTransport` (0.3.0) sends a different body under
 `X-Mailer-Secret` and is deprecated; it keeps working for gateways built against it.
 
-### Locale
+### Per-request link base and language
 
-`MagicLinkMailer.Locale` is static. The reference has a per-request `emailLang` body
-field on `/magic-link/send`; the port's send routes do not carry it, so threading a
-locale off the wire is a request-shape change and is left to the template
-configuration work.
+The reference builds every emailed link from the request that asked for it, and
+so do the four adapters. Each delivery that carries a link — `MagicLinkDelivery`,
+`PasswordResetDelivery`, `EmailVerificationDelivery`, `EmailChangeDelivery` —
+has two extra members:
+
+```go
+LinkBase string // e.g. "https://app.example.com/auth"; "" when no site URL is configured
+Lang     string // the request's emailLang body field, untouched; "" when omitted
+```
+
+`LinkBase` is resolved in three steps, each a transcription of the reference:
+
+| Step | Export | Reference |
+|------|--------|-----------|
+| The site URL for the request: the `Origin` header if allowlisted, else the `Referer`'s origin if allowlisted, else the default | `(*Auth).ResolveSiteURL(r *http.Request) string` | `resolveSiteUrl`, `auth.router.ts:233-246` |
+| The allowlist: `Config.SiteURLs` then `OAuthWiring.AllowedOrigins`, deduplicated in order; the default: `SiteURLs[0]`, or `OAuthWiring.SiteURL` when that is set | `Config.SiteURLs`, `WithSiteURLs(urls ...string)` | `buildAllowedOrigins` `:213-219`, `getDefaultSiteUrl` `:202-206` |
+| The base under that site URL: `<siteURL><prefix>`, or `<siteURL><prefix>/ui` with `HTTPConfig.UIEnabled` | `(HTTPConfig).LinkBase(siteURL) string`; the general form is `(HTTPConfig).UILink(siteURL, path) string` | `buildUiLink` `:261-271`, `magic-link.strategy.ts:25-27` |
+
+```go
+a, err := auth.New(
+    auth.WithSiteURLs("https://www.example.com", "https://app.example.com"),
+    auth.WithPasswordResetSender(auth.NewPasswordResetMailer(transport, "Example App", "https://www.example.com/auth").Send),
+)
+cfg := auth.DefaultHTTPConfig()
+cfg.UIEnabled = true // links point at <site>/auth/ui/… instead of <site>/auth/…
+nethttp.MountWithConfig(mux, a, cfg)
+```
+
+With that, a `POST /auth/forgot-password` carrying `Origin: https://app.example.com`
+mails `https://app.example.com/auth/ui/reset-password?token=…`; one from an origin
+that is not in the list, or with no `Origin` at all, mails the link under
+`https://www.example.com`. Matching is exact — no trailing-slash or case
+normalisation — as the reference's `includes` is. The same allowlist and default
+serve the OAuth redirect and the `/link-request` link, so `OAuthWiring.SiteURL`
+becomes optional: leave it empty and the OAuth routes fall back to `SiteURLs[0]`.
+
+**Precedence in the built-in mailers.** A delivery's `LinkBase` wins over the
+mailer's `BaseURL`; its `Lang` wins over the mailer's `Locale` when it is `it` or
+`en`, and anything else — including an omitted `emailLang` — defers to `Locale`
+(`resolveLang`, `mailer.service.ts:255-259`). With no `SiteURLs` configured the
+adapters set no `LinkBase`, so a deployment built on a static `BaseURL` keeps
+mailing exactly the links it did. A custom sender reads the two members directly:
+`auth.PasswordResetURL(d.LinkBase, d.Token)` is the reference's link when
+`LinkBase` is set.
+
+The service inputs carry the same two members (`ForgotPasswordInput`,
+`EmailVerificationInput`, `ChangeEmailRequestInput`, `MagicLinkSendInput`) and
+copy them onto the delivery untouched; a caller driving the service directly
+supplies them or leaves them empty.
 
 ---
 
