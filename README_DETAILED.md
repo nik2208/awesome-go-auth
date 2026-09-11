@@ -1166,19 +1166,122 @@ The `IDP` type turns awesome-go-auth into a full OIDC Identity Provider.
 
 ### `NewIDP(cfg IDPConfig, authSvc *Service, clients ...IDPClient) (*IDP, error)`
 
-Generates a 2048-bit RSA key pair at startup.
+Resolves the signing key (`IDPConfig.Signer`, or an ephemeral RSA-2048 key with
+a one-time warning), the `kid` and the code store, and refuses a signer whose
+public key is not RSA.
 
 ### `IDPConfig`
 
 ```go
 type IDPConfig struct {
-    Issuer         string
-    AccessTokenTTL time.Duration
-    IDTokenTTL     time.Duration
-    Codes          AuthCodeStore // nil → NewMemoryAuthCodeStore()
-    CodeTTL        time.Duration // 0 → 5 minutes
+    Issuer          string
+    AccessTokenTTL  time.Duration // IdP pair: 0 → 30 days
+    IDTokenTTL      time.Duration // 0 → 1 hour
+    Signer          crypto.Signer // nil → ephemeral RSA-2048 + one warning
+    KeyID           string        // "" → DefaultIDPKeyID, "provisioner-key-1"
+    PublicKeys      []JWK         // further keys published after Signer's
+    RefreshTokenTTL time.Duration // IdP pair: 0 → 90 days
+    Logger          func(format string, args ...any) // nil → the Service's
+    Codes           AuthCodeStore // nil → NewMemoryAuthCodeStore()
+    CodeTTL         time.Duration // 0 → 5 minutes
 }
 ```
+
+### Signing key
+
+`Signer` is any `crypto.Signer` whose public key is RSA. The reference's
+configuration is a PEM private key (`idProvider.privateKey`,
+`token.service.ts:47`); here that is
+
+```go
+key, err := auth.ParseRSAPrivateKeyPEM(os.Getenv("IDP_PRIVATE_KEY")) // PKCS#8 or PKCS#1
+idp, err := auth.NewIDP(auth.IDPConfig{Signer: key, KeyID: "prod-2026-09"}, svc, clients...)
+```
+
+A signer that keeps the private key elsewhere — AWS KMS, an HSM, another
+process — plugs in the same way. `BuildRS256JWT` asks it for exactly one thing
+per token: `Sign(rand.Reader, digest, crypto.SHA256)` with the 32-byte SHA-256
+of `base64url(header).base64url(claims)`, and uses the bytes it returns as the
+signature. RS256 is RSASSA-PKCS1 v1.5 over SHA-256, so the signer must answer
+with that (KMS: `RSASSA_PKCS1_V1_5_SHA_256` on a `DIGEST` request), and its
+`Public()` must return the matching `*rsa.PublicKey`, which is what the JWKS
+document publishes.
+
+With no `Signer` the IDP generates an RSA-2048 key in `NewIDP` and logs, once,
+the reference's warning (`token.service.ts:52-57`): `auth: IdP mode: no Signer
+configured — auto-generating an ephemeral RSA keypair. All tokens will be
+invalidated on restart. Set IDPConfig.Signer in production.` The warning goes
+to `IDPConfig.Logger`, else to the `Config.Logger` of the Service. Every token
+becomes unverifiable on restart and two processes never share a key:
+development only.
+
+`KeyID` is the `kid` in the header of every signed token and in the JWKS entry
+for `Signer`; empty means `DefaultIDPKeyID`, the reference's constant
+`provisioner-key-1` (`token.service.ts:78`). `PublicKeys` are further `JWK`s
+published after the signer's, unchanged — the previous key during a rotation,
+so that tokens it signed stay verifiable until they expire. Nothing signs with
+them or checks them.
+
+### JWKS types and RS256 builders
+
+```go
+type JWK struct {
+    Kty string `json:"kty"` // "RSA"
+    Use string `json:"use"` // "sig"
+    Alg string `json:"alg"` // "RS256"
+    Kid string `json:"kid"`
+    N   string `json:"n"`   // unpadded base64url, big-endian
+    E   string `json:"e"`
+}
+
+type JWKS struct {
+    Keys []JWK `json:"keys"`
+}
+
+func NewRSAJWK(pub *rsa.PublicKey, kid string) (JWK, error)
+func (idp *IDP) JWKS() JWKS
+func ParseRSAPrivateKeyPEM(pemText string) (*rsa.PrivateKey, error)
+func BuildRS256JWT(signer crypto.Signer, kid string, claims map[string]any) (string, error)
+```
+
+`JWK` is the reference's interface (`jwks.service.ts:5-12`), `NewRSAJWK` its
+`publicKeyToJwk` (`:168-179`; a nil key, or one with no modulus, is an error
+rather than a panic, since the key was obtained elsewhere), and `JWKS()` its
+`buildJwksDocument` (`:184-186`) followed by `PublicKeys`:
+`{"keys":[<signer key>, <PublicKeys>...]}`, which is what the `jwks` endpoint
+serves. `BuildRS256JWT` is the JWS compact serialisation with header
+`{"alg":"RS256","typ":"JWT","kid":<kid>}`, usable on its own by a host that
+signs something else with the same key; like `NewIDP`, it refuses a signer
+whose `Public()` is not an `*rsa.PublicKey` before asking it to sign.
+
+### `(*IDP).IssueIdPTokenPair(ctx context.Context, user User) (AuthTokens, error)`
+
+The reference's `generateIdProviderTokenPair` (`token.service.ts:73-95`): an
+RS256 access token and an RS256 refresh token under `KeyID`, both carrying the
+same payload — the six base claims (`sub`, `email`, `role`, `loginProvider`,
+`isEmailVerified`, `isTotpEnabled`) with `Config.BuildTokenClaims` spread over
+them, the hook's `iat`, `exp` and `kid` dropped, `iss` from `IDPConfig.Issuer`
+when that is set and otherwise absent — and differing only in lifetime:
+`AccessTokenTTL`, 30 days by default; `RefreshTokenTTL`, 90 days by default.
+`ExpiresIn` is the access lifetime.
+
+The reference resolves the refresh lifetime in three steps —
+`idProvider.refreshTokenExpiry ?? config.refreshTokenExpiresIn ?? '90d'`
+(`token.service.ts:91`) — and the middle one is not reproduced:
+`IDPConfig.RefreshTokenTTL` never falls back to `Config.RefreshTokenTTL`.
+`Config.RefreshTokenTTL` is always set here (`DefaultConfig` fills it and
+`validate` requires it), so honouring it would make the 90-day default
+unreachable and tie the IdP pair silently to the session lifetime.
+
+It is a host-level API, exactly as in the reference, where nothing calls
+`generateIdProviderTokenPair` (reference-issues N35): `/login`, `/refresh` and
+the OIDC `token` endpoint keep issuing the HS256 session pair, and constructing
+an `IDP` changes nothing about them. Accordingly the `token` endpoint reports
+`expires_in` as the lifetime of the access token it returns,
+`Config.AccessTokenTTL`; `IDPConfig.AccessTokenTTL` governs only the IdP pair.
+No session is created and no `sid` is written, so an IdP pair cannot be revoked
+before it expires. Which pair the `token` endpoint returns is a pending design
+decision (upstream plan D-15).
 
 ### Authorization-code storage
 
@@ -1239,12 +1342,13 @@ Mounts these endpoints under `basePath`:
 | Path | Description |
 |------|-------------|
 | `.well-known/openid-configuration` | OIDC discovery document |
-| `jwks` | RSA public key as JWK Set |
+| `jwks` | `JWKS()` as JSON: the signer's key first, then `PublicKeys` |
 | `authorize` | Authorization endpoint (GET=login form, POST=credential check) |
 | `token` | Token exchange (authorization_code grant) |
 | `userinfo` | Bearer-token-protected user profile |
 
-ID tokens are RS256-signed JWTs built entirely from the standard library.
+ID tokens and IdP token pairs are RS256-signed JWTs built entirely from the
+standard library through `BuildRS256JWT`, under `IDPConfig.Signer` and `KeyID`.
 
 ---
 
