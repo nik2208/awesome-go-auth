@@ -48,8 +48,11 @@ func main() {
 		// instead of sending so the example runs with no provider; in production
 		// use a transport:
 		//
+		//	mailer, err := auth.NewGatewayMailerTransport(auth.MailerConfig{
+		//		Endpoint: endpoint, APIKey: apiKey, From: "noreply@example.com",
+		//	})
 		//	auth.WithMagicLinkSender(auth.NewMagicLinkMailer(
-		//		auth.NewHTTPMailerTransport(endpoint, secret),
+		//		mailer,
 		//		"My App", "https://api.example.com/auth",
 		//	).Send),
 		//	auth.WithSMSCodeSender(auth.SMSTransportSender(

@@ -7,11 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`NewGatewayMailerTransport(MailerConfig)`: a mail transport that speaks the
+  reference's gateway contract.** `POST {endpoint}` with an `X-API-Key` header and
+  the JSON body `{to, subject, html, text, from, fromName, provider}`, delivered on
+  a `2xx` only (`mailer.service.ts:261-291`; config shape
+  `auth-config.model.ts:19-36`). `MailerConfig{Endpoint, APIKey, From, FromName,
+  Provider, DefaultLang}` mirrors the reference's `email.mailer` block, JSON tags
+  included, so a deployment that already holds that block can decode it and hand
+  it over; `Client *http.Client` is the one addition (nil → the 10-second timeout
+  the other HTTP transports use). The constructor refuses an empty or
+  non-absolute endpoint, and a failed send names the status and nothing else —
+  the API key never appears in an error. `MailMessage.Text` (additive) carries
+  the plain-text alternative; left empty, the HTML is sent as the text, as the
+  reference's `sendCustom` does (`text ?? html`). No route changes.
+
 ### Changed
 - **Docs — the README parity snapshot now reflects the shipped surface.** It
   claimed every capability as implemented, including an admin router that does
   not exist; each row now says what is mounted, what is only a building block,
   what is absent, and the milestone release that closes the gap.
+
+### Deprecated
+- **`HTTPMailerTransport` and `NewHTTPMailerTransport`.** They POST `MailMessage`
+  as PascalCase JSON under an `X-Mailer-Secret` header, a request of this port's
+  own that no gateway built for the reference accepts. Behaviour is unchanged for
+  the gateways built against it since 0.3.0 — `MailMessage.Text` is `omitempty`
+  there, so a caller that never sets it sends the same bytes as before. Use
+  `NewGatewayMailerTransport` for new deployments; removal is scheduled for
+  v1.0.0.
 
 ## [0.3.1] - 2026-09-11
 
