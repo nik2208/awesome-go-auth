@@ -51,6 +51,12 @@ func MountWithConfig(mux *http.ServeMux, a *auth.Auth, cfg auth.HTTPConfig) {
 }
 
 // Middleware validates access tokens and injects user context.
+//
+// It authenticates through Auth.Authenticate, not Auth.Me: the user in context
+// carries the stores' enrichment (metadata, roles, permissions, tenants) but
+// not CustomClaims, because Config.BuildTokenClaims is a mint-time hook — with
+// a ClaimsWebhook behind it, one network round trip per protected request if
+// the middleware ran it. GET /me is the one route that does; see Me.
 func (a *Adapter) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +65,7 @@ func (a *Adapter) Middleware() func(http.Handler) http.Handler {
 				auth.WriteHTTPError(w, auth.HTTPErrNoAccessToken)
 				return
 			}
-			user, err := a.auth.Me(r.Context(), accessToken)
+			user, err := a.auth.Authenticate(r.Context(), accessToken)
 			if err != nil {
 				auth.WriteHTTPError(w, auth.AccessHTTPError(err))
 				return
@@ -77,7 +83,9 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 	mux.Handle("POST "+prefix+"/login", a.guard(http.HandlerFunc(a.Login)))
 	mux.Handle("POST "+prefix+"/refresh", a.guard(http.HandlerFunc(a.Refresh)))
 	mux.Handle("POST "+prefix+"/logout", a.guard(http.HandlerFunc(a.Logout)))
-	mux.Handle("GET "+prefix+"/me", a.guard(a.Middleware()(http.HandlerFunc(a.Me))))
+	// /me authenticates itself (see Me) rather than sitting behind Middleware,
+	// so the token is verified once and the claims hook runs once.
+	mux.Handle("GET "+prefix+"/me", a.guard(http.HandlerFunc(a.Me)))
 	mux.Handle("GET "+prefix+"/sessions", a.guard(a.Middleware()(http.HandlerFunc(a.Sessions))))
 	mux.Handle("DELETE "+prefix+"/sessions/{handle}", a.guard(a.Middleware()(http.HandlerFunc(a.RevokeSession))))
 	mux.Handle("POST "+prefix+"/sessions/cleanup", a.guard(http.HandlerFunc(a.CleanupSessions)))
@@ -192,10 +200,22 @@ func (a *Adapter) Logout(w http.ResponseWriter, r *http.Request) {
 
 // Me handles GET <prefix>/me. The user object is the whole body: the family
 // clients read it unwrapped.
+//
+// The handler authenticates itself through Auth.Me — Authenticate plus
+// Config.BuildTokenClaims — rather than reading the user Middleware put in
+// context, because Middleware deliberately skips the hook and this body is the
+// one place its result (customClaims) is rendered. Mounted bare, as Mount does,
+// the token is verified once and the hook runs once; mounted behind Middleware
+// by a host anyway, the body is the same and the token is verified twice.
 func (a *Adapter) Me(w http.ResponseWriter, r *http.Request) {
-	user, ok := UserFromContext(r.Context())
-	if !ok {
+	accessToken := auth.AccessTokenFromRequest(r)
+	if accessToken == "" {
 		auth.WriteHTTPError(w, auth.HTTPErrNoAccessToken)
+		return
+	}
+	user, err := a.auth.Me(r.Context(), accessToken)
+	if err != nil {
+		auth.WriteHTTPError(w, auth.AccessHTTPError(err))
 		return
 	}
 	auth.WriteJSON(w, http.StatusOK, auth.NewPublicUser(user))

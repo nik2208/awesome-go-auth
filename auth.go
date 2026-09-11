@@ -192,7 +192,11 @@ func WithTwoFactorAppName(name string) Option {
 // claims and override the six base claims; the session claims (sid, tid, jti,
 // typ, iss, iat, exp) are reserved and cannot be set from it — see
 // Config.BuildTokenClaims.
-func WithTokenClaimsBuilder(fn func(ctx context.Context, user User) (map[string]any, error)) Option {
+//
+// TokenClaimsBuilder is an alias of the func type this always took, so a
+// literal still satisfies it; StaticClaims, UserFieldClaims, ChainClaims and
+// (*ClaimsWebhook).Build are ready-made ones (claims.go, claims_webhook.go).
+func WithTokenClaimsBuilder(fn TokenClaimsBuilder) Option {
 	return func(b *authBuilder) error {
 		b.cfg.BuildTokenClaims = fn
 		return nil
@@ -360,6 +364,12 @@ func (a *Auth) Logout(ctx context.Context, refreshToken string) error {
 // Me delegates to Service.Me.
 func (a *Auth) Me(ctx context.Context, accessToken string) (User, error) {
 	return a.service.Me(ctx, accessToken)
+}
+
+// Authenticate delegates to Service.Authenticate: Me without the custom-claim
+// enrichment, which is what the adapters' Middleware calls.
+func (a *Auth) Authenticate(ctx context.Context, accessToken string) (User, error) {
+	return a.service.Authenticate(ctx, accessToken)
 }
 
 // UpdateProfile delegates to Service.UpdateProfile.

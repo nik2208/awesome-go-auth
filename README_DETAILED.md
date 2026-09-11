@@ -12,21 +12,22 @@ Complete reference for every public type, interface, function, and option in the
 4. [Store Interfaces](#store-interfaces)
 5. [In-Memory Stores](#in-memory-stores)
 6. [Auth Functional Options](#auth-functional-options)
-7. [OAuth 2.0 + Account Linking](#oauth-20--account-linking)
-8. [SSE (Server-Sent Events)](#sse-server-sent-events)
-9. [Webhooks](#webhooks)
-10. [Telemetry](#telemetry)
-11. [Mailer](#mailer)
-12. [Delivery](#delivery)
-13. [OIDC IDP](#oidc-idp)
-14. [MCP Server (out of parity scope)](#mcp-server-out-of-parity-scope)
-15. [OpenAPI](#openapi)
-16. [Embedded UI](#embedded-ui)
-17. [API Keys](#api-keys)
-18. [Event Bus](#event-bus)
-19. [HTTP Adapters](#http-adapters)
-20. [Security Helpers](#security-helpers)
-21. [Errors](#errors)
+7. [Custom Claims](#custom-claims)
+8. [OAuth 2.0 + Account Linking](#oauth-20--account-linking)
+9. [SSE (Server-Sent Events)](#sse-server-sent-events)
+10. [Webhooks](#webhooks)
+11. [Telemetry](#telemetry)
+12. [Mailer](#mailer)
+13. [Delivery](#delivery)
+14. [OIDC IDP](#oidc-idp)
+15. [MCP Server (out of parity scope)](#mcp-server-out-of-parity-scope)
+16. [OpenAPI](#openapi)
+17. [Embedded UI](#embedded-ui)
+18. [API Keys](#api-keys)
+19. [Event Bus](#event-bus)
+20. [HTTP Adapters](#http-adapters)
+21. [Security Helpers](#security-helpers)
+22. [Errors](#errors)
 
 ---
 
@@ -75,7 +76,8 @@ Low-level constructor. Use `New()` for most cases.
 | `Login(ctx, LoginInput) (User, AuthTokens, error)` | Authenticate and return tokens |
 | `Refresh(ctx, refreshToken) (AuthTokens, error)` | Rotate refresh token |
 | `Logout(ctx, refreshToken) error` | Revoke session |
-| `Me(ctx, accessToken) (User, error)` | Resolve token to user profile |
+| `Authenticate(ctx, accessToken) (User, error)` | Verify an access token and load its user with the stores' enrichment; never runs `BuildTokenClaims` — see [Custom Claims](#custom-claims) |
+| `Me(ctx, accessToken) (User, error)` | `Authenticate` plus `CustomClaims` from `BuildTokenClaims`: the `/me` profile |
 | `UpdateProfile(ctx, UpdateProfileInput) (User, error)` | Update first/last name |
 | `DeleteAccount(ctx, DeleteAccountInput) error` | Delete current account |
 | `ForgotPassword(ctx, ForgotPasswordInput) (string, error)` | Generate reset token |
@@ -128,7 +130,7 @@ type Config struct {
     BcryptCost            int                           // default: bcrypt.DefaultCost (10); 0 means unset
     Require2FA            bool
     TwoFactorAppName      string                        // TOTP issuer shown by authenticator apps; empty = Issuer — see TwoFactorAppName
-    BuildTokenClaims      func(ctx, User) (map[string]any, error)
+    BuildTokenClaims      TokenClaimsBuilder            // see Custom Claims
     SendMagicLink         MagicLinkSender               // required by POST /auth/magic-link/send
     SendSMSCode           SMSCodeSender                 // required by POST /auth/sms/send
     SendPasswordReset     PasswordResetSender           // optional; POST /auth/forgot-password
@@ -228,7 +230,7 @@ Called internally; ensures secret length >= 32 and TTLs > 0.
 | `Roles` | `[]string` | Enriched by RBACStore |
 | `Permissions` | `[]string` | Enriched by RBACStore |
 | `Tenants` | `[]Tenant` | Enriched by TenantStore |
-| `CustomClaims` | `map[string]any` | From BuildTokenClaims hook |
+| `CustomClaims` | `map[string]any` | From the BuildTokenClaims hook; filled by `Me`, nil from `Authenticate` |
 | `CreatedAt`, `UpdatedAt` | `time.Time` | |
 
 ### `Session`
@@ -303,7 +305,7 @@ type SessionStore interface {
 | `RolesPermissionsStore` | `AddRoleToUser`, `RemoveRoleFromUser`, `GetRolesForUser`, `CreateRole`, `DeleteRole`, `AddPermissionToRole`, `RemovePermissionFromRole`, `GetPermissionsForRole`, `GetPermissionsForUser`, `UserHasPermission` | CreateRole, AssignRole, UserHasPermission |
 | `TenantStore` | `CreateTenant`, `GetTenantByID`, `GetAllTenants`, `UpdateTenant`, `DeleteTenant`, `AssociateUserWithTenant`, `DisassociateUserFromTenant`, `GetTenantsForUser`, `GetUsersForTenant` | CreateTenant, AddUserToTenant |
 | `UserAccountStore` | `UpdateProfile`, `DeleteUser` | UpdateProfile, DeleteAccount |
-| `SessionLookupStore` | `GetSessionByID` | SessionCheckOn=allcalls (`Me`) |
+| `SessionLookupStore` | `GetSessionByID` | SessionCheckOn=allcalls (`Authenticate`, `Me`) |
 
 ---
 
@@ -340,7 +342,7 @@ Pass to `auth.New(...)`:
 | `WithBcryptCost(int)` | Password hashing cost, `bcrypt.MinCost`..`bcrypt.MaxCost` |
 | `WithRequire2FA(bool)` | Require 2FA for all users |
 | `WithTwoFactorAppName(string)` | Issuer of the TOTP provisioning URI, the reference's `twoFactor.appName`; empty keeps `Issuer` — see [TwoFactorAppName](#twofactorappname-and-the-totp-parameters) |
-| `WithTokenClaimsBuilder(func)` | Custom JWT claims |
+| `WithTokenClaimsBuilder(TokenClaimsBuilder)` | Custom JWT claims — see [Custom Claims](#custom-claims) |
 | `WithMagicLinkSender(MagicLinkSender)` | Deliver magic links — see [Delivery](#delivery) |
 | `WithSMSCodeSender(SMSCodeSender)` | Deliver SMS codes — see [Delivery](#delivery) |
 | `WithPasswordResetSender(PasswordResetSender)` | Deliver password-reset tokens — see [Delivery](#delivery) |
@@ -358,6 +360,147 @@ Pass to `NewService(...)` as `ServiceOption`:
 | `WithMetadataStore(UserMetadataStore)` | |
 | `WithRolesPermissionsStore(RolesPermissionsStore)` | |
 | `WithTenantStore(TenantStore)` | |
+
+---
+
+## Custom Claims
+
+`Config.BuildTokenClaims` — a `TokenClaimsBuilder`, set with `WithTokenClaimsBuilder` —
+adds claims to every token minted: access, refresh and the 2FA step-up token. Its
+result is spread over the reference's six base claims (`sub`, `email`, `role`,
+`loginProvider`, `isEmailVerified`, `isTotpEnabled`) and may override them, exactly as
+the reference's `config.buildTokenPayload(user)` may (`auth.router.ts:378-384`). The
+session claims `sid`, `tid`, `jti`, `typ`, `iss`, `iat` and `exp` are reserved: they are
+written after the merge, so a builder value under one of those names is discarded
+rather than minted.
+
+```go
+type TokenClaimsBuilder = func(ctx context.Context, user User) (map[string]any, error)
+```
+
+A builder error fails the mint: the login, refresh or step-up that needed the token
+answers a generic `500` rather than issuing a token carrying fewer claims than the
+deployment configured.
+
+### Where the builder runs
+
+| Call | Runs the builder | Why |
+|------|------------------|-----|
+| Every mint — `Register`, `Login`, `Refresh`, the OAuth callback, the passwordless and 2FA verifies, the step-up token | once per token | The claims go into the token |
+| `Me` / `GET /me` | once | The profile mirrors the reference's `/me`, whose body is `buildPayload(user)` (`auth.router.ts:656-680`); the result is rendered under `customClaims`. A failure here is logged and `customClaims` omitted — a read does not go dark because a mint-time hook is down |
+| `Authenticate` — the four adapters' `Middleware()`, `POST /link-request`, the IdP `userinfo` endpoint | never | What the builder computed is already inside the token the request carried; `CustomClaims` is nil on the user in context. The reference's `authMiddleware` draws the same line: it verifies the token and hands the route the payload as `req.user`, without `buildTokenPayload` (`auth.middleware.ts:44-61`) |
+
+`Authenticate(ctx, accessToken)` is `Me` without the builder: it verifies the token,
+runs the `SessionCheckOn=allcalls` check, loads the user and fills `Metadata`, `Roles`,
+`Permissions` and `Tenants` from the optional stores (best effort, as always), and
+fails with `Me`'s sentinels. A host route that needs the builder's result can call
+`Auth.Me` itself.
+
+### Building the hook from configuration
+
+Three constructors build the hook out of configuration rather than code. They are
+this port's own extension — the reference has only the in-process function
+(`auth-config.model.ts:316`) — and a token minted through them is indistinguishable
+on the wire from one minted through a hand-written closure. Together they decode the
+consumer's `security.jwt.extraClaims` table, `{claim: {fromUserField: <field>} | {const: <value>}}`.
+
+| Constructor | Result |
+|-------------|--------|
+| `StaticClaims(map[string]any) TokenClaimsBuilder` | The same claims on every token, from a copy of the map: neither later edits to the input nor edits to a result change the next token |
+| `UserFieldClaims(map[string]string) (TokenClaimsBuilder, error)` | Copies `User` fields into named claims; the map is `claim → field`, the field spelled as it is on `/me` |
+| `ChainClaims(...TokenClaimsBuilder) TokenClaimsBuilder` | Runs builders in order and merges: later wins on a shared name, the first error stops the chain, nil builders are skipped |
+
+`UserFieldClaims` reads only these fields, by their `/me` names: `id`, `email`, `role`,
+`tenantId`, `firstName`, `lastName`, `phoneNumber`, `isEmailVerified`, `isTotpEnabled`,
+`loginProvider` (`"local"` when unset). Any other name — a credential column, a Go
+spelling, an enriched collection such as `roles` — is a constructor error, so a typo
+in configuration fails at startup and not on every login. So is a claim *name* that is
+one of the reserved session claims (`sid`, `tid`, `jti`, `typ`, `iss`, `iat`, `exp`):
+the mint would discard the mapping every time, and a mapping that can never reach a
+token is a configuration error, not a claim. Mapping over a base claim (`email`,
+`role`, ...) stays allowed. `StaticClaims` has no error to return, so a reserved name
+there is discarded at mint time like any hook's — check the names before building.
+Every mapped claim is emitted on every token, an empty field as an empty value
+rather than an absent claim.
+
+```go
+fields, err := auth.UserFieldClaims(map[string]string{"tenant": "tenantId", "given": "firstName"})
+if err != nil {
+    log.Fatal(err) // names the unknown field and lists the allowed ones
+}
+a, err := auth.New(
+    auth.WithTokenClaimsBuilder(auth.ChainClaims(
+        fields,
+        auth.StaticClaims(map[string]any{"plan": "pro"}),
+    )),
+)
+```
+
+### Claims webhook
+
+`ClaimsWebhook` is a builder that asks an HTTP endpoint for the claims — the consumer's
+`security.jwt.claimsWebhook {url, timeoutMs}` knob, for claims that are computed rather
+than mapped. Its `Build` method has the builder's signature, so it is wired directly or
+as one link of a chain.
+
+```go
+hook, err := auth.NewClaimsWebhook("https://hooks.example.com/claims", secret) // 2s timeout
+a, err := auth.New(auth.WithTokenClaimsBuilder(hook.Build))
+// or, after the mapped claims, with the endpoint having the last word:
+a, err = auth.New(auth.WithTokenClaimsBuilder(auth.ChainClaims(fields, hook.Build)))
+```
+
+```go
+type ClaimsWebhook struct {
+    URL     string        // absolute http(s) URL; NewClaimsWebhook validates it
+    Secret  string        // signs the body when set; never sent
+    Timeout time.Duration // per request, through ctx; NewClaimsWebhook sets 2s
+    Client  *http.Client  // nil = http.DefaultClient
+}
+```
+
+> **This request shape is this port's own.** The reference's `buildTokenPayload` is an
+> in-process function that never crosses HTTP, so there is no reference wire to
+> reproduce. The envelope — headers and signature — is the family's outbound-webhook
+> convention (`src/tools/webhook-sender.ts:24-33`, `54-56`), the same one the delivery
+> webhook uses, so one receiver verifies both.
+
+One request per token minted and per `GET /me`, and none for a protected route:
+`POST <URL>` with `Content-Type: application/json` and
+
+| Header | Value |
+|--------|-------|
+| `X-Webhook-Event` | `claims.build` (`ClaimsWebhookEvent`) |
+| `X-Webhook-Delivery` | a fresh UUID per request |
+| `X-Webhook-Timestamp` | when it was sent: ISO 8601, UTC, milliseconds — `2026-09-11T10:00:00.000Z` |
+| `X-Webhook-Signature` | `sha256=<hex HMAC-SHA256 of the raw body, keyed by Secret>` — only when `Secret` is set; `VerifyWebhookSignature` checks it |
+
+The body is `{"user": {…}}`, where `user` is the caller as `GET /me` renders it
+(`PublicUser`: credentials omitted, `loginProvider` always present):
+
+```json
+{"user":{"sub":"usr_…","id":"usr_…","email":"ada@example.com","loginProvider":"local","tenantId":"t1","isEmailVerified":true,"isTotpEnabled":false,"createdAt":"2026-09-11T10:00:00Z"}}
+```
+
+At mint time `user` is the stored row; on `/me` it is the enriched profile, so `roles`,
+`permissions`, `tenants` and `metadata` appear there and not at mint time.
+
+The endpoint answers `2xx` with
+
+```json
+{"claims": {"plan": "pro", "org": "acme"}}
+```
+
+and the `claims` object is merged like any builder's result: it may override the six
+base claims and cannot set the reserved session claims, so a compromised endpoint
+cannot retype a token or rebind a session. **Anything else fails the mint** — the
+route answers the generic `500` any failing builder does, and `/me` logs and omits
+`customClaims`: a non-`2xx`, a transport error, the timeout (the caller's context
+deadline wins when shorter), a body over 64 KiB, a body that is not JSON, a missing
+or `null` `claims`, or a `claims` that is not an object. Errors name the status or
+the transport failure and never the response body or the secret. Failing closed is
+deliberate: a token minted without the claims the deployment configured would
+authorise less, or more, than the deployment decided.
 
 ---
 

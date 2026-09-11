@@ -58,6 +58,7 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("Refresh", func(t *testing.T) { testRefresh(t, mount) })
 	t.Run("Logout", func(t *testing.T) { testLogout(t, mount) })
 	t.Run("Me", func(t *testing.T) { testMe(t, mount) })
+	t.Run("Claims", func(t *testing.T) { testClaims(t, mount) })
 	t.Run("SessionRevoked", func(t *testing.T) { testSessionRevoked(t, mount) })
 	t.Run("Sessions", func(t *testing.T) { testSessions(t, mount) })
 	t.Run("Account", func(t *testing.T) { testAccount(t, mount) })

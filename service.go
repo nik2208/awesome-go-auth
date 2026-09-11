@@ -201,7 +201,31 @@ func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 	return s.sessions.UpdateSession(ctx, session)
 }
 
-func (s *Service) Me(ctx context.Context, accessToken string) (User, error) {
+// Authenticate verifies an access token and returns the user it names. The
+// token's signature, type, issuer and lifetime are checked, the session is
+// validated when Config.SessionCheckOn is "allcalls", and the user is loaded
+// from the UserStore; the failure sentinels are Me's — ErrInvalidToken,
+// ErrSessionNotFound, ErrSessionRevoked. It is what the adapters' Middleware
+// calls for every request to a protected route.
+//
+// The user comes back with the optional stores' enrichment — metadata, roles,
+// permissions, tenants — because host handlers behind the middleware read those
+// off UserFromContext for their own authorisation decisions, and each is a
+// local store read that never fails the request: a store error is logged and
+// the field left empty, as it always was. What Authenticate does not do is run
+// Config.BuildTokenClaims, so CustomClaims is nil. The builder is a mint-time
+// hook — with a ClaimsWebhook behind it, a network round trip — and what it
+// computed is already inside the token the request carried; running it again
+// on every request would make each protected route pay for a claim set nothing
+// reads. Me is the call that runs it, for the one route whose body is the
+// profile. This is also where the reference draws the line: its authMiddleware
+// verifies the token and hands the route the verified payload as req.user
+// (auth.middleware.ts:44-61). It does consult the session store — the allcalls
+// check at :47-53 and the last-active touch at :56-58 — but never the user
+// store and never buildTokenPayload; only its /me calls buildPayload again.
+// Authenticate reads the user store in addition, because the Go middleware
+// hands the route a User rather than a payload.
+func (s *Service) Authenticate(ctx context.Context, accessToken string) (User, error) {
 	claims, err := s.parseToken(accessToken, "access")
 	if err != nil {
 		return User{}, err
@@ -213,7 +237,21 @@ func (s *Service) Me(ctx context.Context, accessToken string) (User, error) {
 	if err != nil {
 		return User{}, ErrInvalidToken
 	}
-	return s.enrichUser(ctx, user)
+	return s.enrichFromStores(ctx, user), nil
+}
+
+// Me is Authenticate plus the custom claims: the profile GET /me renders, with
+// CustomClaims filled from Config.BuildTokenClaims so that the body reflects
+// the hook the way the reference's /me does — its body is buildPayload(user)
+// (auth.router.ts:656-680). A builder failure is logged and leaves CustomClaims
+// nil rather than failing the call, as it always has: /me is a read, and a read
+// should not go dark because a mint-time hook is down.
+func (s *Service) Me(ctx context.Context, accessToken string) (User, error) {
+	user, err := s.Authenticate(ctx, accessToken)
+	if err != nil {
+		return User{}, err
+	}
+	return s.enrichCustomClaims(ctx, user), nil
 }
 
 func (s *Service) newSessionTokens(ctx context.Context, user User) (AuthTokens, error) {
@@ -873,7 +911,17 @@ func (s *Service) validateSessionState(session Session, claims tokenClaims) erro
 	return nil
 }
 
+// enrichUser is the full profile — the stores' enrichment and then the custom
+// claims — for the calls whose result is rendered as one: Me, UpdateProfile,
+// UpdatePhoneNumber. Authenticate takes only the first half; see there.
 func (s *Service) enrichUser(ctx context.Context, user User) (User, error) {
+	return s.enrichCustomClaims(ctx, s.enrichFromStores(ctx, user)), nil
+}
+
+// enrichFromStores fills Metadata, Roles, Permissions and Tenants from the
+// optional stores. Each read is best effort: a failure is logged and the field
+// left as it was, so a profile is never refused for a store that is down.
+func (s *Service) enrichFromStores(ctx context.Context, user User) User {
 	if s.metadata != nil {
 		metadata, err := s.metadata.GetMetadata(ctx, user.ID)
 		if err != nil {
@@ -904,15 +952,24 @@ func (s *Service) enrichUser(ctx context.Context, user User) (User, error) {
 			user.Tenants = tenants
 		}
 	}
-	if s.cfg.BuildTokenClaims != nil {
-		claims, err := s.cfg.BuildTokenClaims(ctx, user)
-		if err != nil {
-			s.logf("auth: custom claim enrichment skipped for user %q: %v", user.ID, err)
-		} else {
-			user.CustomClaims = claims
-		}
+	return user
+}
+
+// enrichCustomClaims fills CustomClaims from Config.BuildTokenClaims, best
+// effort as above. The user handed to the hook is the enriched one, so a
+// builder — or the endpoint behind a ClaimsWebhook — sees roles and tenants
+// here that it does not see at mint time, where the stored row is all there is.
+func (s *Service) enrichCustomClaims(ctx context.Context, user User) User {
+	if s.cfg.BuildTokenClaims == nil {
+		return user
 	}
-	return user, nil
+	claims, err := s.cfg.BuildTokenClaims(ctx, user)
+	if err != nil {
+		s.logf("auth: custom claim enrichment skipped for user %q: %v", user.ID, err)
+		return user
+	}
+	user.CustomClaims = claims
+	return user
 }
 
 func (s *Service) logf(format string, args ...any) {
