@@ -79,6 +79,15 @@ func (a *Adapter) Middleware() func(http.Handler) http.Handler {
 // Mount attaches auth endpoints.
 func (a *Adapter) Mount(mux *http.ServeMux) {
 	prefix := a.cfg.Prefix()
+	// IdP mode: the JWKS document, mounted first and bare. The reference
+	// registers it before every middleware so that it is always public
+	// (auth.router.ts:473-474) and only when an idProvider block is configured
+	// (:473); here that condition is auth.WithIDP. GET only, as there; net/http
+	// routes HEAD to a GET pattern itself, which is Express's own fallback from
+	// HEAD to the GET handler.
+	if idp := a.auth.IDP(); idp != nil {
+		mux.Handle("GET "+prefix+idp.JWKSPath(), a.auth.JWKSHandler())
+	}
 	mux.Handle("POST "+prefix+"/register", a.guard(http.HandlerFunc(a.Register)))
 	mux.Handle("POST "+prefix+"/login", a.guard(http.HandlerFunc(a.Login)))
 	mux.Handle("POST "+prefix+"/refresh", a.guard(http.HandlerFunc(a.Refresh)))

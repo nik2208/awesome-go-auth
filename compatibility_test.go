@@ -58,6 +58,7 @@ var wantDeviationIDs = []string{
 	"cookie-max-age-follows-configured-ttl",
 	"csrf-cookie-not-reissued-with-tokens",
 	"forgot-password-succeeds-on-delivery-failure",
+	"jwks-cors-wildcard-string-form",
 	"link-request-exempts-bearer-from-csrf",
 	"one-time-tokens-are-base64url",
 	"password-policy-on-reset-and-change",
@@ -72,6 +73,9 @@ var wantDeviationIDs = []string{
 // rewording and fail on a reversal. Each must appear somewhere in the entry.
 var wantClaims = map[string][]string{
 	"forgot-password-succeeds-on-delivery-failure": {"200", "500", "enumeration"},
+	"jwks-cors-wildcard-string-form": {
+		"Access-Control-Allow-Origin", "string | string[]", "corsOrigins === '*'",
+	},
 	"temp-token-is-typed-not-an-access-token":      {"access token", "second factor"},
 	"link-request-exempts-bearer-from-csrf":        {"Bearer", "CSRF_INVALID", "CORS-safelisted"},
 	"password-policy-on-reset-and-change":          {"WEAK_PASSWORD", "400", "minLength: 8"},

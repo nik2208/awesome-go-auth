@@ -383,6 +383,39 @@ func CompatibilityNotes() APICompatibilityNotes {
 						"minutes); an explicit value is never overwritten by the derivation.",
 				}},
 			},
+			{
+				ID:      "jwks-cors-wildcard-string-form",
+				Title:   "The JWKS CORS wildcard is the one-element `[]string{\"*\"}`, not an entry",
+				Surface: "`GET <prefix>/.well-known/jwks.json`",
+				Behaviour: "A `JWKSCORSOrigins` of exactly `[]string{\"*\"}` answers " +
+					"`Access-Control-Allow-Origin: *` to every request, the same as leaving the " +
+					"field nil. Every other slice is an allowlist: a listed `Origin` is echoed " +
+					"back, an unlisted one gets no `Access-Control-Allow-Origin` header at all, " +
+					"and an entry `*` inside a longer slice is an ordinary entry that matches " +
+					"only an `Origin` header of literally `*`.",
+				Reference: "`jwksCorsOrigins` is typed `string | string[]` and the wildcard test is " +
+					"`corsOrigins === '*'` against the whole value, so only the *string* is the " +
+					"wildcard. Every array is an allowlist, including `['*']`, whose one entry " +
+					"matches only the `Origin` header `*` — one no browser sends — so that value " +
+					"disables the header rather than opening the route.",
+				Citations: []string{"auth.router.ts:492-500", "auth-config.model.ts:102"},
+				Why: "Go has no `string | string[]`, and `[]string` is the shape every other list " +
+					"in this package has, so one of the two readings of `{\"*\"}` had to win. The " +
+					"reference's own documented default for the field is the wildcard " +
+					"(`@default '*'`), so the slice that spells it is read as the string form " +
+					"rather than as an allowlist that can never match — the reading a host " +
+					"writing `{\"*\"}` plainly intends. The difference is confined to that single " +
+					"value: nil, the empty slice and every other allowlist behave exactly as the " +
+					"reference does.",
+				Notes: []DeviationNote{{
+					Label: "Matching the reference exactly",
+					Text: "A deployment that means the reference's `['*']` — an allowlist no " +
+						"browser `Origin` can match — writes the empty slice `[]string{}` here, " +
+						"which sends the header to nobody. Note also that neither implementation " +
+						"sends `Vary: Origin` while both send `Cache-Control: public, max-age=3600`, " +
+						"so an allowlisted response must not reach a shared cache.",
+				}},
+			},
 		},
 	}
 }

@@ -75,6 +75,7 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("StepUpEmptyBody", func(t *testing.T) { testStepUpEmptyBody(t, mount) })
 	t.Run("PasswordAndEmail", func(t *testing.T) { testPasswordAndEmail(t, mount) })
 	t.Run("PasswordEmailDelivery", func(t *testing.T) { testPasswordEmailDelivery(t, mount) })
+	t.Run("JWKS", func(t *testing.T) { testJWKS(t, mount) })
 	t.Run("OpenAPI", func(t *testing.T) { testOpenAPI(t, mount) })
 }
 
@@ -191,11 +192,11 @@ type conditionalRouteSet struct {
 // route of the set answers 404 or 405 in that base env, so a route cannot
 // quietly become unconditional without moving to documentedRoutes.
 //
-// Empty for now: nothing the adapters mount today is conditional, and
-// OpenAPIInfo has no flag to switch on. The mechanism is exercised with a fake
-// set in suite_test.go until the first real one (JWKS, docs, UI, admin, tools)
-// registers here.
-var conditionalRoutes []conditionalRouteSet
+// The first registered set is JWKS, switched on by auth.WithIDP and documented
+// by OpenAPIInfo.IDProvider; see jwks.go. The docs, UI, admin and tools sets
+// join it as those routers land. suite_test.go drives the mechanism itself with
+// a fake set it passes in, so it stays independent of what is registered here.
+var conditionalRoutes = []conditionalRouteSet{jwksRouteSet()}
 
 // failureReporter is the slice of testing.T the OpenAPI checks report through.
 // It is an interface so suite_test.go can record failures instead of raising

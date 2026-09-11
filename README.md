@@ -400,6 +400,38 @@ revision the whole contract was extracted from.
   headers sets `CookieOptions.RefreshTokenMaxAge` to 7 days (and
   `AccessTokenMaxAge` to 15 minutes); an explicit value is never overwritten by
   the derivation.
+
+### The JWKS CORS wildcard is the one-element `[]string{"*"}`, not an entry
+
+`jwks-cors-wildcard-string-form`
+
+- **Surface**: `GET <prefix>/.well-known/jwks.json`.
+- **This port**: A `JWKSCORSOrigins` of exactly `[]string{"*"}` answers
+  `Access-Control-Allow-Origin: *` to every request, the same as leaving the
+  field nil. Every other slice is an allowlist: a listed `Origin` is echoed
+  back, an unlisted one gets no `Access-Control-Allow-Origin` header at all, and
+  an entry `*` inside a longer slice is an ordinary entry that matches only an
+  `Origin` header of literally `*`.
+- **The reference**: `jwksCorsOrigins` is typed `string | string[]` and the
+  wildcard test is `corsOrigins === '*'` against the whole value, so only the
+  *string* is the wildcard. Every array is an allowlist, including `['*']`,
+  whose one entry matches only the `Origin` header `*` — one no browser sends —
+  so that value disables the header rather than opening the route
+  (`auth.router.ts:492-500`, `auth-config.model.ts:102`).
+- **Why**: Go has no `string | string[]`, and `[]string` is the shape every
+  other list in this package has, so one of the two readings of `{"*"}` had to
+  win. The reference's own documented default for the field is the wildcard
+  (`@default '*'`), so the slice that spells it is read as the string form
+  rather than as an allowlist that can never match — the reading a host writing
+  `{"*"}` plainly intends. The difference is confined to that single value: nil,
+  the empty slice and every other allowlist behave exactly as the reference
+  does.
+- **Matching the reference exactly**: A deployment that means the reference's
+  `['*']` — an allowlist no browser `Origin` can match — writes the empty slice
+  `[]string{}` here, which sends the header to nobody. Note also that neither
+  implementation sends `Vary: Origin` while both send
+  `Cache-Control: public, max-age=3600`, so an allowlisted response must not
+  reach a shared cache.
 <!-- END GENERATED: deviations -->
 
 ## Parity Snapshot vs `awesome-node-auth`
@@ -420,7 +452,7 @@ release that closes the gap.
 | OAuth login + account linking | ✅ Implemented | Signed state, PKCE, single-use nonce; Google and GitHub presets, generic providers by hand. No provisioning policy or `profileMap` yet. | v0.6.0 |
 | Dynamic email templates + UI i18n fallback | ✅ Implemented | The reference's six template ids with its en/it built-ins, `TemplateStore` overrides rendered under its `{{T.key}}`/`{{key}}` rule, per-request site-URL links and the old-address notice on `/change-email/confirm`. The `welcome` template renders but `POST /register` does not mail it yet (the reference does, `auth.router.ts:719-724`); UI translations are stored and are read by `GET /ui/config` once the UI router lands (v0.8.0). | — |
 | Custom token claims | ✅ Implemented | `Config.BuildTokenClaims` hook, plus `StaticClaims`/`UserFieldClaims`/`ChainClaims` and the synchronous `ClaimsWebhook` (this port's extension); the hook runs at mint time and on `/me`, never in the middleware. | — |
-| Identity Provider (IdP) mode (RS256 + JWKS + resource-server validation) | ⚠️ Partial | Discovery, authorize, token and userinfo endpoints exist; the signing key, `kid` and published keys are injectable (`IDPConfig.Signer`, `KeyID`, `PublicKeys`, with `ParseRSAPrivateKeyPEM` for the reference's PEM form), authorization codes go through `AuthCodeStore`, and `IssueIdPTokenPair` mints the reference's RS256 pair. Still pending: JWKS is served at `<base>/jwks` rather than `/.well-known/jwks.json`, and there is no RS256 verifier for resource servers. | v0.7.0 |
+| Identity Provider (IdP) mode (RS256 + JWKS + resource-server validation) | ⚠️ Partial | Discovery, authorize, token and userinfo endpoints exist; the signing key, `kid` and published keys are injectable (`IDPConfig.Signer`, `KeyID`, `PublicKeys`, with `ParseRSAPrivateKeyPEM` for the reference's PEM form), authorization codes go through `AuthCodeStore`, and `IssueIdPTokenPair` mints the reference's RS256 pair. `auth.WithIDP` makes all four adapters serve the JWKS document at `<prefix>/.well-known/jwks.json` (`IDPConfig.JWKSPath`) with the reference's `Cache-Control` and CORS headers; `<base>/jwks` stays as a deprecated alias through the 0.x line and is removed in v1.0.0. Still pending: no RS256 verifier for resource servers. | v0.7.0 |
 | RBAC | ⚠️ Service-level | `RolesPermissionsStore` and service helpers; no HTTP surface (the admin router is absent). | v0.9.0 |
 | Multi-tenancy | ⚠️ Service-level | `TenantStore` and membership helpers; no HTTP surface. | v0.9.0 |
 | API keys (M2M) | ⚠️ Service-level | `APIKeyService` + `APIKeyMiddleware`; no management routes. | v0.9.0 |

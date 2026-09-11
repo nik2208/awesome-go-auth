@@ -25,6 +25,18 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 	prefix := resolved.Prefix()
 	csrf := auth.CSRFMiddleware(resolved)
 
+	// IdP mode: the JWKS document, mounted first and bare — no CSRF, no auth —
+	// because the reference registers it ahead of every middleware
+	// (auth.router.ts:473-474) and only when an idProvider block is configured
+	// (:473); here that condition is auth.WithIDP. HEAD is registered next to
+	// GET because chi, unlike net/http and Express, does not fall back from one
+	// to the other.
+	if idp := a.IDP(); idp != nil {
+		jwks := a.JWKSHandler()
+		r.Method(http.MethodGet, prefix+idp.JWKSPath(), jwks)
+		r.Method(http.MethodHead, prefix+idp.JWKSPath(), jwks)
+	}
+
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/register", h.Register)
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/login", h.Login)
 	r.With(csrf).MethodFunc(http.MethodPost, prefix+"/refresh", h.Refresh)

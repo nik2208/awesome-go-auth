@@ -1470,6 +1470,9 @@ type IDPConfig struct {
     Logger          func(format string, args ...any) // nil → the Service's
     Codes           AuthCodeStore // nil → NewMemoryAuthCodeStore()
     CodeTTL         time.Duration // 0 → 5 minutes
+    JWKSPath        string        // "" → DefaultJWKSPath, "/.well-known/jwks.json"
+    JWKSCORSOrigins []string      // nil → "*"
+    JWKSURL         string        // "" → Issuer + JWKSPath, for jwks_uri
 }
 ```
 
@@ -1534,11 +1537,112 @@ func BuildRS256JWT(signer crypto.Signer, kid string, claims map[string]any) (str
 `publicKeyToJwk` (`:168-179`; a nil key, or one with no modulus, is an error
 rather than a panic, since the key was obtained elsewhere), and `JWKS()` its
 `buildJwksDocument` (`:184-186`) followed by `PublicKeys`:
-`{"keys":[<signer key>, <PublicKeys>...]}`, which is what the `jwks` endpoint
+`{"keys":[<signer key>, <PublicKeys>...]}`, which is what the JWKS endpoint
 serves. `BuildRS256JWT` is the JWS compact serialisation with header
 `{"alg":"RS256","typ":"JWT","kid":<kid>}`, usable on its own by a host that
 signs something else with the same key; like `NewIDP`, it refuses a signer
 whose `Public()` is not an `*rsa.PublicKey` before asking it to sign.
+
+### The JWKS endpoint — `GET <prefix>/.well-known/jwks.json`
+
+```go
+func WithIDP(idp *IDP) Option
+func (a *Auth) IDP() *IDP
+func (a *Auth) JWKSHandler() http.Handler   // nil without WithIDP
+func (idp *IDP) JWKSHandler() http.Handler
+func (idp *IDP) JWKSPath() string
+
+const DefaultJWKSPath = "/.well-known/jwks.json"
+```
+
+`auth.WithIDP(idp)` registers the IdP on the `Auth`, and that is the whole
+switch: every adapter — net/http, chi, gin and echo — then mounts
+`GET <prefix><IDPConfig.JWKSPath>`, public and ahead of every middleware. The
+reference registers the same route from the same condition, an `idProvider`
+block carrying a key or `enabled` (`auth.router.ts:473-475`); without `WithIDP`
+the route is not mounted and the path answers 404 like any other.
+
+Because `NewIDP` wants a `*Service` and `New` is what produces one, build the
+IdP with a nil Service and let the `Auth` adopt it:
+
+```go
+key, _ := auth.ParseRSAPrivateKeyPEM(os.Getenv("IDP_PRIVATE_KEY"))
+idp, _ := auth.NewIDP(auth.IDPConfig{Issuer: "https://api.example.com/auth", Signer: key}, nil)
+a, _ := auth.New(auth.WithUserStore(store), auth.WithIDP(idp))
+nethttp.Mount(mux, a) // GET /auth/.well-known/jwks.json is now served
+```
+
+An `IDP` that already carries a different `Service` — one you constructed
+yourself, or one a previous `auth.New` already bound — is refused, and `New`
+returns `auth: WithIDP: the IDP is already bound to another Service`. Adopting
+it would leave `/token` and `/userinfo` answering from that other Service's user
+store while this `Auth`'s routes answered from this one, and rebinding an `IDP`
+that may already be serving requests is a data race besides. Build a second
+`IDP` for a second `Auth`.
+
+**Path.** `IDPConfig.JWKSPath` is the reference's `idProvider.jwksPath`
+(`auth.router.ts:475`), relative to the mount prefix; empty means
+`DefaultJWKSPath`. `NewIDP` refuses a path the four adapters and
+`RegisterHandlers` cannot all route as the same literal path: it must start with
+`/` — the value is concatenated onto the prefix, and a relative one would mount
+`<prefix>jwks.json` — and must not end with one (a subtree pattern in net/http,
+a literal segment in chi), must not contain `{`, `}`, `?`, `#` or `//`, and must
+not collide with a path `RegisterHandlers` already mounts (`/authorize`,
+`/token`, `/userinfo`, `/.well-known/openid-configuration`), which would panic
+in `http.ServeMux` at mount time.
+
+**Cache.** Every answer carries `Cache-Control: public, max-age=3600`
+(`auth.router.ts:502`). A relying party fetches the document once per key
+rotation, not once per token.
+
+**CORS.** `IDPConfig.JWKSCORSOrigins` is the reference's `jwksCorsOrigins`
+(`auth.router.ts:492-500`):
+
+| `JWKSCORSOrigins` | Request `Origin` | `Access-Control-Allow-Origin` |
+|---|---|---|
+| `nil` (default) | anything, or absent | `*` |
+| `{"*"}` (exactly one entry) | anything, or absent | `*` |
+| `{"https://app.example.com"}` | `https://app.example.com` | `https://app.example.com` |
+| `{"https://app.example.com"}` | anything else, or absent | *no header* |
+| `{"https://app.example.com", "*"}` | `https://app.example.com` | `https://app.example.com` |
+| `{"https://app.example.com", "*"}` | anything else | *no header* |
+| `[]string{}` | anything | *no header* |
+
+The document is served in every row: CORS bounds what a browser script may read,
+not what the server answers, and the reference refuses nothing on this route.
+
+The reference's type is `string | string[]`, and only its string form is the
+wildcard — the test is `corsOrigins === '*'` against the whole value
+(`auth.router.ts:493`). Every array there is an allowlist, so an entry `*`
+inside one is an ordinary entry matching only an `Origin` header of literally
+`*`, which no browser sends. Go has no such union, so the one-element slice
+`{"*"}` stands in for the string form; that single value is the only
+configuration reading differently from the reference, and it is registered as
+the `jwks-cors-wildcard-string-form` deviation in README.md. A deployment that
+means the reference's never-matching `['*']` writes the empty slice
+`[]string{}`.
+
+Neither the reference nor this port sends `Vary: Origin`, while both send
+`Cache-Control: public, max-age=3600` (`auth.router.ts:492-502`). An allowlisted
+response therefore must not reach a shared or CDN cache, which would store one
+origin's header and replay it to another, or store the header-less variant and
+break the allowlisted origin: front an allowlist with a private cache, or leave
+`JWKSCORSOrigins` nil so every origin may read the document.
+
+**Methods.** `GET` only, as in the reference (`router.get`,
+`auth.router.ts:490`). `HEAD` is served from the same handler, which is
+Express's own fallback from `HEAD` to the `GET` handler and net/http's for a
+`GET` pattern; chi, gin and echo do not do it themselves, so the adapters
+register `HEAD` explicitly there. Any other method misses the route; the status
+is the router's own — 405 on net/http, chi and echo, 404 on gin. (Express
+answers `OPTIONS` itself with 200 and an `Allow` header when the path has a
+route; this port does not, and no CORS preflight reaches the route anyway, since
+a JWKS fetch is a simple request.)
+
+**Documenting it.** `GenerateOpenAPISpec` adds the path when
+`OpenAPIInfo.IDProvider` is set, at `OpenAPIInfo.JWKSPath` (empty →
+`DefaultJWKSPath`); leave the flag false for a deployment with no IdP, or the
+document advertises an endpoint that answers 404.
 
 ### `(*IDP).IssueIdPTokenPair(ctx context.Context, user User) (AuthTokens, error)`
 
@@ -1628,10 +1732,36 @@ Mounts these endpoints under `basePath`:
 | Path | Description |
 |------|-------------|
 | `.well-known/openid-configuration` | OIDC discovery document |
-| `jwks` | `JWKS()` as JSON: the signer's key first, then `PublicKeys` |
+| `<JWKSPath>` (default `.well-known/jwks.json`) | `JWKS()` with the cache and CORS headers — the same handler and the same path the adapters mount |
+| `jwks` | **Deprecated** alias of the above, byte-identical; kept through the 0.x line, removed in v1.0.0 |
 | `authorize` | Authorization endpoint (GET=login form, POST=credential check) |
 | `token` | Token exchange (authorization_code grant) |
 | `userinfo` | Bearer-token-protected user profile |
+
+The discovery document's `jwks_uri` points at the canonical path, not the alias.
+It is derived as `Issuer` + `JWKSPath`, the convention every other endpoint in
+that document already follows — they are all derived from `Issuer` alone — so
+for the advertised URL to resolve, `Issuer` has to carry the mount prefix
+(`https://api.example.com/auth`, not `https://api.example.com`).
+
+**That choice is not free.** `IDPConfig.Issuer` is also the `iss` claim of every
+token the IdP mints (`token.service.ts:74-77`), and the reference documents
+`issuer` as a bare origin — its own example is `'https://auth.myplatform.com'`
+(`auth-config.model.ts:77-81`). Moving the prefix into `Issuer` therefore
+changes `iss` on every RS256 token and can break resource servers that validate
+it. A deployment that must keep a bare `iss` leaves `Issuer` alone and sets
+`IDPConfig.JWKSURL` to the absolute JWKS URL instead — that is also the setting
+for an IdP reached through a gateway whose external URL is not `Issuer` plus the
+mounted path. Note that `JWKSURL` patches `jwks_uri` only: `authorization_endpoint`,
+`token_endpoint` and `userinfo_endpoint` have no equivalent override and stay
+derived from `Issuer`.
+
+Relying parties that read discovery follow the move on their own; one configured
+by hand against `<base>/jwks` keeps working through the 0.x line and stops at
+v1.0.0 (upstream plan D-13). Both JWKS patterns are registered `GET`-only, as
+the reference registers the route and as the adapters mount it, so the alias's
+methods narrow with this change: net/http answers `HEAD` from the `GET` pattern
+and 405 to everything else.
 
 ID tokens and IdP token pairs are RS256-signed JWTs built entirely from the
 standard library through `BuildRS256JWT`, under `IDPConfig.Signer` and `KeyID`.
