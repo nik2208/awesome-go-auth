@@ -13,3 +13,16 @@ go.sum text eol=lf
 *.yaml text eol=lf
 Makefile text eol=lf
 Dockerfile* text eol=lf
+
+# Vendored upstream UI assets (ui/upstream/assets): byte-for-byte copies of
+# awesome-node-auth's src/ui/assets at cc01e997, pinned by sha256 in
+# ui_upstream.go and re-hashed by TestVendoredUIAssetsHaveNotDrifted.
+#
+# The reference publishes them with LF and ships no .gitattributes of its own,
+# so on a host with core.autocrlf=true an unpinned checkout rewrites every line
+# of all fourteen: login.html becomes 7198 bytes hashing to facd1ced... where
+# the blob the reference actually serves is 7064 bytes hashing to f22f3a3d...
+# That is a drift failure on a tree nobody edited, and — worse, if it were ever
+# normalised into the table — a permanent pin on bytes no upstream consumer has.
+# Hold these paths at LF on every host, in the blob and in the working tree.
+ui/upstream/assets/** text eol=lf
