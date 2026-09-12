@@ -221,9 +221,17 @@ func serveHTTP(h http.Handler) gin.HandlerFunc {
 }
 
 // guard runs the shared outer chain in front of a Gin handler: the
-// rate-limiter slot, then the CSRF middleware. Reusing the net/http middleware
-// — rather than reimplementing it here — is what keeps the enforcement matrix
-// identical across adapters.
+// event-context carrier, then the rate-limiter slot, then the CSRF middleware.
+// Reusing the net/http middleware — rather than reimplementing it here — is
+// what keeps the enforcement matrix identical across adapters.
+//
+// auth.EventContextMiddleware is outermost. It installs the correlation id,
+// client address and User-Agent on the request context, and the request gin
+// carries forward is the one it produced: the inner handler assigns c.Request =
+// r before calling through, so every later ad.auth call that takes
+// c.Request.Context() sees the carrier. Every adapter installs it, because an
+// event plane that loses the correlation id on one router out of four is worse
+// than none.
 //
 // The order is the reference's: it spreads its rate limiter onto each route
 // ahead of the auth middleware and therefore ahead of the double-submit check
@@ -231,8 +239,9 @@ func serveHTTP(h http.Handler) gin.HandlerFunc {
 // that answers is a middleware that never calls through, which is the same
 // short-circuit a CSRF refusal takes below. See auth.HTTPConfig.RateLimiter.
 func (ad *Adapter) guard(h gin.HandlerFunc) gin.HandlerFunc {
+	evctx := auth.EventContextMiddleware(ad.cfg)
 	limit, csrf := auth.RateLimitMiddleware(ad.cfg), auth.CSRFMiddleware(ad.cfg)
-	mw := func(next http.Handler) http.Handler { return limit(csrf(next)) }
+	mw := func(next http.Handler) http.Handler { return evctx(limit(csrf(next))) }
 	return func(c *gin.Context) {
 		reached := false
 		mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {

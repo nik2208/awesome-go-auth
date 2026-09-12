@@ -61,6 +61,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drift check fails on a tree nobody edited, and — had those bytes ever been
   normalised into the table — the repository would have pinned a version of the
   reference's UI that no upstream consumer has.
+- **The `identity.*` event vocabulary, the payload it travels in, and the
+  request context every event carries.** The twenty-six event names the
+  reference declares (`auth-event-names.ts:5-40`) as exported string constants,
+  with `EventNames()` to enumerate them in the reference's grouping and
+  `IsEventName` to test membership — three downstream things need the full set
+  rather than the fifteen names anything actually raises, and the reasoning is
+  on `EventNames`. `Event` gains the four fields the reference's
+  `AuthEventPayload` has and this port did not (`auth-event-bus.ts:6-25`):
+  `SessionID`, `CorrelationID`, `IP` and `UserAgent`, each justified by a
+  consumer that reads it rather than by symmetry. `Event.WebhookMetadata()`
+  projects the four identifiers the reference's outgoing webhook envelope
+  carries in `metadata` (`auth-tools.ts:257-262`), so that U19's envelope is
+  derived from the event instead of assembled beside it — deliberately without
+  `IP` and `UserAgent`, which stay inside the deployment.
+- **`HTTPConfig.ClientIP` — the trust-proxy seam.** The reference reads
+  `req.ip || req.socket.remoteAddress`, and Express's `req.ip` is the socket
+  peer under the default `trust proxy` setting and a parsed `X-Forwarded-For`
+  address under any other — host configuration this port cannot see. Rather than
+  pick one silently: unset, the default, resolves the socket peer with its port
+  stripped, which is what both halves evaluate to under Express's own default; a
+  host behind a load balancer supplies a function and its answer is used as
+  given. No `X-Forwarded-For` parser ships, because an untrusted one is a
+  spoofable client address in a security log and the trust configuration is the
+  host's knowledge.
+- **`TelemetryEvent.SessionID` and `TelemetryEvent.CorrelationID`, and
+  `TelemetryFilter.SessionID`.** The reference's
+  (`telemetry-store.interface.ts:18`, `:20`, `:34`), missing here, and now
+  needed: the `Event` that will feed a telemetry record carries both, and a
+  store that could not hold them would drop the two identifiers that make a
+  record joinable. `MemoryTelemetryStore` honours the new filter.
 
 ### Changed
 - **`ServeAuthJS()` now serves the reference's `auth.js`**, not this port's
@@ -91,6 +121,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the reference rather than introducing one, and the change here is between
   two generations of this port's own SDK — which `compatibility.go` explicitly
   does not track.
+- **Deliberate deviation registered:
+  `event-handler-panic-does-not-fail-the-publisher`.** `EventBus`'s
+  panic-recovering dispatch predates this release and was never recorded. The
+  reference's `AuthEventBus` extends Node's `EventEmitter`, so a listener that
+  throws propagates out of `publish`, skips every later listener and fails the
+  request that published — a `500` for work that already succeeded. This bus
+  recovers, logs and runs the rest. The two agree on the other four axes
+  compared — publish is synchronous, ordering is registration order, the named
+  channel is served before the wildcard, and both dispatch against a snapshot of
+  the handler list — and that comparison is now written on `EventBus`.
+  `EventBus` gains no `Unsubscribe`: the reference's `offEvent` has no
+  line-for-line Go form, and the cancel-function shape that replaces it belongs
+  with the first consumer that ends a subscription.
 
 ### Deprecated
 - **`ServeAuthJS()`**, which is now a thin wrapper over the vendored asset kept

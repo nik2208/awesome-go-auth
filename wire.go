@@ -510,6 +510,46 @@ type HTTPConfig struct {
 	// below implements that half.
 	RateLimiter func(http.Handler) http.Handler
 
+	// ClientIP resolves the address an event's IP field records, and it is this
+	// port's answer to a question the reference does not answer in source.
+	//
+	// The reference reads `req.ip || req.socket.remoteAddress` (node-auth
+	// auth.router.ts:413). The second half is unambiguous — the socket peer —
+	// and the first is not: Express's req.ip is the socket peer when `trust
+	// proxy` is unset, and the left-most address of X-Forwarded-For that the
+	// trust setting does not vouch for when it is. `trust proxy` is set by the
+	// host application, in code this port cannot see and a deployment can
+	// change without touching either library. So there is no single value that
+	// is "what the reference does": there are two, and which one a given
+	// deployment gets is a fact about the deployment.
+	//
+	// Rather than pick one silently, the port makes the seam explicit and
+	// defaults it to the half that is unambiguous:
+	//
+	//   - nil, the default, is the socket peer address with its port stripped
+	//     (see HTTPConfig.clientIP). That is `req.socket.remoteAddress`, and it
+	//     is also what `req.ip` evaluates to under Express's own default of
+	//     `trust proxy` unset — so a host that configures nothing here gets
+	//     what a host that configures nothing there gets.
+	//   - A non-nil ClientIP is consulted instead, for every request, and its
+	//     answer is used as given. A deployment behind a load balancer supplies
+	//     the function that reads whichever header its balancer actually sets
+	//     and trusts only the hops it actually operates.
+	//
+	// The port ships no X-Forwarded-For parser, and that is deliberate rather
+	// than unfinished. A parser is only as good as the trust configuration
+	// behind it, an untrusted one is a spoofable client address in a security
+	// log, and the trust configuration is the host's knowledge — the same
+	// reasoning that makes `trust proxy` an application setting in Express.
+	// Handing the host the function pointer says so; shipping a default parser
+	// would say the opposite while being wrong on most deployments.
+	//
+	// The value reaches an Event through EventContextMiddleware, which the
+	// adapters install outermost on every auth route. It is read once per
+	// request, so a ClientIP that consults a store or a CIDR list is called
+	// once per request and not once per event.
+	ClientIP func(*http.Request) string
+
 	// Docs mounts the two documentation routes the reference's swagger option
 	// registers: GET <prefix>/openapi.json and GET <prefix>/docs, neither with
 	// a guard of its own (auth.router.ts:1656-1677), both behind the CSRF

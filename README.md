@@ -764,6 +764,48 @@ revision the whole contract was extracted from.
   be exempted from the second half, and the exemption is what lets a spec drift.
   `OpenAPIInfo.Docs` is set with `HTTPConfig.Docs.Enabled` and describes exactly
   the two paths that flag mounts.
+
+### A panicking event handler is contained instead of failing the request that published
+
+`event-handler-panic-does-not-fail-the-publisher`
+
+- **Surface**: `auth.EventBus.Publish` and `PublishContext`, and therefore every
+  route that will publish an `identity.*` event.
+- **This port**: Each handler runs with `recover` around it. A handler that
+  panics is logged and stepped over, the remaining handlers for that event still
+  run, and `Publish` returns normally — so the route that published answers as
+  though nothing had gone wrong.
+- **The reference**: `AuthEventBus` extends Node's `EventEmitter` and publishes
+  with two `emit` calls, which invoke their listeners inline. A listener that
+  throws propagates out of `emit`, out of `publish`, and into whatever
+  published: for the router that is the route handler's own `catch`, which
+  passes the error to `handleError` and answers `500` for work that already
+  succeeded. The listeners after the one that threw are never called, and the
+  wildcard channel is never reached if the throw came from the named one
+  (`auth-event-bus.ts:48`, `auth-event-bus.ts:55-64`).
+- **Why**: The reference's behaviour here is a consequence of extending
+  `EventEmitter` rather than a decision it took, and the Go form of it is worse
+  than the Node form. A panic that is not recovered unwinds the goroutine
+  `net/http` serves the request on; the server recovers it at the top, drops the
+  connection and logs, so a bug in a telemetry subscriber becomes a failed
+  request with no response body rather than a `500` with one. Nothing about the
+  auth operation is undone either way — the account is created, the session is
+  minted, the password is changed — so the choice is only between reporting a
+  subscriber's bug as a failure of the operation and reporting it where it
+  belongs. Containment also keeps one broken subscriber from silencing the
+  others, which the reference's ordering makes a real hazard: an SSE handler
+  registered after a webhook handler stops receiving events entirely the moment
+  the webhook handler throws.
+- **Observing it**: Subscribe two handlers to one name, panic in the first, and
+  both the second handler and the caller of `Publish` proceed; the panic appears
+  on the standard logger as
+  `auth: recovered panic in event handler for "<name>"`. Under the reference the
+  second listener is not called and the publishing request fails.
+- **For a host that wants the failure**: A handler that must not fail silently
+  should report its own errors — to its logger, its error tracker, its metrics —
+  rather than panicking. There is no knob that restores the reference's
+  propagation, because a bus whose delivery semantics depend on configuration is
+  a bus no downstream consumer can reason about.
 <!-- END GENERATED: deviations -->
 
 ## Parity Snapshot vs `awesome-node-auth`

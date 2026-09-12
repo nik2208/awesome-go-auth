@@ -6,18 +6,32 @@ import (
 	"time"
 )
 
-// TelemetryEvent represents a single persisted auth event for analytics.
+// TelemetryEvent represents a single persisted auth event for analytics: the
+// reference's TelemetryEvent (telemetry-store.interface.ts:4-25).
+//
+// SessionID and CorrelationID were missing and are the reference's
+// (telemetry-store.interface.ts:18, :20). They arrived with the event
+// vocabulary because the Event that will feed this record now carries both, and
+// a store that could not hold them would drop, on the way to the one consumer
+// that is allowed to see everything, the two identifiers that make a record
+// joinable — to the other events of the same session, and to the request that
+// caused it. Success and Error have no counterpart in the reference and are
+// this port's own; they are left alone here.
 type TelemetryEvent struct {
 	ID        string
 	EventName string
 	UserID    string
 	TenantID  string
-	IP        string
-	UserAgent string
-	Success   bool
-	Error     string
-	Timestamp time.Time
-	Meta      map[string]any
+	SessionID string
+	// CorrelationID is the caller's trace handle, never generated here. See
+	// EventContext.CorrelationID.
+	CorrelationID string
+	IP            string
+	UserAgent     string
+	Success       bool
+	Error         string
+	Timestamp     time.Time
+	Meta          map[string]any
 }
 
 // TelemetryStore persists auth telemetry events.
@@ -26,10 +40,16 @@ type TelemetryStore interface {
 	Query(ctx context.Context, filter TelemetryFilter) ([]TelemetryEvent, error)
 }
 
-// TelemetryFilter restricts query results.
+// TelemetryFilter restricts query results: the reference's TelemetryFilter
+// (telemetry-store.interface.ts:30-39).
+//
+// SessionID is the reference's `sessionId` (:34), added with the field it
+// filters on. The reference's `offset` still has no counterpart here, which
+// predates this change and is a gap rather than a decision.
 type TelemetryFilter struct {
 	UserID    string
 	TenantID  string
+	SessionID string
 	EventName string
 	Since     time.Time
 	Until     time.Time
@@ -63,6 +83,9 @@ func (m *MemoryTelemetryStore) Query(_ context.Context, f TelemetryFilter) ([]Te
 			continue
 		}
 		if f.TenantID != "" && e.TenantID != f.TenantID {
+			continue
+		}
+		if f.SessionID != "" && e.SessionID != f.SessionID {
 			continue
 		}
 		if f.EventName != "" && e.EventName != f.EventName {

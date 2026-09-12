@@ -202,8 +202,16 @@ func (a *Adapter) mountCredentialRoutes(mux *http.ServeMux, prefix string) {
 // when the provider is not configured: the reference swaps in bare 404 stubs
 // carrying no rl (:1361-1362, :1407-1408) where this port keeps the guarded
 // handler and decides inside it. See auth.HTTPConfig.RateLimiter.
+// guard is the outer chain every auth route carries: the event-context carrier
+// outermost, then the rate-limiter slot, then the CSRF middleware.
+//
+// auth.EventContextMiddleware goes first because it cannot refuse a request and
+// because the two middlewares after it can — a limiter or a CSRF check that
+// answers is host-reachable code, and it should find the correlation id already
+// installed. See that function for the rest of the reasoning, and
+// auth.HTTPConfig.RateLimiter for why the other two are in this order.
 func (a *Adapter) guard(h http.Handler) http.Handler {
-	return auth.RateLimitMiddleware(a.cfg)(auth.CSRFMiddleware(a.cfg)(h))
+	return auth.EventContextMiddleware(a.cfg)(auth.RateLimitMiddleware(a.cfg)(auth.CSRFMiddleware(a.cfg)(h)))
 }
 
 type registerRequest struct {

@@ -58,6 +58,7 @@ var wantDeviationIDs = []string{
 	"cookie-max-age-follows-configured-ttl",
 	"csrf-cookie-not-reissued-with-tokens",
 	"docs-routes-are-opt-in",
+	"event-handler-panic-does-not-fail-the-publisher",
 	"forgot-password-succeeds-on-delivery-failure",
 	"jwks-cors-wildcard-string-form",
 	"jwks-unknown-kid-refetch-is-rate-limited",
@@ -135,6 +136,16 @@ var wantClaims = map[string][]string{
 	},
 	"register-route-is-always-mounted": {
 		"features.register", "onRegister", "404", "Service.Register",
+	},
+	// Both halves of the difference — what the reference does to the request and
+	// what this port does to the remaining handlers — plus the mechanism that
+	// causes it, because "EventEmitter" is the fact that makes the reference's
+	// behaviour checkable rather than asserted. An entry that kept the recover
+	// and lost the 500 would read as an implementation note about Go instead of
+	// a difference a subscriber can observe.
+	"event-handler-panic-does-not-fail-the-publisher": {
+		"EventEmitter", "recover", "500", "EventBus.Publish",
+		"remaining handlers", "goroutine",
 	},
 }
 

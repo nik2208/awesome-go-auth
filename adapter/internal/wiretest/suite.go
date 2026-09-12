@@ -81,6 +81,7 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("ResourceServerGating", func(t *testing.T) { testResourceServerGating(t, mount) })
 	t.Run("OpenAPI", func(t *testing.T) { testOpenAPI(t, mount) })
 	t.Run("RateLimit", func(t *testing.T) { testRateLimit(t, mount) })
+	t.Run("EventContext", func(t *testing.T) { testEventContext(t, mount) })
 	t.Run("Docs", func(t *testing.T) { testDocs(t, mount) })
 }
 
