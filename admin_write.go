@@ -44,6 +44,21 @@ import (
 // nothing here is attributed — an admin console that deletes a user records no
 // actor, on both sides.
 //
+// # Two of the sixteen publish
+//
+// The two user↔role routes raise identity.role.assigned and
+// identity.role.revoked (node-auth admin.router.ts:1002, :1020). The other
+// fourteen raise nothing, and that is the dev line's map rather than an
+// omission: no admin route publishes a user deleted, a session revoked, a
+// tenant created or a role defined, although the names for all four are
+// declared. event_publication_test.go pins the whole map.
+//
+// Both go through (*Auth).publishAdminEvent, which is why these two handlers
+// take an HTTPConfig the other fourteen do not: the console sits outside
+// EventContextMiddleware on both lines, so the request provenance is read off
+// the request at the publication site the way the dev line's own
+// publishAdminEvent reads it. That function carries the whole argument.
+//
 // # Existence, and what these routes do not check
 //
 // Not one of the six deletes looks the row up first, and not one answers 404 for
@@ -219,7 +234,7 @@ func (a *Auth) adminWriteRegistered(route adminWriteRoute) bool {
 // serveAdminWrite dispatches one classified write. It runs behind Protect, so
 // everything below may assume an authorised caller and nothing below may assume
 // an identified one.
-func (a *Auth) serveAdminWrite(w http.ResponseWriter, r *http.Request, route adminWriteRoute, params adminWriteParams) {
+func (a *Auth) serveAdminWrite(w http.ResponseWriter, r *http.Request, cfg HTTPConfig, route adminWriteRoute, params adminWriteParams) {
 	switch route {
 	case adminWriteDeleteUser:
 		a.adminDeleteUser(w, r, params.ID)
@@ -228,9 +243,9 @@ func (a *Auth) serveAdminWrite(w http.ResponseWriter, r *http.Request, route adm
 	case adminWriteUserMetadata:
 		a.adminUpdateUserMetadata(w, r, params.ID)
 	case adminWriteAddUserRole:
-		a.adminAddUserRole(w, r, params.ID)
+		a.adminAddUserRole(w, r, cfg, params.ID)
 	case adminWriteRemoveUserRole:
-		a.adminRemoveUserRole(w, r, params.ID, params.Sub)
+		a.adminRemoveUserRole(w, r, cfg, params.ID, params.Sub)
 	case adminWriteSettings:
 		a.adminUpdateSettings(w, r)
 	case adminWriteSettingsUI:
@@ -465,7 +480,17 @@ func (a *Auth) adminUpdateUserMetadata(w http.ResponseWriter, r *http.Request, i
 // The user id is used as Express decoded it and is not decoded a second time,
 // unlike the role name of the delete below. The asymmetry is the reference's:
 // :909 passes req.params['id'] straight through.
-func (a *Auth) adminAddUserRole(w http.ResponseWriter, r *http.Request, id string) {
+//
+// It publishes identity.role.assigned after the store call and before the
+// answer (node-auth admin.router.ts:1002-1006), and it is the single
+// publication point in either tree that passes a tenant id — the one off the
+// body, not off the path, so an assignment made without a tenantId publishes
+// without one. `data` is {role} alone: the tenant rides on the event's own
+// field. The publish is inside the reference's try, where a throw would be the
+// flat 500; nothing here can throw, because a panicking subscriber is contained
+// by the bus (see the event-handler-panic-does-not-fail-the-publisher
+// deviation).
+func (a *Auth) adminAddUserRole(w http.ResponseWriter, r *http.Request, cfg HTTPConfig, id string) {
 	if a.service.rbac == nil {
 		writeAdminError(w, http.StatusNotFound, "RBAC store not configured")
 		return
@@ -483,6 +508,14 @@ func (a *Auth) adminAddUserRole(w http.ResponseWriter, r *http.Request, id strin
 		writeAdminError(w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
+	a.publishAdminEvent(r, cfg, func() Event {
+		return Event{
+			Name:     EventRoleAssigned,
+			UserID:   id,
+			TenantID: body.TenantID,
+			Data:     map[string]any{"role": body.Role},
+		}
+	})
 	writeAdminSuccess(w)
 }
 
@@ -499,8 +532,15 @@ func (a *Auth) adminAddUserRole(w http.ResponseWriter, r *http.Request, id strin
 // There is no tenant: the reference's removeRoleFromUser(id, role) carries none,
 // so this removes the untenanted assignment and leaves a tenanted one in place —
 // the same tenant the read route reports, and *not* necessarily the one the post
-// above created.
-func (a *Auth) adminRemoveUserRole(w http.ResponseWriter, r *http.Request, id, rawRole string) {
+// above created. The identity.role.revoked it publishes carries none either
+// (node-auth admin.router.ts:1020-1023), which is the asymmetry with the post
+// above showing up a second time, on the event this time.
+//
+// `data["role"]` is the *decoded* name — the value handed to the store, not the
+// path segment — so a subscriber sees the role that was actually removed. The
+// publish is after the store call, so a role that could not be decoded has
+// already answered 500 and published nothing.
+func (a *Auth) adminRemoveUserRole(w http.ResponseWriter, r *http.Request, cfg HTTPConfig, id, rawRole string) {
 	if a.service.rbac == nil {
 		writeAdminError(w, http.StatusNotFound, "RBAC store not configured")
 		return
@@ -513,6 +553,9 @@ func (a *Auth) adminRemoveUserRole(w http.ResponseWriter, r *http.Request, id, r
 		writeAdminError(w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
+	a.publishAdminEvent(r, cfg, func() Event {
+		return Event{Name: EventRoleRevoked, UserID: id, Data: map[string]any{"role": role}}
+	})
 	writeAdminSuccess(w)
 }
 

@@ -212,6 +212,9 @@ func testAdmin(t *testing.T, mount Mounter) {
 	t.Run("Credentials", func(t *testing.T) { testAdminCredentials(t, mount) })
 	t.Run("Uploads", func(t *testing.T) { testAdminUploads(t, mount) })
 	t.Run("Docs", func(t *testing.T) { testAdminDocs(t, mount) })
+	t.Run("Promote", func(t *testing.T) { testAdminPromote(t, mount) })
+	t.Run("RouteSet", func(t *testing.T) { testAdminRouteSet(t, mount) })
+	t.Run("DocumentSet", func(t *testing.T) { testAdminDocumentSet(t, mount) })
 }
 
 // adminRoute is one method-and-path pair. The reads could be a bare path list
@@ -284,6 +287,24 @@ var adminDocsRoutes = []adminRoute{
 	{http.MethodGet, auth.AdminDocsPath},
 }
 
+// adminPromoteRoutes is U16's one route, and it is a family of its own for a
+// reason no other table here has: it is the only route on this surface that is
+// not under /api. `router.post('/users/:id/promote', …)` (node-auth
+// admin.router.ts:1030) — registered between two /api/users routes and missing
+// the prefix all fifty of its siblings carry. Reproduced as written; see
+// auth.AdminPromoteUsersPath.
+//
+// It is also the only route in any of these tables that the *published*
+// reference does not register at all. See testAdminPromote.
+var adminPromoteRoutes = []adminRoute{
+	{http.MethodPost, adminPromotePath("a-user")},
+}
+
+// adminPromotePath builds the one promote path for a user id.
+func adminPromotePath(id string) string {
+	return auth.AdminPromoteUsersPath + "/" + id + auth.AdminPromoteSuffix
+}
+
 // adminAllRoutes is every route the console mounts, whatever PR added it. The
 // not-mounted direction walks this: a surface that is not configured must answer
 // 404 on all of it, and a route added to a later PR's table joins that sweep
@@ -291,7 +312,7 @@ var adminDocsRoutes = []adminRoute{
 func adminAllRoutes() []adminRoute {
 	routes := make([]adminRoute, 0,
 		len(adminPaths)+len(adminReadPaths)+len(adminWritePaths)+len(adminCredentialPaths)+
-			len(adminUploadRoutes)+len(adminDocsRoutes))
+			len(adminUploadRoutes)+len(adminPromoteRoutes)+len(adminDocsRoutes))
 	for path, method := range adminPaths {
 		routes = append(routes, adminRoute{method, path})
 	}
@@ -301,6 +322,7 @@ func adminAllRoutes() []adminRoute {
 	routes = append(routes, adminWritePaths...)
 	routes = append(routes, adminCredentialPaths...)
 	routes = append(routes, adminUploadRoutes...)
+	routes = append(routes, adminPromoteRoutes...)
 	return append(routes, adminDocsRoutes...)
 }
 

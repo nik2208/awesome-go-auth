@@ -43,7 +43,14 @@ import (
 // RateLimitMiddleware, no EventContextMiddleware. All three are the auth
 // router's, applied by (*Adapter).guard to the routes registered after the
 // reference's router-level auto-init (auth.router.ts:529-538); the admin router
-// is a different router and carries none of them. Reproducing that is also what
+// is a different router and carries none of them.
+//
+// Two of the three have since acquired an answer of this router's own, and
+// neither is the auth router's middleware moving over. AdminOptions.RateLimiter
+// is a second, separate slot spread onto one route (U16); and the event context
+// the middleware would have carried is read off the request at the publication
+// site instead, by (*Auth).publishAdminEvent, which is where the dev line's own
+// publishAdminEvent reads it. Reproducing that is also what
 // keeps the vendored admin.js working — it posts to <admin>/login as JSON with
 // credentials: 'include' and no CSRF header (admin.js doLogin), so a
 // double-submit check here would refuse every login the shipped SPA makes.
@@ -309,6 +316,42 @@ type AdminOptions struct {
 	// default here where the reference's is on outside production. That default
 	// is the docs-routes-are-opt-in deviation, which this pair now shares.
 	Docs DocsOptions
+	// RateLimiter is the console's own limiter slot, separate from
+	// HTTPConfig.RateLimiter and applied to **exactly one route**: POST
+	// <admin>/users/{id}/promote. nil — the default — means no limiter, which is
+	// the reference's own default: it collapses the option to an empty
+	// middleware list when it is absent (node-auth admin.router.ts:577) and
+	// ships no algorithm of its own.
+	//
+	// One route is not an oversight to improve on. The dev line spreads
+	// `...rateLimiter` onto the promote route and onto nothing else (node-auth
+	// admin.router.ts:1030, the option at :205-211), and the route it does not
+	// cover is the one a reader will assume it covers: the admin login
+	// (node-auth admin.router.ts:614) is deliberately not rate limited on either
+	// line, and neither is any other route on this surface. A field documented
+	// as "the admin limiter" would say the opposite of that while being true of
+	// one route, which is why this field is worded the way it is and why U12
+	// left the slot out until the route it applies to existed.
+	//
+	// It runs before the guard, reproducing the spread's order at :1030 —
+	// `...rateLimiter, guard`. So a caller over the limit is refused without a
+	// token being verified, a store being read or a policy being evaluated, and
+	// is refused whether or not it holds an admin credential, which is what
+	// makes the slot worth anything against an unauthenticated flood. It is the
+	// same ordering rule HTTPConfig.RateLimiter states for the auth router.
+	//
+	// Like that field it is a constructor called once at mount time and not a
+	// handler, so whatever the limiter counts with must be created outside the
+	// function and captured by it. Here that matters less — one route, one call
+	// — but a host that passes the same limiter to this slot and to
+	// HTTPConfig.RateLimiter gets one shared budget, which is what passing one
+	// Express handler instance to both options gives there.
+	//
+	// This is a development-line option: at ReferenceRevision AdminOptions has
+	// no rateLimiter at all (admin.router.ts:44-186). See the
+	// admin-promote-route-comes-from-the-development-line deviation, which
+	// covers the route and this slot together.
+	RateLimiter func(http.Handler) http.Handler
 }
 
 // AdminPath is AdminOptions.Path resolved: the configured value normalised the
@@ -903,7 +946,7 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 	// two layers over one path.
 	writes := guard.Protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		route, params := matchAdminWrite(r.Method, adminRelativePath(r.URL.EscapedPath(), cfg.AdminPath()))
-		a.serveAdminWrite(w, r, route, params)
+		a.serveAdminWrite(w, r, cfg, route, params)
 	}))
 
 	// U14b's credential surface — the API-key and webhook routes — behind the
@@ -922,6 +965,20 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		route, param := matchAdminUpload(r.Method, adminRelativePath(r.URL.EscapedPath(), cfg.AdminPath()))
 		a.serveAdminUpload(w, r, cfg, route, param)
 	}))
+
+	// U16's one route, and the only place on this surface where something stands
+	// in front of the guard rather than behind it. The dev line spreads
+	// `...rateLimiter, guard` in that order (node-auth admin.router.ts:1030), so
+	// the limiter is the outer wrapper here: a caller over the limit is refused
+	// before any token is read. With AdminOptions.RateLimiter unset this is
+	// Protect alone, which is the reference's empty middleware list (:577).
+	var promote http.Handler = guard.Protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, _ := matchAdminPromote(r.Method, adminRelativePath(r.URL.EscapedPath(), cfg.AdminPath()))
+		a.adminPromoteUser(w, r, cfg, id)
+	}))
+	if cfg.Admin.RateLimiter != nil {
+		promote = cfg.Admin.RateLimiter(promote)
+	}
 
 	// The console's own documentation pair, built once and both nil when
 	// AdminOptions.Docs.Enabled is unset, which is how the reference registers
@@ -953,6 +1010,7 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		write, _ := matchAdminWrite(r.Method, escaped)
 		credential, _ := matchAdminCredential(r.Method, escaped)
 		upload, _ := matchAdminUpload(r.Method, escaped)
+		_, promotes := matchAdminPromote(r.Method, escaped)
 		switch {
 		case rel == AdminLoginPath && r.Method == http.MethodPost:
 			if !guard.LoginRoutesMounted() {
@@ -995,6 +1053,17 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		// way GET /api/templates/* does without a TemplateStore.
 		case a.adminUploadRegistered(upload):
 			uploads.ServeHTTP(w, r)
+		// The promote route, registered unconditionally as the reference
+		// registers it: without an RBAC store it answers its own 404 and without
+		// an IsAdmin writer its own 501, rather than not existing.
+		//
+		// Its position in this switch is not load-bearing, where in Express it
+		// would be: these cases are a disjoint classification of the path, not a
+		// chain of patterns tried in order, and /users/{id}/promote overlaps
+		// nothing — it is the one route on this surface not under /api. The
+		// reference registers it at :1030, among the role routes.
+		case promotes:
+			promote.ServeHTTP(w, r)
 		// The documentation pair last, as the reference registers it last, and
 		// unguarded, as the reference registers it.
 		case spec != nil && rel == AdminOpenAPIPath && isAdminRead(r):
@@ -1092,12 +1161,13 @@ func (g *AdminGuard) shellHandler() http.Handler {
 // What it does not have is worth stating, because all three are the
 // reference's and all three are visible to a reviewer here:
 //
-//   - No rate limiting of its own. HTTPConfig.RateLimiter is the auth router's
-//     slot and is not applied to this router; the family's private development
-//     line carries a second slot on its admin router and spreads it onto one
-//     route, which is not this one (node-auth admin.router.ts:211, :614,
-//     :1030). A deployment that wants this route limited wraps the handler the
-//     adapter mounts.
+//   - No rate limiting of its own, and this is now a statement about two slots
+//     rather than one. HTTPConfig.RateLimiter is the auth router's and is not
+//     applied to this router; AdminOptions.RateLimiter is this router's and is
+//     spread onto exactly one route, which is not this one (node-auth
+//     admin.router.ts:205-211, :614, :1030). So the console's login is
+//     unlimited on both lines, whatever a host configures, and a deployment
+//     that wants it limited wraps the handler the adapter mounts.
 //   - No password policy. Config.MinPasswordLen governs registration and the
 //     reset and change routes; nothing here consults it, because nothing here
 //     sets a password.
@@ -1205,6 +1275,68 @@ func (g *AdminGuard) adminLogout(w http.ResponseWriter, _ *http.Request) {
 // `{error: string}` and not the auth router's HTTPError shape.
 func writeAdminError(w http.ResponseWriter, status int, message string) {
 	WriteJSON(w, status, map[string]string{"error": message})
+}
+
+// ── events ───────────────────────────────────────────────────────────────────
+
+// publishAdminEvent raises the event build returns on Config.Events, carrying
+// the provenance of the request being served, and does nothing whatever when no
+// bus is configured.
+//
+// It is the port of the dev line's publishAdminEvent (node-auth
+// admin.router.ts:234-251) and it answers the question U12 left open — "U18
+// adding admin events will need to say how event context reaches admin routes".
+//
+// # The answer: off the request, here, and not from a middleware
+//
+// The auth router's publishers are Service methods, whose only handle on the
+// request is a context.Context, so U18 split the read from the use:
+// EventContextMiddleware reads the three values once per request and
+// EventBus.PublishContext uses them (event_context.go). All four adapters
+// install that middleware — and all four deliberately do **not** wrap the admin
+// console in it, for the reason at the top of this file: the admin router is a
+// separate Express router on both lines, outside the auth router's CSRF, rate
+// limiter and, with it, the carrier.
+//
+// That is not a hole to patch. The dev line reaches the same three values on
+// this surface *without* a middleware, because its publisher has the request:
+// publishAdminEvent's third parameter is the Express `req` and it calls
+// getRequestEventContext(req) at publish time (node-auth admin.router.ts:245),
+// from a copy of the function the auth router uses, byte for byte. This does
+// exactly that — EventContextFromRequest is the port of that function — and
+// installs the result on the context it publishes through, so the admin sites
+// and the nineteen auth sites reach EventBus.PublishContext by the same door
+// and an Event is assembled in one place rather than two.
+//
+// Nothing is lost by not being inside the middleware. The three values are read
+// from the same two headers and resolved through the same HTTPConfig.ClientIP
+// seam; the only difference is that they are read per published event rather
+// than per request, and the admin router publishes at most once per request.
+// Adding EventContextMiddleware around the admin mount instead would have meant
+// four adapter changes to move a read that has to happen anyway, and would have
+// put the console inside a chain this package has twice said it is outside of.
+// A host that mounts AdminHandler itself, with no adapter at all, gets the
+// provenance either way.
+//
+// The request is read every time, and a carrier already on the context is
+// replaced rather than merged with. That is the dev line's rule and not a
+// preference: its publishAdminEvent consults nothing but the request, so a
+// value some outer middleware computed differently would not reach the payload
+// there either. A host that wraps the console in EventContextMiddleware of its
+// own therefore changes nothing — the middleware and this read the same headers
+// through the same HTTPConfig — and a host that wants a *different* correlation
+// id publishes its own event on its own bus.
+//
+// The parameter is a builder for Service.publish's reason: most deployments
+// subscribe to nothing, and the payload — an Event holding a map literal —
+// should not be built to be thrown away. The nil-bus path allocates nothing.
+func (a *Auth) publishAdminEvent(r *http.Request, cfg HTTPConfig, build func() Event) {
+	bus := a.service.cfg.Events
+	if bus == nil {
+		return
+	}
+	ctx := ContextWithEventContext(r.Context(), EventContextFromRequest(r, cfg))
+	bus.PublishContext(ctx, build())
 }
 
 // ── the shell ────────────────────────────────────────────────────────────────

@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`POST <admin>/users/{id}/promote`, and the admin surface closed at fifty-one
+  routes** (`admin_promote.go`). The console's last route, and the one that
+  grants the console: `{method?: 'flag' | 'role'}` defaulting to `'role'`.
+  `method=flag` writes `User.IsAdmin` through the new `UserAdminFlagStore` seam
+  — a narrow interface the core type-asserts, the way `UserTwoFactorPolicyStore`
+  is — and answers the reference's
+  `501 {"error": "IUserStore.update is required for method=flag"}` without one.
+  `method=role` creates an `admin` role and assigns it, `404` without an RBAC
+  store. Both answer `{"success": true, "method": <as sent>}` and publish
+  `identity.role.assigned`.
+  **It comes from the private development line, not the published reference**,
+  which registers fifty admin routes and none of them this one — registered as
+  `admin.router.ts:1030` there, and **not under `/api`**, unlike its fifty
+  siblings. Reproduced as written; `POST <admin>/api/users/{id}/promote` is
+  mounted nowhere. See the new
+  `admin-promote-route-comes-from-the-development-line` deviation.
+  **`AdminOptions.RateLimiter`** arrives with it: a second limiter slot, separate
+  from `HTTPConfig.RateLimiter`, wrapping this route and no other and running
+  *ahead* of the guard. The console's own login is deliberately unlimited on
+  both lines.
+  **The conformance set is closed.** `adapter/internal/wiretest/admin_promote.go`
+  transcribes the development line's fifty-one route registrations line by line
+  and asserts that the mounted set is exactly that — no route mounted that the
+  source does not register, none registered that no family table mounts, each
+  one probed against a real adapter mount, and the near misses refused.
+- **The admin console publishes its four events** (`admin.go`,
+  `admin_write.go`). `POST <admin>/api/users/{id}/roles` and
+  `DELETE <admin>/api/users/{id}/roles/{role}` — mounted silent by U14 — now
+  raise `identity.role.assigned` and `identity.role.revoked` beside the promote
+  route's pair, which is all four of the development line's `publishAdminEvent`
+  calls. U18's arithmetic moves from 19 + 7 = 26 to **23 + 3 = 26**; the three
+  that remain are its `AuthConfigurator`, which this port has no counterpart for.
+  **How event context reaches admin routes** — the question U12 left open — is
+  answered by `(*Auth).publishAdminEvent`: the console sits outside
+  `EventContextMiddleware` on both lines, so the correlation id, client address
+  and user agent are read off the request at the publication site, which is
+  exactly what the source's own `publishAdminEvent` does. No adapter changed.
 - **The admin console's uploads, behind a store seam** (`upload_store.go`,
   `admin_upload.go`). `POST <admin>/api/upload/logo`,
   `POST <admin>/api/upload/bg-image`, `GET <admin>/api/upload/files` and

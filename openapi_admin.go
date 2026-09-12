@@ -25,6 +25,12 @@ import "net/http"
 //   - GET /api/actions, the two template routes and — the one a reader of this
 //     PR will look for — all four upload routes are absent. There is no flag for
 //     any of them.
+//   - POST <admin>/users/{id}/promote is absent, and the dev line's generator
+//     does not describe it either: the route exists only there and the document
+//     was never taught about it. So the one route on this surface that grants
+//     the admin console is the one route a reader of the document will not find
+//     — stated here because it is the least defensible of the omissions and it
+//     is reproduced anyway, for the reason the others are.
 //   - hasUi describes two paths this router has never served: /api/ui-settings
 //     and /api/ui/logo, where the real routes are PATCH /api/settings/ui and
 //     POST /api/upload/logo. Nothing sets that flag — createAdminRouter passes

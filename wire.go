@@ -497,17 +497,18 @@ type HTTPConfig struct {
 	// the single shared one the reference gets from passing one Express handler
 	// instance to every route.
 	//
-	// Note for the admin router when it lands: the family's private development
-	// line carries a second, separate slot on its admin router
-	// (AdminOptions.rateLimiter, admin.router.ts:211, collapsed to an empty
-	// list the same way at :577) and spreads it onto exactly one route, POST
-	// /users/:id/promote (:1030); its admin login route (:614) carries none.
-	// That path is relative to the admin router's own mount, which the host app
-	// chooses and which defaults to /admin (admin.router.ts:190,
-	// openapi.ts:674) — not to APIPrefix. These line numbers are in that
-	// private tree and do not resolve against ReferenceRevision, which carries
-	// no admin rateLimiter at all. No admin route exists here yet, so nothing
-	// below implements that half.
+	// The admin console has a slot of its own and this is not it. The family's
+	// private development line carries a second, separate option on its admin
+	// router (AdminOptions.rateLimiter, node-auth admin.router.ts:205-211,
+	// collapsed to an empty list the same way at :577) and spreads it onto
+	// exactly one route, POST /users/:id/promote (:1030); its admin login route
+	// (:614) carries none. That path is relative to the admin router's own
+	// mount, which the host app chooses and which defaults to /admin
+	// (admin.router.ts:190, openapi.ts:674) — not to APIPrefix. Those line
+	// numbers are in that private tree and do not resolve against
+	// ReferenceRevision, which carries no admin rateLimiter at all. U16 ported
+	// the route and the slot together: see AdminOptions.RateLimiter. This field
+	// is untouched by it and covers no admin route.
 	RateLimiter func(http.Handler) http.Handler
 
 	// ClientIP resolves the address an event's IP field records, and it is this

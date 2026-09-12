@@ -159,9 +159,13 @@ const (
 	// router (node-auth admin.router.ts:1002, :1041, :1055) and two in the
 	// configurator's promoteToAdmin (node-auth auth-configurator.ts:92, :104) —
 	// and two raise the second (node-auth admin.router.ts:1020,
-	// auth-configurator.ts:133). None of those seven sites exists in this port
-	// yet: the admin router is M8's and the configurator has no counterpart, so
-	// they are the part of U18's twenty-six that U18 cannot reach.
+	// auth-configurator.ts:133). The four admin-router sites are this port's as
+	// of M8: POST <admin>/api/users/{id}/roles, DELETE
+	// <admin>/api/users/{id}/roles/{role} and both branches of POST
+	// <admin>/users/{id}/promote. The three configurator sites have no
+	// counterpart here and are the remainder of U18's twenty-six that U18 could
+	// not reach — AuthConfigurator is the dev line's imperative facade over its
+	// routers, and this port's facade is Auth, whose surface is the routes.
 	//
 	// node-auth admin.router.ts:1002 is also the single publication point in the
 	// whole of the dev line that passes a tenant id. Every other one leaves
