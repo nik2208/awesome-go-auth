@@ -29,19 +29,30 @@ import (
 // trusted, so a reader who checks the published tree and finds no publisher has
 // checked the right file in the wrong tree.
 //
-// The arithmetic this file exists to make machine-checked is 19 + 7 = 26.
-// Twenty-six publication points; nineteen in the dev line's auth router, which
-// this port has; seven in its admin router and its configurator, which this
-// port does not. The plan asks for "26 publication points out of 26 exercised
-// by the tests", and a comment claiming that is worth nothing — the interesting
-// failure is not a site that stops publishing, which any assertion catches, but
-// a site quietly reclassified as unreachable the first time it is inconvenient.
+// The arithmetic this file exists to make machine-checked was 19 + 7 = 26 when
+// U18 wrote it, and M8 has moved it to 23 + 3 = 26. Twenty-six publication
+// points; nineteen in the dev line's auth router and four in its admin router,
+// both of which this port now has; three in its configurator, which it does
+// not and will not. The plan asks for "26 publication points out of 26
+// exercised by the tests", and a comment claiming that is worth nothing — the
+// interesting failure is not a site that stops publishing, which any assertion
+// catches, but a site quietly reclassified as unreachable the first time it is
+// inconvenient.
+//
 // TestPublicationSiteReachabilityFollowsTheFile is what makes that impossible:
 // reachability is not a field an editor may set as they please, it is a
 // function of which dev-line FILE the citation names, and the table has to
 // agree with the file or the test fails. Marking a live auth.router.ts site
-// unreachable to silence it fails; claiming an admin router publication this
+// unreachable to silence it fails; claiming a configurator publication this
 // port does not have fails too.
+//
+// That per-file grain is why U16 could not port two of admin.router.ts's four
+// sites and leave the other two alone. Making the promote pair reachable means
+// saying this port has that file, and saying so obliges the role pair beside
+// them — which U14 mounted as routes and left silent — to publish as well. The
+// invariant did its job: it turned "add the two events my PR needs" into "port
+// the file's publication points", which is the only version of that claim a
+// reader can check.
 //
 // The table is declarative on purpose. Exercise drives the port and asserts
 // nothing about events; what the payload has to be is data. That split is what
@@ -74,6 +85,13 @@ type publicationSite struct {
 	// the eight sites that follow an issueTokens carry a session.
 	WantUserID    bool
 	WantSessionID bool
+	// WantTenantID is whether the payload names a tenant, and it is true at
+	// exactly one of the twenty-six: node-auth admin.router.ts:1002, which reads
+	// a tenantId off the request body. U18 could assert "no reachable site fills
+	// this in" because that one was out of reach; now that it is reachable the
+	// claim has to be per-site, and TestExactlyOneSitePassesATenant keeps it
+	// from becoming per-site in the wrong direction.
+	WantTenantID bool
 	// Exercise drives this port to the point the dev line publishes. It is
 	// non-nil exactly for the reachable sites, and it asserts only on what the
 	// port returned — never on what was published, so that the same function can
@@ -395,42 +413,85 @@ func publicationSites() []publicationSite {
 			},
 		},
 
-		// ── node-auth src/router/admin.router.ts: the four out of reach ──────
+		// ── node-auth src/router/admin.router.ts: the four M8 brought in reach ──
+		//
+		// These four are driven over HTTP and the nineteen above are not, and
+		// that is the substance rather than an inconvenience. The nineteen
+		// publish from Service methods, which receive the request provenance on
+		// a context an adapter's EventContextMiddleware installed; the admin
+		// console is outside that middleware on both lines, so its four read the
+		// request at the publication site instead — the dev line's
+		// publishAdminEvent calling getRequestEventContext(req), ported as
+		// (*Auth).publishAdminEvent. adminEventFixture.do sends the three
+		// harness values as a header, a header and a socket address, so the
+		// provenance assertion in TestEveryReachableSitePublishes is checking
+		// that path end to end and not a context the test installed itself.
 
 		// This is also the single publication point in the whole of the dev line
-		// that passes a tenant id, which is why every reachable site above leaves
-		// Event.TenantID empty and why TestEveryReachableSitePublishes can assert
-		// that for all nineteen without exception.
+		// that passes a tenant id, and it reads it off the request *body* — so
+		// the exercise sends one, and WantTenantID is true here and nowhere else.
 		{
-			Citation: "node-auth admin.router.ts:1002", Route: "POST <prefix>/admin/api/users/:id/roles",
+			Citation: "node-auth admin.router.ts:1002", Route: "POST <admin>/api/users/:id/roles",
 			Event: EventRoleAssigned, DataKeys: []string{"role"},
-			WantUserID: true, WantSessionID: false,
-			Unreachable: "this port has no admin router: no route assigns a role over HTTP, and " +
-				"Service.AssignRole is the store call underneath one rather than the route itself",
-			Milestone: "M8 (the admin router)",
+			DataValues: map[string]any{"role": "editor"},
+			WantUserID: true, WantSessionID: false, WantTenantID: true,
+			Exercise: func(t *testing.T, h *eventHarness) {
+				f := h.admin(t)
+				// The role has to exist first: MemoryRolesPermissionsStore
+				// refuses an assignment naming a role it does not hold, which is
+				// the same rule that makes the promote route's createRole call
+				// load-bearing rather than decorative. POST /api/roles publishes
+				// nothing, and the reset below makes that assertable.
+				f.do(t, http.MethodPost, AdminRolesPath, `{"name": "editor"}`)
+				h.reset()
+				f.do(t, http.MethodPost, "/api/users/role-target/roles",
+					`{"role": "editor", "tenantId": "`+harnessTenant+`"}`)
+			},
+			// The tenant is the body's and not the path's: this route has no
+			// tenant in its pattern at all.
+			Assert: func(t *testing.T, ev Event) {
+				if ev.TenantID != harnessTenant {
+					t.Fatalf("TenantID = %q, want the tenantId the body carried (%q)", ev.TenantID, harnessTenant)
+				}
+			},
 		},
 		{
-			Citation: "node-auth admin.router.ts:1020", Route: "DELETE <prefix>/admin/api/users/:id/roles/:role",
+			Citation: "node-auth admin.router.ts:1020", Route: "DELETE <admin>/api/users/:id/roles/:role",
 			Event: EventRoleRevoked, DataKeys: []string{"role"},
+			DataValues: map[string]any{"role": "editor"},
 			WantUserID: true, WantSessionID: false,
-			Unreachable: "this port has no admin router, and no Service method revokes a role at all — " +
-				"RolesPermissionsStore.RemoveRoleFromUser is reached only by DeleteAccount's cleanup, " +
-				"which the dev line does not publish from either",
-			Milestone: "M8 (the admin router)",
+			Exercise: func(t *testing.T, h *eventHarness) {
+				f := h.admin(t)
+				h.reset()
+				f.do(t, http.MethodDelete, "/api/users/role-target/roles/editor", "")
+			},
 		},
 		{
-			Citation: "node-auth admin.router.ts:1041", Route: "POST <prefix>/admin/api/users/:id/promote, method=flag",
+			Citation: "node-auth admin.router.ts:1041", Route: "POST <admin>/users/:id/promote, method=flag",
 			Event: EventRoleAssigned, DataKeys: []string{"role", "method"},
+			DataValues: map[string]any{"role": "admin", "method": adminPromoteMethodFlag},
 			WantUserID: true, WantSessionID: false,
-			Unreachable: "this port has no admin router and no promote route in either of its two forms",
-			Milestone:   "M8 (the admin router)",
+			Exercise: func(t *testing.T, h *eventHarness) {
+				f := h.admin(t)
+				// method=flag writes through the user store, so unlike the other
+				// three this one needs the row to exist — and in the empty
+				// tenant, because the route addresses it by id alone.
+				h.seedUntenanted(t, "promote-flag")
+				h.reset()
+				f.do(t, http.MethodPost, "/users/promote-flag/promote", `{"method": "flag"}`)
+			},
 		},
 		{
-			Citation: "node-auth admin.router.ts:1055", Route: "POST <prefix>/admin/api/users/:id/promote, method=role",
+			Citation: "node-auth admin.router.ts:1055", Route: "POST <admin>/users/:id/promote, method=role",
 			Event: EventRoleAssigned, DataKeys: []string{"role", "method"},
+			DataValues: map[string]any{"role": "admin", "method": adminPromoteMethodRole},
 			WantUserID: true, WantSessionID: false,
-			Unreachable: "this port has no admin router and no promote route in either of its two forms",
-			Milestone:   "M8 (the admin router)",
+			Exercise: func(t *testing.T, h *eventHarness) {
+				f := h.admin(t)
+				h.reset()
+				// No body at all, which is the branch an absent `method` takes.
+				f.do(t, http.MethodPost, "/users/promote-role/promote", "")
+			},
 		},
 
 		// ── node-auth src/auth-configurator.ts: the three with no counterpart ──
@@ -475,6 +536,12 @@ func publicationSites() []publicationSite {
 //	grep -c publishRouterEvent   node-auth/src/router/auth.router.ts   # 19 + 1 def
 //	grep -c publishAdminEvent    node-auth/src/router/admin.router.ts  #  4 + 1 def
 //	grep -c 'eventBus?.publish'  node-auth/src/auth-configurator.ts    #  3
+//
+// Two of the three are ported. The third will not be: AuthConfigurator is the
+// dev line's imperative facade over its routers — promoteToAdmin and
+// revokeAdmin, called by a host's own bootstrap code rather than by a request —
+// and this port's facade is Auth, whose surface is the routes. Its three sites
+// are unreachable permanently and say so.
 var devLineFiles = []struct {
 	file string
 	// sites is how many publication points the file holds.
@@ -483,12 +550,13 @@ var devLineFiles = []struct {
 	ported bool
 }{
 	{file: "node-auth auth.router.ts:", sites: 19, ported: true},
-	{file: "node-auth admin.router.ts:", sites: 4, ported: false},
+	{file: "node-auth admin.router.ts:", sites: 4, ported: true},
 	{file: "node-auth auth-configurator.ts:", sites: 3, ported: false},
 }
 
-// TestPublicationSiteCountIsTwentySix is the 19 + 7 = 26 the plan's definition
-// of done asks for, written as arithmetic rather than as a sentence.
+// TestPublicationSiteCountIsTwentySix is the 23 + 3 = 26 this milestone leaves
+// behind — U18's 19 + 7 with the admin router's four moved across — written as
+// arithmetic rather than as a sentence.
 func TestPublicationSiteCountIsTwentySix(t *testing.T) {
 	sites := publicationSites()
 	if len(sites) != 26 {
@@ -503,10 +571,11 @@ func TestPublicationSiteCountIsTwentySix(t *testing.T) {
 			unreachable++
 		}
 	}
-	if reachable != 19 || unreachable != 7 {
-		t.Errorf("reachable = %d and unreachable = %d, want 19 and 7. "+
+	if reachable != 23 || unreachable != 3 {
+		t.Errorf("reachable = %d and unreachable = %d, want 23 and 3. "+
 			"Moving a site between the two columns is a claim about which surfaces this port has; "+
-			"if one really has moved, the counts here and in devLineFiles move with it.",
+			"if one really has moved, the counts here and in devLineFiles move with it. "+
+			"The three that remain are the configurator's, which has no counterpart here at all.",
 			reachable, unreachable)
 	}
 
@@ -601,9 +670,9 @@ func TestPublicationSitesCiteTheDevLine(t *testing.T) {
 	}
 }
 
-// TestEveryReachableSitePublishes is the conformance test proper: nineteen of
-// nineteen, each driven to the point the dev line publishes and each checked
-// for the payload the dev line builds there.
+// TestEveryReachableSitePublishes is the conformance test proper: twenty-three
+// of twenty-three, each driven to the point the dev line publishes and each
+// checked for the payload the dev line builds there.
 func TestEveryReachableSitePublishes(t *testing.T) {
 	for _, site := range publicationSites() {
 		if !site.reachable() {
@@ -631,12 +700,13 @@ func TestEveryReachableSitePublishes(t *testing.T) {
 			if (ev.SessionID != "") != site.WantSessionID {
 				t.Errorf("SessionID = %q, want a session id: %v", ev.SessionID, site.WantSessionID)
 			}
-			// Exactly one site in the dev line passes a tenant id and it is in
-			// the admin router, out of reach here. A reachable site that filled
-			// this in would be improving on the source.
-			if ev.TenantID != "" {
-				t.Errorf("TenantID = %q, want empty: node-auth admin.router.ts:1002 is the only "+
-					"publication point in either tree that passes one, and it is not this one", ev.TenantID)
+			// Exactly one site in the dev line passes a tenant id, and now that
+			// it is reachable this is per-site rather than blanket. A site that
+			// filled it in anyway would be improving on the source.
+			if (ev.TenantID != "") != site.WantTenantID {
+				t.Errorf("TenantID = %q, want a tenant id: %v. node-auth admin.router.ts:1002 is the "+
+					"only publication point in either tree that passes one.",
+					ev.TenantID, site.WantTenantID)
 			}
 			if ev.Timestamp.IsZero() {
 				t.Error("Timestamp is zero: Publish fills it when the publisher leaves it unset")
@@ -659,10 +729,32 @@ func TestEveryReachableSitePublishes(t *testing.T) {
 	}
 }
 
-// TestEveryReachableSiteIsSilentWithoutABus runs the same nineteen exercises
-// against a deployment that configured no bus, which is the overwhelming
-// majority of them. Nothing may change: not the return values, and above all
-// not whether the call succeeds.
+// TestExactlyOneSitePassesATenant keeps WantTenantID from being set by anyone
+// who finds it convenient.
+//
+// It is a fact about the dev line, not a preference: one of the twenty-six
+// publication points reads a tenantId, off the body of POST
+// <admin>/api/users/:id/roles (node-auth admin.router.ts:1002-1006). Every
+// other site leaves the field empty, including the promote pair beside it,
+// whose route has no tenant anywhere — not in the pattern, not in the body, not
+// in the store call. A second site claiming a tenant is either a dev-line
+// change that moves this number, or a payload this port invented.
+func TestExactlyOneSitePassesATenant(t *testing.T) {
+	var withTenant []string
+	for _, s := range publicationSites() {
+		if s.WantTenantID {
+			withTenant = append(withTenant, s.Citation)
+		}
+	}
+	if len(withTenant) != 1 || withTenant[0] != "node-auth admin.router.ts:1002" {
+		t.Errorf("sites passing a tenant id = %v, want exactly [node-auth admin.router.ts:1002]", withTenant)
+	}
+}
+
+// TestEveryReachableSiteIsSilentWithoutABus runs the same twenty-three
+// exercises against a deployment that configured no bus, which is the
+// overwhelming majority of them. Nothing may change: not the return values, and
+// above all not whether the call succeeds.
 func TestEveryReachableSiteIsSilentWithoutABus(t *testing.T) {
 	for _, site := range publicationSites() {
 		if !site.reachable() {
@@ -882,7 +974,9 @@ func TestDeclaredButUnraisedNamesStayUnraised(t *testing.T) {
 	}
 	if got := h.events(); len(got) != 0 {
 		t.Fatalf("the tenant and role methods published %v, want nothing: no site in either tree "+
-			"raises identity.tenant.*, and the two identity.role.* sites are M8's",
+			"raises identity.tenant.*, and the identity.role.* sites are the admin router's four "+
+			"routes rather than these methods — Service.AssignRole is the store call underneath one "+
+			"of them, and a host calling it directly is not serving an admin request",
 			eventNamesOf(got))
 	}
 }
@@ -921,6 +1015,7 @@ type eventHarness struct {
 	got []Event
 
 	oauthFixture *oauthEventFixture
+	adminFixture *adminEventFixture
 }
 
 func newEventHarness(t *testing.T, tweaks ...func(*Config)) *eventHarness {
@@ -1064,6 +1159,91 @@ func (h *eventHarness) magicLinkToken(t *testing.T, email string) string {
 		t.Fatalf("send magic link = %q, %v", token, err)
 	}
 	return token
+}
+
+// seedUntenanted writes a user straight to the store in the empty tenant,
+// because that is the only tenant the admin console addresses: every write on
+// that surface passes "" where the reference's call passes no tenant at all.
+func (h *eventHarness) seedUntenanted(t *testing.T, id string) User {
+	t.Helper()
+	now := time.Now()
+	user, err := h.users.CreateUser(context.Background(), User{
+		ID: id, Email: id + "@example.com", TenantID: "",
+		IsEmailVerified: true, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("seed %q: %v", id, err)
+	}
+	return user
+}
+
+// ── the admin half of the harness ────────────────────────────────────────────
+
+// The four admin sites publish from HTTP handlers rather than from Service
+// methods, so exercising them needs the mounted console and a real request.
+//
+// That is not ceremony. The whole question U12 left for U18 — "how does event
+// context reach admin routes?" — is answered by (*Auth).publishAdminEvent
+// reading the request at publish time, because this surface is outside the
+// carrier middleware the nineteen auth sites rely on. A service-level exercise
+// could not tell that answer from a broken one: it would have to install the
+// carrier itself, which is precisely the thing that does not happen here.
+//
+// It is built here rather than borrowed from adapter/internal/wiretest for the
+// reason the OAuth fixture gives: that package is the adapters' shared suite
+// and cannot be imported from this one.
+type adminEventFixture struct {
+	auth    *Auth
+	handler http.Handler
+	mount   string
+}
+
+// admin builds the console lazily and reuses it, so the four sites share one
+// mount — and so that detachBus, which runs before any exercise, is already in
+// force when the Auth is constructed.
+func (h *eventHarness) admin(t *testing.T) *adminEventFixture {
+	t.Helper()
+	if h.adminFixture != nil {
+		return h.adminFixture
+	}
+	a, err := NewWithConfig(h.config(),
+		WithUserStore(h.users),
+		WithSessionStore(NewMemorySessionStore()),
+		WithRBACProvider(NewMemoryRolesPermissionsStore()),
+	)
+	if err != nil {
+		t.Fatalf("new auth with an admin console: %v", err)
+	}
+	cfg := DefaultHTTPConfig()
+	// AdminOpen so that no credential is needed: this file is about what is
+	// published, and who may reach the route is admin.go's suite.
+	cfg.Admin = AdminOptions{Enabled: true, AccessPolicy: AdminOpen()}
+	f := &adminEventFixture{auth: a, handler: a.AdminHandler(cfg), mount: cfg.AdminPath()}
+	h.adminFixture = f
+	return f
+}
+
+// do issues one admin request and fails unless it succeeded.
+//
+// The three harness values arrive the way a real caller's would — a
+// correlation header, a User-Agent header and a socket address — and not on a
+// context this test installed. So the provenance assertion in
+// TestEveryReachableSitePublishes is checking the whole path: a site that
+// published through EventBus.Publish, or that expected a carrier no adapter
+// installs on this surface, fails it on all three fields.
+func (f *adminEventFixture) do(t *testing.T, method, route, body string) {
+	t.Helper()
+	req := httptest.NewRequest(method, f.mount+route, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(CorrelationIDHeader, harnessCorrelationID)
+	req.Header.Set("User-Agent", harnessUserAgent)
+	req.RemoteAddr = harnessIP + ":51413"
+
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s %s = %d, want 200: %s", method, f.mount+route, rec.Code, rec.Body.String())
+	}
 }
 
 // ── the OAuth half of the harness ────────────────────────────────────────────

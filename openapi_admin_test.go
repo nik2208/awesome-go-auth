@@ -221,6 +221,9 @@ func TestAdminOpenAPIOmitsWhatTheReferenceOmits(t *testing.T) {
 
 	base := cfg.AdminDocsBasePath()
 	undocumented := map[string]string{
+		AdminPromoteUsersPath + "/{id}" + AdminPromoteSuffix: "the promote route, which the dev " +
+			"line's own generator does not describe either — so the one route that grants the " +
+			"admin console is the one route the document does not mention",
 		AdminShellPath:                  "the SPA shell",
 		AdminCSSPath:                    "a static asset",
 		AdminJSPath:                     "a static asset",

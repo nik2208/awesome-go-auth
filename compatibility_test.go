@@ -58,6 +58,7 @@ var wantDeviationIDs = []string{
 	"admin-credential-listings-are-ordered",
 	"admin-guard-accepts-only-typed-session-tokens",
 	"admin-listings-are-ordered-by-id",
+	"admin-promote-route-comes-from-the-development-line",
 	"admin-unauthenticated-get-serves-only-the-login-form",
 	"admin-upload-base-url-is-derived-from-the-mount",
 	"admin-upload-refusals-answer-the-admin-envelope",
@@ -214,6 +215,25 @@ var wantClaims = map[string][]string{
 		"PublishContext", "nineteen", "twenty-six", "AuthTools.track",
 		"nik2208/node-auth", "DevLineRevision", "Config.Events",
 		"nothing in the library publishes at all",
+		// M8's four. The entry has to keep naming the admin console as a
+		// publisher and the reason its provenance arrives by a different road,
+		// or the next reader concludes the console is silent — which it was
+		// until U16 and which is the state the wording described for five PRs.
+		"identity.role.assigned", "identity.role.revoked",
+		"publishAdminEvent", "EventContextMiddleware",
+	},
+	// The route's existence is the deviation, so the claims are the things that
+	// make it checkable against a tree that does not contain it: which tree it
+	// does come from, both method values and the answer each gives for the
+	// capability it needs, the path quirk a client will trip over, and the
+	// limiter slot that arrived with it. An entry reduced to "there is a promote
+	// route" would not let a reviewer tell a port from an invention.
+	"admin-promote-route-comes-from-the-development-line": {
+		"nik2208/node-auth", "fifty", "method", "flag", "role",
+		"IUserStore.update is required for method=flag", "RBAC store not configured",
+		"identity.role.assigned", "UserAdminFlagStore",
+		"AdminOptions.RateLimiter", "HTTPConfig.RateLimiter", "<admin>/login",
+		"not under `/api`",
 	},
 	// The wire fact (one session row per login rather than per refresh), the
 	// payload fact (the two ids are equal), the reference mechanism that makes

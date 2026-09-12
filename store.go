@@ -88,6 +88,55 @@ type UserTwoFactorPolicyStore interface {
 	UpdateRequire2FA(ctx context.Context, userID, tenantID string, required bool) error
 }
 
+// UserAdminFlagStore sets User.IsAdmin on one user. It is the seam POST
+// <admin>/users/:id/promote needs for method=flag, and the assertion's failure
+// is that route's 501.
+//
+// # Why it is one flag and not the reference's patch
+//
+// The dev line's seam is a *general* writer: it casts the configured store to
+// `IUserStore & { update?(userId, patch: Partial<BaseUser>): Promise<void> }`
+// and calls it with the object literal `{isAdmin: true}` (node-auth
+// admin.router.ts:1035-1040, the type at :212-214). A faithful transcription
+// would be `Update(ctx, userID string, patch map[string]any) error` or a
+// *User-shaped patch type, and both were declined:
+//
+//   - Partial<T> has no Go counterpart that keeps the field names checked. A
+//     map[string]any patch moves every field name from the compiler to a
+//     string literal, on the one call in this package that grants somebody the
+//     admin console.
+//   - The route is the interface's only consumer and writes one field. A seam
+//     wider than its consumer is a seam an implementor has to guess the
+//     contract of — "which fields may arrive, and what does a store do with one
+//     it does not persist?" — and nothing in either tree answers that, because
+//     nothing in either tree calls update with any other patch.
+//
+// So it is narrowed to what the route actually does, the way
+// UserTwoFactorPolicyStore is narrowed to the one flag its route writes. The
+// wire is unaffected: the 501 a store that does not implement this gets is the
+// reference's own message, naming the reference's own method.
+//
+// # What an implementor owes
+//
+// Write the flag and nothing else. This is the field the 'is-admin-flag' access
+// policy reads (admin.go, AdminPolicyIsAdminFlag) — a store that also granted a
+// role, or cleared one, would be making an authorisation decision the route did
+// not ask for and the reference does not make. It is also why there is no
+// revoke beside it: neither tree has a route that clears the flag, and adding
+// one here would be a product decision rather than a port. AuthConfigurator's
+// revokeAdmin is the dev line's only such site and it is a facade method, not a
+// route (node-auth auth-configurator.ts:133).
+//
+// tenantID is the parameter the reference has not got, carried for the reason
+// UserAccountStore.DeleteUser carries one: every seam on this surface has it, so
+// a store implements one convention rather than two. The route passes "",
+// because the reference's update(id, patch) addresses a user by id alone — see
+// (*Auth).adminPromoteUser for what that costs a multi-tenant deployment, which
+// is exactly what DELETE <admin>/api/users/:id already costs it.
+type UserAdminFlagStore interface {
+	UpdateIsAdmin(ctx context.Context, userID, tenantID string, isAdmin bool) error
+}
+
 // EmailVerificationStore persists verification flow.
 type EmailVerificationStore interface {
 	UpdateEmailVerificationToken(ctx context.Context, userID, tenantID, tokenHash string, expiry time.Time) error

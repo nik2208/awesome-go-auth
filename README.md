@@ -795,17 +795,25 @@ revision the whole contract was extracted from.
 
 `identity-events-are-raised-from-the-development-line`
 
-- **Surface**: `auth.Config.Events` / `auth.WithEventBus`, and the nineteen
+- **Surface**: `auth.Config.Events` / `auth.WithEventBus`, and the twenty-three
   routes that publish through it.
-- **This port**: Nineteen publication points raise fifteen of the twenty-six
-  declared `identity.*` names: login success and failure, logout, session
-  rotation, registration, the two 2FA transitions, password change, email
-  verification, email change, the magic-link and SMS logins, and the OAuth
-  success and conflict. Each carries the payload and the `data` keys the
-  development line builds there, and each goes through
+- **This port**: Twenty-three publication points raise fifteen of the twenty-six
+  declared `identity.*` names. Nineteen are in the auth router: login success
+  and failure, logout, session rotation, registration, the two 2FA transitions,
+  password change, email verification, email change, the magic-link and SMS
+  logins, the OAuth success and conflict, and the account delete. Four are in
+  the admin console: `identity.role.assigned` from
+  `POST <admin>/api/users/{id}/roles` and from both branches of
+  `POST <admin>/users/{id}/promote`, and `identity.role.revoked` from
+  `DELETE <admin>/api/users/{id}/roles/{role}`. Each carries the payload and the
+  `data` keys the development line builds there, and each goes through
   `EventBus.PublishContext`, so the correlation id, client address and user
-  agent the request carried travel with it. A deployment that configures no bus
-  — the default, and the common case — publishes nothing and allocates nothing.
+  agent the request carried travel with it — reaching the nineteen from the
+  carrier `EventContextMiddleware` installs and the four from the request
+  itself, because the admin console sits outside that middleware on both lines
+  exactly as the development line's own `publishAdminEvent` reads the request
+  rather than a carrier. A deployment that configures no bus — the default, and
+  the common case — publishes nothing and allocates nothing.
 - **The reference**: At this revision **nothing in the library publishes at
   all**. `AuthEventBus.publish` exists, is documented and is never called from
   the router; the twenty-six names are declared and none is raised. The single
@@ -817,14 +825,14 @@ revision the whole contract was extracted from.
 - **Why**: The publication points are not invented, they are ported: they exist
   in nik2208/node-auth, the private development line the published package is
   cut from, where `publishRouterEvent` is called nineteen times in the auth
-  router, four times in the admin router and three times in the configurator —
-  twenty-six in all. That is the behaviour the family's next release has, and
-  the whole event plane this milestone builds (webhook delivery, the SSE stream,
-  the telemetry store) subscribes to a bus that would otherwise never speak.
-  Shipping the vocabulary without the publishers would mean every consumer
-  downstream subscribing to silence. The alternative — waiting for the dev line
-  to ship — would leave this port's `EventBus` as documented dead code it
-  already was.
+  router, `publishAdminEvent` four times in the admin router and the bus three
+  times in the configurator — twenty-six in all. That is the behaviour the
+  family's next release has, and the whole event plane this milestone builds
+  (webhook delivery, the SSE stream, the telemetry store) subscribes to a bus
+  that would otherwise never speak. Shipping the vocabulary without the
+  publishers would mean every consumer downstream subscribing to silence. The
+  alternative — waiting for the dev line to ship — would leave this port's
+  `EventBus` as documented dead code it already was.
 - **Which tree a citation means**: The citations on this entry are the published
   reference, as every entry in this register is. The publication points
   themselves are cited in the source as `node-auth <file>:<line>`, which
@@ -836,10 +844,11 @@ revision the whole contract was extracted from.
   names are raised by neither tree, and this port has the obvious call site for
   several — `identity.tenant.created` next to `Service.CreateTenant`,
   `identity.user.linked` next to the account-linking routes. None is raised. The
-  seven remaining development-line points are in its admin router and its
-  configurator, neither of which this port has yet; the admin router is M8's.
-  `event_publication_test.go` pins all twenty-six, exercises the nineteen and
-  names the surface and milestone for each of the seven.
+  three remaining development-line points are in its `AuthConfigurator`, an
+  imperative facade over its routers that this port has no counterpart for and
+  will not grow one for: the facade offered here is `auth.Auth`, whose surface
+  is the routes. `event_publication_test.go` pins all twenty-six, exercises the
+  twenty-three and names the missing surface for each of the three.
 
 ### Refreshing rotates the token inside the session instead of opening a new one
 
@@ -1587,6 +1596,70 @@ revision the whole contract was extracted from.
   deliberately: every value `AdminOptions.UploadBaseURL` can take is a base, so
   there is no way to ask for "no base". A host that needs the bare filename
   reads `filename`, which both routes always send.
+
+### The console mounts a promote route the published reference does not have
+
+`admin-promote-route-comes-from-the-development-line`
+
+- **Surface**: `POST <admin>/users/{id}/promote`, and
+  `AdminOptions.RateLimiter`, the slot that covers it.
+- **This port**: Mounts a fifty-first admin route.
+  `POST <admin>/users/{id}/promote` takes `{method?: 'flag' | 'role'}`,
+  defaulting to `'role'`: `'flag'` writes `User.IsAdmin` through the
+  `auth.UserAdminFlagStore` seam and answers
+  `501 {"error": "IUserStore.update is required for method=flag"}` without one;
+  `'role'` creates an `admin` role and assigns it, and answers
+  `404 {"error": "RBAC store not configured"}` without an RBAC store. Both
+  publish `identity.role.assigned` with `data: {role: "admin", method}` and
+  answer `{"success": true, "method": <as sent>}`. **Note the path**: it is not
+  under `/api`, unlike the other fifty. `AdminOptions.RateLimiter` is a second
+  limiter slot, separate from `HTTPConfig.RateLimiter`, and it wraps this route
+  and no other — ahead of the guard, so a caller over the limit is refused
+  before any credential is read.
+- **The reference**: Neither exists. At this revision the admin router registers
+  **fifty** routes and no promote route is among them: the gap sits between
+  `DELETE /api/users/:id/roles/:role` and `GET /api/users/:id/tenants`.
+  `AdminOptions` declares no `rateLimiter` either, so nothing on the published
+  admin surface can be rate limited through configuration at all. A caller that
+  posts to `<admin>/users/<id>/promote` there receives the router's `404`
+  (`admin.router.ts:44-186`, `admin.router.ts:917-933`).
+- **Why**: Both are ported from nik2208/node-auth, the private development line
+  the published package is cut from — `node-auth admin.router.ts:1030-1063` for
+  the route and `:205-211` for the option — which is the same bet, made for the
+  same reason, as the twenty-six publication points of
+  `identity-events-are-raised-from-the-development-line`. The promote route is
+  where the dev line's own `AuthConfigurator.promoteToAdmin` reaches the wire,
+  it is how a deployment bootstraps its first administrator without a second
+  tool, and leaving it out would mean a host that migrates from the family's
+  next release finding its bootstrap gone. It is also the last route of the
+  admin surface: with it the mounted set is exactly the dev line's fifty-one,
+  which is an assertion a conformance suite can make and
+  `adapter/internal/wiretest/admin_promote.go` does.
+- **Which tree a citation means**: The citations on this entry are the published
+  reference, as every entry in this register is, and they locate the *absence*:
+  the option set that has no `rateLimiter` and the two routes the missing one
+  sits between. The route itself is cited throughout the source as
+  `node-auth admin.router.ts:<line>`, which resolves against `DevLineRevision`.
+  A reviewer who greps the published tree for `promote` finds nothing, and that
+  is the expected result rather than a missing port.
+- **The path really has no `/api`**: Fifty of the fifty-one routes on this
+  surface are under `<admin>/api`; this one is registered as
+  `/users/:id/promote`, between two `/api/users` routes. It reads like a slip in
+  the source and it is reproduced as written, because the dev line's clients
+  will be built against it — `POST <admin>/api/users/{id}/promote` is mounted
+  nowhere and answers `404` here exactly as it would there.
+- **The two methods are not interchangeable**: `method=flag` sets the flag the
+  `'is-admin-flag'` access policy reads and assigns no role; `method=role`
+  assigns the `admin` role and sets no flag. A deployment guarding the console
+  with `AdminIsAdminFlag()` gains nothing from `method=role`, and one guarding
+  it with a predicate over the RBAC store gains nothing from `method=flag`.
+  Choosing the wrong one is a promotion that silently grants no access, on both
+  lines.
+- **What the limiter does not cover**: `AdminOptions.RateLimiter` is spread onto
+  this one route in the development line and onto nothing else — in particular
+  **not** onto `POST <admin>/login`, which is unlimited on both lines whatever a
+  host configures. A deployment that wants the console's login limited wraps the
+  handler its adapter mounts.
 <!-- END GENERATED: deviations -->
 
 ## Parity Snapshot vs `awesome-node-auth`

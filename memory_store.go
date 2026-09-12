@@ -285,6 +285,21 @@ func (s *MemoryUserStore) UpdateRequire2FA(_ context.Context, userID, tenantID s
 	return nil
 }
 
+// UpdateIsAdmin makes MemoryUserStore satisfy UserAdminFlagStore, which is what
+// POST <admin>/users/:id/promote needs for method=flag. It writes the one flag
+// and touches nothing else; see the interface.
+func (s *MemoryUserStore) UpdateIsAdmin(_ context.Context, userID, tenantID string, isAdmin bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.byID[userID]
+	if !ok || u.TenantID != tenantID {
+		return errors.New("user not found")
+	}
+	u.IsAdmin = isAdmin
+	s.byID[userID] = u
+	return nil
+}
+
 func (s *MemoryUserStore) UpdateEmailVerificationToken(_ context.Context, userID, tenantID, tokenHash string, expiry time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
