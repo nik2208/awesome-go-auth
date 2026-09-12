@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-12
+
+The seams a host needs and the surfaces a browser needs. The generated OpenAPI
+document is finally served, together with the reference's own Swagger page;
+`GET /ui/config` answers the built-in UI with the branding the settings store
+holds; the four OIDC endpoints move from a host-owned mux onto the adapters,
+which puts them under the conformance suite; a rate-limiter slot sits where the
+reference puts its own; and a password-verifier seam lets a deployment migrate
+off another provider one login at a time.
+
+Two differences from the reference stop being undocumented: a registration
+missing its credentials now answers the dev line's `400 INVALID_INPUT`, and the
+session this port issues from `/register`, where the reference issues none, is
+in the register as `register-issues-a-session`.
+
 ### Added
 - **`HTTPConfig.RateLimiter` — the reference's rate-limiter slot.** The
   reference declares `RouterOptions.rateLimiter` (`auth.router.ts:46`) and ships
