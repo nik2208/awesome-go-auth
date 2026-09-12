@@ -47,6 +47,30 @@ type OpenAPIInfo struct {
 	// a real endpoint from the spec; NewIDP refuses such a JWKSPath outright,
 	// so the collision can only come from this field disagreeing with the IdP.
 	JWKSPath string
+	// OIDC adds the IdP's other four routes — the discovery document,
+	// authorize, token and userinfo — to the document, at the fixed paths
+	// OIDCDiscoveryPath, OIDCAuthorizePath, OIDCTokenPath and
+	// OIDCUserInfoPath below APIPrefix. Set it when the adapter was mounted on
+	// an Auth built WithIDP, and leave it false otherwise: those routes exist
+	// only under that configuration, exactly as the JWKS route does.
+	//
+	// It is a second flag rather than more of IDProvider because the two
+	// describe different things to different readers. IDProvider publishes a
+	// key so that somebody else's resource server can verify this IdP's
+	// tokens, and a deployment may well want that route documented and no
+	// more — it is the only one a verifier calls. OIDC advertises an
+	// authorization server a relying party is invited to drive. A deployment
+	// that serves the OIDC endpoints on a mux of its own, through
+	// (*IDP).RegisterHandlers under some other base path, leaves this false
+	// and documents them where it mounted them.
+	//
+	// Unlike JWKSPath these paths are not configurable, so there is nothing to
+	// tell this document; see the OIDC path constants.
+	//
+	// Setting ResourceServer alongside it drops OIDCAuthorizePath and
+	// OIDCTokenPath again, because the adapters do not mount those two in that
+	// mode; the discovery document and userinfo stay. See OIDCMount.
+	OIDC bool
 	// ResourceServer mirrors HTTPConfig.ResourceServer: the credential routes
 	// the adapters then leave unmounted are left out of the spec too. Set the
 	// two together, or the spec documents routes that answer 404.
@@ -70,11 +94,12 @@ func GenerateOpenAPISpec(info OpenAPIInfo) map[string]any {
 		servers = append(servers, map[string]any{"url": info.ServerURL})
 	}
 
-	// The conditional groups — the JWKS route an IdP adds, the credential
-	// routes resource-server mode takes away — are all in openAPIPathsFor. See
-	// OpenAPIInfo.IDProvider and OpenAPIInfo.ResourceServer, and the "jwks" and
-	// "ResourceServer" sets in the wiretest harness, which hold those flags and
-	// the adapters' mounts to each other in both directions.
+	// The conditional groups — the JWKS route and the four OIDC endpoints an
+	// IdP adds, the credential routes resource-server mode takes away — are all
+	// in openAPIPathsFor. See OpenAPIInfo.IDProvider, OpenAPIInfo.OIDC and
+	// OpenAPIInfo.ResourceServer, and the "jwks", "oidc" and "ResourceServer"
+	// sets in the wiretest harness, which hold those flags and the adapters'
+	// mounts to each other in both directions.
 	paths := openAPIPathsFor(info)
 	schemas := openAPISchemas()
 	// The two schemas nothing but the JWKS path item references follow that
@@ -210,11 +235,11 @@ func openAPIJWKSPath() map[string]any {
 }
 
 // openAPIPathsFor is openAPIPaths plus and minus what the configuration
-// changes. Two things do so far: resource-server mode drops the credential
+// changes. Three things do so far: resource-server mode drops the credential
 // routes, which is the same list the adapters skip registering
-// (ResourceServerGatedRoutes), and an IdP adds the JWKS route the adapters
-// mount from auth.WithIDP — so the spec and the mount stay in step under
-// either, or both.
+// (ResourceServerGatedRoutes), an IdP adds the JWKS route, and it adds the four
+// OIDC endpoints — both of those mounted by the adapters from auth.WithIDP, so
+// the spec and the mount stay in step under any of them, or all of them.
 //
 // The subtraction runs first, in the order the adapters mount in: they
 // register the JWKS route whether or not resource-server mode is on, and skip
@@ -239,7 +264,196 @@ func openAPIPathsFor(info OpenAPIInfo) map[string]any {
 			paths[key] = openAPIJWKSPath()
 		}
 	}
+	// The other four IdP routes, on the same terms — minus the two the adapters
+	// skip under resource-server mode, which is the same oidcResourceServerGated
+	// map they read. Their paths are constants, so none of them can collide with
+	// a documented route today; the guard is kept anyway, so that a future route
+	// named /token or /authorize is a missing path item here rather than a
+	// silently replaced one.
+	if info.OIDC {
+		for route, item := range openAPIOIDCPaths() {
+			if info.ResourceServer && oidcResourceServerGated[route] {
+				continue
+			}
+			if key := prefix + route; !openAPIHasPath(paths, key) {
+				paths[key] = item
+			}
+		}
+	}
 	return paths
+}
+
+// openAPIOIDCPaths describes the four OIDC endpoints, keyed by the path below
+// the mount prefix.
+//
+// Each carries exactly one operation: the method a relying party uses to drive
+// the flow. The handlers answer any method — see OIDCMounts for why — but
+// documenting a second one would describe the same handler twice, and the
+// conformance suite compares a documented path to one method.
+//
+// The endpoints have no counterpart in the reference, which ships no OIDC
+// authorization server, so nothing here is cited: it describes what idp.go's
+// handlers do. That includes the unhappy paths, which are the standard
+// library's http.Error — a plain-text line, not the family's JSON error
+// envelope — and are documented as the text/plain bodies they are rather than
+// as the envelope every other route in this document returns.
+func openAPIOIDCPaths() map[string]any {
+	jsonContent := func(s map[string]any) map[string]any {
+		return map[string]any{"application/json": map[string]any{"schema": s}}
+	}
+	// text is one http.Error answer: a plain-text line, the OAuth 2.0 error
+	// identifier where the handler uses one.
+	text := func(description string) map[string]any {
+		return map[string]any{
+			"description": description,
+			"content": map[string]any{
+				"text/plain": map[string]any{"schema": map[string]any{"type": "string"}},
+			},
+		}
+	}
+	object := func(props map[string]any) map[string]any {
+		return map[string]any{"type": "object", "properties": props}
+	}
+	str := map[string]any{"type": "string"}
+	strs := map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+
+	return map[string]any{
+		OIDCDiscoveryPath: map[string]any{
+			"get": map[string]any{
+				"summary": "OIDC discovery document",
+				"description": "Public: no credential, no CSRF, no session. Every URL in it is derived " +
+					"from `IDPConfig.Issuer`, so `Issuer` has to carry the mount prefix for the " +
+					"advertised endpoints to resolve; `jwks_uri` alone can be overridden, with " +
+					"`IDPConfig.JWKSURL`. Mounted only when the `Auth` was built with `WithIDP`.",
+				"operationId": "oidcDiscovery",
+				"tags":        []string{"IdP"},
+				"responses": map[string]any{
+					"200": map[string]any{
+						"description": "The discovery document",
+						"content": jsonContent(object(map[string]any{
+							"issuer":                                str,
+							"authorization_endpoint":                str,
+							"token_endpoint":                        str,
+							"userinfo_endpoint":                     str,
+							"jwks_uri":                              str,
+							"response_types_supported":              strs,
+							"subject_types_supported":               strs,
+							"id_token_signing_alg_values_supported": strs,
+							"scopes_supported":                      strs,
+							"token_endpoint_auth_methods_supported": strs,
+							"claims_supported":                      strs,
+						})),
+					},
+				},
+			},
+		},
+		OIDCAuthorizePath: map[string]any{
+			"get": map[string]any{
+				"summary": "Authorization endpoint: the sign-in form",
+				"description": "Public. `GET` renders a minimal HTML sign-in form; `POST` to the same " +
+					"path, with `email`, `password` and `tenant_id` as form fields and the same query " +
+					"string, checks the credentials and redirects to the registered `redirect_uri` with " +
+					"`code` and the echoed `state`. Both refuse an unregistered `client_id` and a " +
+					"`redirect_uri` that is not exactly one of that client's registered URIs. `code`, " +
+					"`state`, `nonce`, `scope`, `code_challenge` and `code_challenge_method` are " +
+					"recorded with the authorization code; the PKCE pair is stored and not yet verified " +
+					"at the token endpoint. Mounted only when the `Auth` was built with `WithIDP`.",
+				"operationId": "oidcAuthorize",
+				"tags":        []string{"IdP"},
+				"parameters": []map[string]any{
+					{"name": "client_id", "in": "query", "required": true, "schema": str},
+					{"name": "redirect_uri", "in": "query", "required": true, "schema": str},
+					{"name": "state", "in": "query", "required": false, "schema": str},
+					{"name": "nonce", "in": "query", "required": false, "schema": str},
+					{"name": "scope", "in": "query", "required": false, "schema": str},
+					{"name": "code_challenge", "in": "query", "required": false, "schema": str},
+					{"name": "code_challenge_method", "in": "query", "required": false, "schema": str},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{
+						"description": "The sign-in form",
+						"content": map[string]any{
+							"text/html": map[string]any{"schema": map[string]any{"type": "string"}},
+						},
+					},
+					"400": text("`unknown client`, or `redirect_uri not allowed`"),
+				},
+			},
+		},
+		OIDCTokenPath: map[string]any{
+			"post": map[string]any{
+				"summary": "Token endpoint: redeem an authorization code",
+				"description": "Public, and authenticated by the client's own credentials: " +
+					"`client_secret_post`, the one method the discovery document advertises. The body " +
+					"is `application/x-www-form-urlencoded` with `grant_type=authorization_code`, " +
+					"`code`, `client_id` and `client_secret`. The code is consumed — single use, " +
+					"across processes when `IDPConfig.Codes` is a shared store — and must have been " +
+					"issued to the same `client_id`. `access_token` and `refresh_token` are the HS256 " +
+					"session pair and `expires_in` is that access token's lifetime, " +
+					"`Config.AccessTokenTTL`; `id_token` is the RS256 ID token, signed with " +
+					"`IDPConfig.Signer` under `KeyID` and verifiable against the JWKS document. " +
+					"Mounted only when the `Auth` was built with `WithIDP`.",
+				"operationId": "oidcToken",
+				"tags":        []string{"IdP"},
+				"requestBody": map[string]any{
+					"required": true,
+					"content": map[string]any{
+						"application/x-www-form-urlencoded": map[string]any{
+							"schema": map[string]any{
+								"type":     "object",
+								"required": []string{"grant_type", "code", "client_id", "client_secret"},
+								"properties": map[string]any{
+									"grant_type":    map[string]any{"type": "string", "enum": []string{"authorization_code"}},
+									"code":          str,
+									"client_id":     str,
+									"client_secret": str,
+								},
+							},
+						},
+					},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{
+						"description": "The token response",
+						"content": jsonContent(object(map[string]any{
+							"access_token":  str,
+							"refresh_token": str,
+							"id_token":      str,
+							"token_type":    map[string]any{"type": "string", "enum": []string{"Bearer"}},
+							"expires_in":    map[string]any{"type": "integer"},
+						})),
+					},
+					"400": text("`unsupported_grant_type`, or `invalid_grant` — a code that was never " +
+						"issued, was already redeemed, has expired, or belongs to another client"),
+					"401": text("`invalid_client`"),
+					"500": text("`server_error`"),
+				},
+			},
+		},
+		OIDCUserInfoPath: map[string]any{
+			"get": map[string]any{
+				"summary": "UserInfo endpoint",
+				"description": "Requires `Authorization: Bearer <access_token>` — the access token the " +
+					"token endpoint returned, verified the way every other bearer route verifies one. " +
+					"No CSRF and no cookie credential: the header is the only one read. " +
+					"Mounted only when the `Auth` was built with `WithIDP`.",
+				"operationId": "oidcUserInfo",
+				"tags":        []string{"IdP"},
+				"security":    []map[string]any{{"BearerAuth": []string{}}},
+				"responses": map[string]any{
+					"200": map[string]any{
+						"description": "The profile claims",
+						"content": jsonContent(object(map[string]any{
+							"sub":   str,
+							"email": str,
+							"name":  str,
+						})),
+					},
+					"401": text("`unauthorized` — no `Bearer` header, or a token this deployment cannot verify"),
+				},
+			},
+		},
+	}
 }
 
 // removeOpenAPIOperation drops one operation from the spec, and the path item

@@ -113,7 +113,15 @@ func main() {
 	// prefix on any segment boundary — via ginAdapter.MountWithConfig.
 	ginAdapter.Mount(r, a)
 
-	// OIDC IDP endpoints
+	// OIDC IDP endpoints, on a mux of this application's own, under /oidc.
+	//
+	// The other way is auth.WithIDP(idp) on auth.New above, after which
+	// ginAdapter.Mount serves the JWKS document and the four OIDC endpoints
+	// under the auth prefix instead — /auth/authorize, /auth/token,
+	// /auth/userinfo and /auth/.well-known/openid-configuration — with Issuer
+	// carrying that prefix rather than /oidc. Pick one: doing both puts the
+	// same endpoints at two URLs, and on a single net/http mux it panics at
+	// mount time. See README_DETAILED.md, "OIDC IDP".
 	oidcMux := http.NewServeMux()
 	idp.RegisterHandlers(oidcMux, "/oidc/")
 	r.Any("/oidc/*path", gin.WrapH(oidcMux))

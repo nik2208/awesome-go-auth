@@ -124,6 +124,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than reworded when #21 lands; "there is no knob" describes this release,
   not a decision that it stays that way. README.md's generated deviations section
   is regenerated from it.
+- **The four OIDC endpoints are mounted by all four adapters.** An `Auth` built
+  with `auth.WithIDP` already made net/http, chi, gin and echo serve the JWKS
+  document; it now mounts the rest of the IdP surface beside it, at the paths
+  `(*IDP).RegisterHandlers` has always used and under the configured prefix:
+  `<prefix>/.well-known/openid-configuration`, `<prefix>/authorize`,
+  `<prefix>/token` and `<prefix>/userinfo`. Public and ahead of every
+  middleware, like the JWKS route. No shape changes: the same handlers, the
+  same bodies, the same statuses — what changes is that they are inside the
+  mount the wiretest conformance suite exercises, so the discovery document's
+  shape, `authorize` refusing an unregistered `client_id` and an unregistered
+  `redirect_uri`, `token` refusing a code nobody issued and a client nobody
+  registered, and `userinfo` refusing a token nobody signed are now pinned on
+  all four adapters at once (`adapter/internal/wiretest/oidc.go`). These four
+  endpoints have no counterpart in the reference, which ships no OIDC
+  authorization server, so nothing here is cited against it and nothing about
+  their shapes is settled by it. **This grows the mounted surface by four
+  routes**; a deployment that enumerates it will see them.
+- **`HTTPConfig.ResourceServer` gates two of the four.** `<prefix>/authorize`
+  and `<prefix>/token` are credential routes by this library's own definition —
+  `POST <prefix>/authorize` reads an email, a password and a tenant off the form
+  and hands them to `Service.Login`, and `POST <prefix>/token` spends the
+  resulting code for this instance's HS256 session pair — so resource-server
+  mode leaves them unmounted, exactly as it leaves `/login` and `/refresh`
+  unmounted, and `OpenAPIInfo.OIDC` drops them from the generated document when
+  `OpenAPIInfo.ResourceServer` is set alongside it. Without this a hybrid
+  deployment that set the flag to unmount the credential routes and also built
+  `WithIDP` would silently regain a password-accepting endpoint and a
+  session-minting one. The discovery document and `<prefix>/userinfo` stay
+  mounted: discovery is metadata like the JWKS document beside it, and
+  `userinfo` reads a bearer token and returns a profile, which is `GET /me`'s
+  shape and stays for `GET /me`'s reason. `(*IDP).RegisterHandlers` still mounts
+  all four — it is handed a mux with no `HTTPConfig` behind it. See
+  `OIDCMount.ResourceServerGated`.
+- **`(*IDP).OIDCMounts() []OIDCMount`** and the `OIDCDiscoveryPath`,
+  `OIDCAuthorizePath`, `OIDCTokenPath` and `OIDCUserInfoPath` constants — the
+  one list the four adapters and `RegisterHandlers` all mount from, so an
+  endpoint cannot appear on one mount and not another. Every method reaches the
+  handler, which is what `RegisterHandlers`'s method-less `http.ServeMux`
+  patterns have always done and what the handlers expect: `authorize` reads
+  `r.Method` itself, `token` reads `grant_type` out of the form, `userinfo`
+  reads the `Authorization` header.
+- **`OpenAPIInfo.OIDC`** adds those four paths to the generated document, at
+  the operation each drives the flow with (`GET` discovery, `GET` authorize,
+  `POST` token, `GET` userinfo). It is a second flag beside
+  `OpenAPIInfo.IDProvider` rather than more of it: publishing a key so that
+  somebody else's resource server can verify this IdP's tokens and advertising
+  an authorization server a relying party may drive are different statements,
+  and a deployment that serves the OIDC endpoints on a mux of its own
+  documents them where it mounted them.
 
 ### Changed
 - **`POST /auth/register` refuses a missing email or password with
@@ -150,6 +199,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an account with no usable address). A password that is present but short still
   answers `WEAK_PASSWORD`, unchanged. Covered by the wiretest suite on all four
   adapters, in cookie and bearer mode.
+- **`(*IDP).RegisterHandlers` is no longer needed by a host that mounts an
+  adapter**, and keeps working unchanged for one that is not: it still mounts
+  all six patterns — the four above, the JWKS document at `basePath +
+  JWKSPath()` and the deprecated `<basePath>/jwks` alias — on the mux it is
+  given. Mounting an adapter *and* calling it with the adapter's prefix is the
+  host's mistake, and what that costs depends on the router. On a single
+  `http.ServeMux` it now fails loudly: both registrations use the same
+  method-less pattern, so `ServeMux` panics at mount time naming the two
+  conflicting registration sites, the way the JWKS route already did. That
+  collision is deliberate — a `"GET <path>"` pattern would not conflict, and
+  would leave an endpoint split between two handlers with `GET` answered by one
+  and every other method by the other. On a chi, gin or echo host the adapter
+  mount and the `RegisterHandlers` mux are two different routers, so nothing
+  collides and the endpoints simply end up served at two URLs. Do one or the
+  other.
 
 ## [0.6.0] - 2026-09-12
 

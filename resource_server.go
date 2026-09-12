@@ -859,7 +859,23 @@ func UserFromContext(ctx context.Context) (User, bool) {
 //
 // What stays mounted is GET /me, the session routes, PATCH /profile,
 // POST /add-phone, DELETE /account, and the whole OAuth and account-linking
-// group.
+// group. On an Auth built WithIDP, the JWKS route, <prefix>/userinfo and
+// <prefix>/.well-known/openid-configuration stay too — and <prefix>/authorize
+// and <prefix>/token do not.
+//
+// Those four are not in this map, because this map is the base surface's and
+// they are routes only under auth.WithIDP; the two gated ones are named by
+// OIDCMount.ResourceServerGated, which every adapter reads from the same walk
+// that mounts them, and by OpenAPIInfo.OIDC, which drops them from the spec in
+// the same breath. The reason they are gated is the definition at the top of
+// this file: POST <prefix>/authorize reads an email, a password and a tenant
+// off the form and hands them to Service.Login, and POST <prefix>/token spends
+// the resulting code for this instance's own HS256 session pair, so leaving
+// them mounted would hand a deployment that set this flag to unmount /login and
+// /refresh a password-accepting endpoint and a session-minting one in two hops.
+// Discovery is metadata, like the JWKS document beside it, and userinfo reads a
+// bearer token and returns a profile, which is GET /me's shape and stays for
+// GET /me's reason.
 //
 // Those still need a local user store, and saying otherwise would be a trap:
 // /me goes through Service.Authenticate to users.GetUserByID
