@@ -270,6 +270,21 @@ func (s *MemoryUserStore) UpdateTOTPSecret(_ context.Context, userID, tenantID, 
 	return nil
 }
 
+// UpdateRequire2FA makes MemoryUserStore satisfy UserTwoFactorPolicyStore, which
+// with ListUsers above is what turns the admin console's twoFAPolicy section on.
+// It writes the one flag and touches nothing else; see the interface.
+func (s *MemoryUserStore) UpdateRequire2FA(_ context.Context, userID, tenantID string, required bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.byID[userID]
+	if !ok || u.TenantID != tenantID {
+		return errors.New("user not found")
+	}
+	u.Require2FA = required
+	s.byID[userID] = u
+	return nil
+}
+
 func (s *MemoryUserStore) UpdateEmailVerificationToken(_ context.Context, userID, tenantID, tokenHash string, expiry time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

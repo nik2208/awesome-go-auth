@@ -816,11 +816,22 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		a.serveAdminRead(w, r, route, param)
 	}))
 
+	// U14's write surface, behind the same Protect and classified the same way.
+	// The method is part of the match rather than a check beside it, because
+	// Express routes on both: DELETE /api/users/:id and GET /api/users/:id are
+	// two layers over one path.
+	writes := guard.Protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		route, params := matchAdminWrite(r.Method, adminRelativePath(r.URL.EscapedPath(), cfg.AdminPath()))
+		a.serveAdminWrite(w, r, route, params)
+	}))
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rel := adminRouterPath(r, cfg)
-		// The read routes match on the escaped path, so a parameter is split
-		// before it is decoded — see matchAdminRead.
-		read, _ := matchAdminRead(adminRelativePath(r.URL.EscapedPath(), cfg.AdminPath()))
+		// The read and write routes match on the escaped path, so a parameter is
+		// split before it is decoded — see matchAdminRead.
+		escaped := adminRelativePath(r.URL.EscapedPath(), cfg.AdminPath())
+		read, _ := matchAdminRead(escaped)
+		write, _ := matchAdminWrite(r.Method, escaped)
 		switch {
 		case rel == AdminLoginPath && r.Method == http.MethodPost:
 			if !guard.LoginRoutesMounted() {
@@ -847,6 +858,11 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		// `rel ==` case cannot express; the route table is matchAdminRead.
 		case isAdminRead(r) && a.adminReadRegistered(read):
 			reads.ServeHTTP(w, r)
+		// The sixteen write routes of admin_write.go. matchAdminWrite has
+		// already refused every method the reference registers no layer for, so
+		// this case needs no isAdminRead counterpart.
+		case a.adminWriteRegistered(write):
+			writes.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1076,13 +1092,16 @@ type adminFeatureSet struct {
 // reference's `!!options.sessionStore` and its nine siblings (:645-656) read
 // against the stores this port already holds on the Auth.
 //
-// Four are false and will stay false until the PR that owns the section lands,
-// and they are false rather than absent so the SPA hides the tab instead of
-// drawing one whose every request 404s:
+// twoFAPolicy is the one flag that is not `!!store`: it is the conjunction of
+// two optional capabilities, because its route needs both — a lister to walk the
+// table and a writer to set the flag on each row. The reference asks the same
+// question of the same store (:649-650), and this port asks it of the two
+// interfaces that stand for those methods.
 //
-//   - twoFAPolicy needs an update-Require2FA seam beside AdminUserStore; the
-//     reference tests for `updateRequire2FA` on the store (:657-658) and this
-//     port has no such interface yet.
+// Three are still false and will stay false until the PR that owns the section
+// lands, and they are false rather than absent so the SPA hides the tab instead
+// of drawing one whose every request 404s:
+//
 //   - apiKeys and webhooks need the admin listing routes over the API-key and
 //     webhook stores, neither of which is wired to the Auth.
 //   - upload needs a writable asset directory. UIOptions.Uploads is an fs.FS,
@@ -1090,12 +1109,14 @@ type adminFeatureSet struct {
 func (a *Auth) adminFeatures(cfg HTTPConfig) adminFeatureSet {
 	svc := a.service
 	_, sessions := svc.sessions.(SessionLister)
+	_, userLister := svc.users.(AdminUserStore)
+	_, twoFAWriter := svc.users.(UserTwoFactorPolicyStore)
 	return adminFeatureSet{
 		Sessions:       sessions,
 		Roles:          svc.rbac != nil,
 		Tenants:        svc.tenants != nil,
 		Metadata:       svc.metadata != nil,
-		TwoFAPolicy:    false,
+		TwoFAPolicy:    userLister && twoFAWriter,
 		Control:        svc.cfg.Settings != nil,
 		LinkedAccounts: a.oauth != nil && a.oauth.LinkedAccounts != nil,
 		APIKeys:        false,
