@@ -806,8 +806,21 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		})
 	}))
 
+	// U13's read surface, behind one Protect. The route is classified twice —
+	// once unguarded in the switch below, so that a path the reference never
+	// registered answers 404 rather than 401, and once here — because the
+	// classification is a pure function of the path and re-running it is cheaper
+	// than a context value that a handler could then be made to trust.
+	reads := guard.Protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		route, param := matchAdminRead(adminRelativePath(r.URL.EscapedPath(), cfg.AdminPath()))
+		a.serveAdminRead(w, r, route, param)
+	}))
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rel := adminRouterPath(r, cfg)
+		// The read routes match on the escaped path, so a parameter is split
+		// before it is decoded — see matchAdminRead.
+		read, _ := matchAdminRead(adminRelativePath(r.URL.EscapedPath(), cfg.AdminPath()))
 		switch {
 		case rel == AdminLoginPath && r.Method == http.MethodPost:
 			if !guard.LoginRoutesMounted() {
@@ -829,6 +842,11 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 			shell.ServeHTTP(w, r)
 		case rel == AdminPingPath && isAdminRead(r):
 			ping.ServeHTTP(w, r)
+		// The fourteen read routes of admin_read.go. They are one case rather
+		// than fourteen because six of them carry a path parameter, which a
+		// `rel ==` case cannot express; the route table is matchAdminRead.
+		case isAdminRead(r) && a.adminReadRegistered(read):
+			reads.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -845,8 +863,16 @@ func isAdminRead(r *http.Request) bool {
 // the path below the UI mount. It is also what the unauthenticated redirect
 // appends to the mount to rebuild `req.baseUrl + req.path`.
 func adminRouterPath(r *http.Request, cfg HTTPConfig) string {
-	mount := cfg.AdminPath()
-	switch p := r.URL.Path; {
+	return adminRelativePath(r.URL.Path, cfg.AdminPath())
+}
+
+// adminRelativePath is adminRouterPath's body over an explicit path, so that the
+// parameterised routes can run it over r.URL.EscapedPath() instead — Express
+// matches its patterns against the raw pathname and decodes each captured
+// parameter afterwards, and a path already decoded would split a parameter
+// carrying %2F into two segments. See matchAdminRead.
+func adminRelativePath(p, mount string) string {
+	switch {
 	case p == mount:
 		return "/"
 	case strings.HasPrefix(p, mount+"/"):

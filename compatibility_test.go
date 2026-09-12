@@ -56,6 +56,7 @@ var wantDeviationIDs = []string{
 	"admin-console-requires-an-explicit-policy",
 	"admin-cookie-secure-flag-is-configured-not-forwarded",
 	"admin-guard-accepts-only-typed-session-tokens",
+	"admin-listings-are-ordered-by-id",
 	"admin-unauthenticated-get-serves-only-the-login-form",
 	"advertised-2fa-methods-require-store-support",
 	"config-require2fa-is-a-system-policy-term",
@@ -216,6 +217,18 @@ var wantClaims = map[string][]string{
 	"admin-guard-accepts-only-typed-session-tokens": {
 		"typ", "iss", "jwt.verify", "isRoot", "refresh token", "second factor",
 		"BuildTokenClaims", "temp-token-is-typed-not-an-access-token",
+	},
+	// The order itself, the three seams that promise it, the reference's own
+	// unordered stores, and the two facts that make the entry more than a
+	// preference: that offset paging is meaningless without an order, and that
+	// the guard's own access decision reads the first row of one. The last claim
+	// pins what is *not* covered, so an entry that quietly widened to the
+	// template listings — which match the reference's insertion order — would
+	// fail here.
+	"admin-listings-are-ordered-by-id": {
+		"ID ascending", "AdminUserStore", "SessionLister", "RoleLister",
+		"ORDER BY", "listUsers(1, 0)", "first registered user", "offset",
+		"AdminPolicyFirstUser", "insertion order",
 	},
 	// Both directions of the reference's failure, the seam this port reads
 	// instead, and the precedent — ClientIP — that decided it.
