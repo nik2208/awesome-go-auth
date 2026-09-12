@@ -87,9 +87,12 @@ func GenerateToolsOpenAPISpec(info ToolsOpenAPIInfo) map[string]any {
 
 	paths := map[string]any{}
 	// U23: base + "/track/{eventName}" and base + "/notify/{target}".
-	// U24: base + "/stream". U25: base + "/telemetry" and
-	// base + "/webhook/{provider}", the first of them under the reference's
-	// hasTelemetryQuery rather than the telemetry flag alone (openapi.ts:1378).
+	// U25: base + "/telemetry" and base + "/webhook/{provider}", the first of
+	// them under the reference's hasTelemetryQuery rather than the telemetry
+	// flag alone (openapi.ts:1378).
+	if info.Stream {
+		paths[base+ToolsStreamPath] = toolsOpenAPIStreamPath()
+	}
 	if info.Docs {
 		paths[base+DocsSpecPath] = toolsOpenAPIDocsSpecPath()
 		paths[base+DocsUIPath] = toolsOpenAPIDocsUIPath()
@@ -217,6 +220,69 @@ func toolsOpenAPISchemas() map[string]any {
 				"correlationId": map[string]any{"type": "string"},
 				"ip":            map[string]any{"type": "string"},
 				"userAgent":     map[string]any{"type": "string"},
+			},
+		},
+	}
+}
+
+// toolsOpenAPIStreamPath describes GET <tools>/stream, transcribed from
+// openapi.ts:1492-1522.
+//
+// The reference documents one parameter, `topics`, and says nothing at all
+// about `token` — the parameter its own extractSseToken reads
+// (tools.router.ts:186) and the one that decides whether the request is
+// authenticated. That silence is reproduced in the parameter list, because a
+// generated document that grew a parameter the reference's does not is a
+// document two clients disagree about. It is not reproduced in the prose: the
+// description below says what the query token is and what it costs, which
+// changes no machine-readable field and is the one place a reader of the
+// document would otherwise have no way to learn it. tools_stream.go argues the
+// trade in full.
+//
+// The three responses are the reference's three, including the 401 it can only
+// answer when a guard is configured — with ToolsPublic there is nothing to
+// refuse a request, so the document is describing the guarded posture, which is
+// also the posture its single `security: [bearer]` entry describes.
+func toolsOpenAPIStreamPath() map[string]any {
+	return map[string]any{
+		"get": map[string]any{
+			"summary":     "Subscribe to real-time events via Server-Sent Events",
+			"operationId": "sseStream",
+			"tags":        []string{"Notifications"},
+			"security":    []map[string]any{{"BearerAuth": []string{}}},
+			"description": "Opens a `text/event-stream` that stays open until the client " +
+				"disconnects. The first frame is `connected` and carries the connection id and " +
+				"the topics the server authorised. " +
+				"**The credential may also be given as `?token=<access token>`**, which is " +
+				"copied into an `Authorization: Bearer` header before the guard runs, because a " +
+				"browser `EventSource` cannot set headers. It overwrites any Authorization " +
+				"header and takes precedence over the access-token cookie, so when both are " +
+				"present the query token is the credential that is verified. A token in a URL " +
+				"is recorded in access logs, `Referer` headers and browser history: prefer the " +
+				"cookie or header where the client can set one. " +
+				"There is no resume: `Last-Event-ID` is not read and nothing is retained, so a " +
+				"reconnecting client resumes from now and whatever was raised while it was away " +
+				"is gone.",
+			"parameters": []map[string]any{
+				{
+					"name":        ToolsStreamTopicsParam,
+					"in":          "query",
+					"required":    false,
+					"description": "Comma-separated list of topics to subscribe to. The server enforces authorization.",
+					"schema":      map[string]any{"type": "string", "example": "global,user:123"},
+				},
+			},
+			"responses": map[string]any{
+				"200": map[string]any{
+					"description": "SSE stream (text/event-stream)",
+					"content": map[string]any{
+						"text/event-stream": map[string]any{
+							"schema": map[string]any{"type": "string", "description": "Newline-delimited SSE frames"},
+						},
+					},
+				},
+				"401": map[string]any{"description": "Unauthorized"},
+				"503": map[string]any{"description": "SSE not enabled on this server"},
 			},
 		},
 	}

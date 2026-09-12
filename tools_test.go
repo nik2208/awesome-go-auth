@@ -197,14 +197,14 @@ func TestToolsHandlerRoutes(t *testing.T) {
 	})
 
 	t.Run("everything else is a 404", func(t *testing.T) {
-		// The five feature routes are U23 through U25's, and the reference's
-		// router has no layer on its own root either.
+		// The remaining feature routes are U23's and U25's, and the reference's
+		// router has no layer on its own root either. GET /stream is not here
+		// any more: U24 mounts it, and tools_stream_test.go is where it answers.
 		for _, path := range []string{
 			DefaultToolsPath,
 			DefaultToolsPath + "/",
 			DefaultToolsPath + ToolsTrackPath + "/identity.probe",
 			DefaultToolsPath + ToolsNotifyPath + "/global",
-			DefaultToolsPath + ToolsStreamPath,
 			DefaultToolsPath + ToolsTelemetryPath,
 			DefaultToolsPath + ToolsWebhookPath + "/probe",
 		} {
@@ -334,15 +334,22 @@ func TestGenerateToolsOpenAPISpec(t *testing.T) {
 		}
 	})
 
-	t.Run("without Docs the document describes nothing yet", func(t *testing.T) {
-		// U22 mounts no feature route, so with its own documentation routes off
-		// there is nothing left to describe. Each of U23 through U25 adds its
-		// path item here beside the switch case that mounts it — a path item
-		// written ahead of its route would document an endpoint that answers
-		// 404, which is what the conformance suite exists to catch.
+	t.Run("without Docs the only feature route described is the stream", func(t *testing.T) {
+		// U24 mounts GET <tools>/stream and adds its path item here beside the
+		// switch case that mounts it; track, notify, the telemetry query and the
+		// inbound webhook are still U23's and U25's. A path item written ahead
+		// of its route would document an endpoint that answers 404, which is
+		// what the conformance suite exists to catch.
 		document := GenerateToolsOpenAPISpec(ToolsOpenAPIInfo{Telemetry: true, Notify: true, Stream: true, Webhook: true})
-		if paths := document["paths"].(map[string]any); len(paths) != 0 {
-			t.Errorf("paths = %v, want none until U23 mounts the first feature route", paths)
+		paths := document["paths"].(map[string]any)
+		if len(paths) != 1 {
+			t.Errorf("paths = %v, want only the stream until U23 mounts its two", paths)
+		}
+		if _, ok := paths[DefaultToolsPath+ToolsStreamPath]; !ok {
+			t.Errorf("the document does not describe %q (openapi.ts:1492-1522)", DefaultToolsPath+ToolsStreamPath)
+		}
+		if off := GenerateToolsOpenAPISpec(ToolsOpenAPIInfo{Telemetry: true, Notify: true, Webhook: true}); len(off["paths"].(map[string]any)) != 0 {
+			t.Errorf("paths = %v with the stream flag off, want none", off["paths"])
 		}
 	})
 }
