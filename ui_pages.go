@@ -89,7 +89,16 @@ func (a *Auth) UIHandler(cfg HTTPConfig, configRoute http.Handler) http.Handler 
 	if assets == nil {
 		assets = UpstreamUIAssetFS()
 	}
+	// The uploaded-asset filesystem, resolved once. UIOptions.Uploads wins; with
+	// nothing set there, an UploadStore configured on the Auth serves the two
+	// mounts through UploadFS, which is what makes one store wire both halves of
+	// the reference's arrangement — its admin router writes to uploadDir and its
+	// UI router mounts express.static over the same directory. See
+	// UIOptions.Uploads for the precedence and UploadFS for what it cannot do.
 	uploads := cfg.UI.Uploads
+	if uploads == nil {
+		uploads = UploadFS(a.service.cfg.Uploads)
+	}
 	headless := cfg.UI.Headless
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

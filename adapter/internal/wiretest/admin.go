@@ -210,6 +210,8 @@ func testAdmin(t *testing.T, mount Mounter) {
 	t.Run("Reads", func(t *testing.T) { testAdminReads(t, mount) })
 	t.Run("Writes", func(t *testing.T) { testAdminWrites(t, mount) })
 	t.Run("Credentials", func(t *testing.T) { testAdminCredentials(t, mount) })
+	t.Run("Uploads", func(t *testing.T) { testAdminUploads(t, mount) })
+	t.Run("Docs", func(t *testing.T) { testAdminDocs(t, mount) })
 }
 
 // adminRoute is one method-and-path pair. The reads could be a bare path list
@@ -261,13 +263,35 @@ var adminWritePaths = []adminRoute{
 	{http.MethodPost, auth.AdminUITemplatesPath},
 }
 
+// adminUploadRoutes is every route U15 mounts behind the guard, and they are a
+// list of their own rather than entries in the two above because the two above
+// are walked by the guard cases: these four are registered only with an
+// auth.UploadStore, so in a deployment that has none they answer 404 where the
+// guard suites expect 401.
+var adminUploadRoutes = []adminRoute{
+	{http.MethodPost, auth.AdminUploadLogoPath},
+	{http.MethodPost, auth.AdminUploadBGImagePath},
+	{http.MethodGet, auth.AdminUploadFilesPath},
+	{http.MethodDelete, auth.AdminUploadPath + "/logo_1.png"},
+}
+
+// adminDocsRoutes is the console's own documentation pair, which is a list of
+// its own for the opposite reason: the reference registers these two without the
+// guard (admin.router.ts:1499, :1517), so putting them in the read table would
+// assert a 401 the reference does not send. See testAdminDocs.
+var adminDocsRoutes = []adminRoute{
+	{http.MethodGet, auth.AdminOpenAPIPath},
+	{http.MethodGet, auth.AdminDocsPath},
+}
+
 // adminAllRoutes is every route the console mounts, whatever PR added it. The
 // not-mounted direction walks this: a surface that is not configured must answer
 // 404 on all of it, and a route added to a later PR's table joins that sweep
 // without anyone remembering to.
 func adminAllRoutes() []adminRoute {
 	routes := make([]adminRoute, 0,
-		len(adminPaths)+len(adminReadPaths)+len(adminWritePaths)+len(adminCredentialPaths))
+		len(adminPaths)+len(adminReadPaths)+len(adminWritePaths)+len(adminCredentialPaths)+
+			len(adminUploadRoutes)+len(adminDocsRoutes))
 	for path, method := range adminPaths {
 		routes = append(routes, adminRoute{method, path})
 	}
@@ -275,7 +299,9 @@ func adminAllRoutes() []adminRoute {
 		routes = append(routes, adminRoute{http.MethodGet, path})
 	}
 	routes = append(routes, adminWritePaths...)
-	return append(routes, adminCredentialPaths...)
+	routes = append(routes, adminCredentialPaths...)
+	routes = append(routes, adminUploadRoutes...)
+	return append(routes, adminDocsRoutes...)
 }
 
 // testAdminNotMounted is the negative direction of the conditional set, and it
@@ -290,6 +316,13 @@ func testAdminNotMounted(t *testing.T, mount Mounter) {
 		"unconfigured":                     {},
 		"enabled with no policy or secret": {Enabled: true},
 		"policy without the flag":          {AccessPolicy: auth.AdminIsAdminFlag()},
+		// The documentation pair carries no guard of its own, so it is the one
+		// family whose absence has to come from the mount rather than from a
+		// refusal. Asked for explicitly, so the sweep below is a real assertion
+		// about it and not a vacuous one.
+		"documentation asked for without an access decision": {
+			Enabled: true, Docs: auth.DocsOptions{Enabled: true},
+		},
 	}
 	for name, options := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -764,9 +797,19 @@ func adminOpenOptions() auth.AdminOptions {
 	return auth.AdminOptions{Enabled: true, AccessPolicy: auth.AdminOpen()}
 }
 
-// adminAllStores wires every optional store a read route can consult, so that a
-// case about a body is never accidentally a case about a missing store.
+// adminAllStores wires every optional store a route can consult, so that a case
+// about a body is never accidentally a case about a missing store.
+//
+// It is the list below plus the upload store, expressed that way round because
+// U15's "not registered without a store" case needs the same wiring with exactly
+// that one missing — the four upload routes are the only family conditional on a
+// store, so it is the only one whose absence has to be reachable without also
+// removing something else.
 func adminAllStores() []auth.Option {
+	return append(adminStoresWithoutUploads(), auth.WithUploadStore(auth.NewMemoryUploadStore()))
+}
+
+func adminStoresWithoutUploads() []auth.Option {
 	return []auth.Option{
 		auth.WithMetadataProvider(auth.NewMemoryMetadataStore()),
 		auth.WithRBACProvider(auth.NewMemoryRolesPermissionsStore()),

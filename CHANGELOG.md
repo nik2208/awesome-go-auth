@@ -8,6 +8,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The admin console's uploads, behind a store seam** (`upload_store.go`,
+  `admin_upload.go`). `POST <admin>/api/upload/logo`,
+  `POST <admin>/api/upload/bg-image`, `GET <admin>/api/upload/files` and
+  `DELETE <admin>/api/upload/:filename` — the port of `admin.router.ts:989-1085`,
+  multipart parsed with `mime/multipart` because the dependency rule is stdlib
+  plus `golang.org/x/crypto` and `multer` is neither.
+  **The seam is the substance.** The reference writes into `uploadDir`, a
+  directory on a local disk; `UploadStore` (`Put`, `List`, `Open`, `Delete`) is
+  what a host implements instead, with `MemoryUploadStore` shipped and
+  `WithUploadStore` / `Config.Uploads` to wire it. **Unconfigured is inert**: no
+  store means the four routes are not registered at all, so they answer a plain
+  `404` rather than a guarded `401`, the way `GET /api/templates/*` is
+  registered only with a `TemplateStore`. `upload` is the last `adminFeatures`
+  flag and it now follows the store.
+  **One store serves both halves.** `UIOptions.Uploads` — the read-only `fs.FS`
+  v0.9.0 added — still wins when set, and left nil `UIHandler` serves
+  `<prefix>/ui/assets/logo/` and `<prefix>/ui/assets/uploads/` from the
+  configured store through `UploadFS`, so the URL an upload answers with
+  resolves against the same deployment with nothing wired twice.
+  **Keys are derived, never accepted.** `adminUploadKey` is multer's own
+  filename callback (`:1005-1013`) — `path.basename`, the `[^a-z0-9_-]gi`
+  sanitiser over UTF-16 code units, forty characters, a millisecond stamp and a
+  lowercased extension — and `ValidUploadKey` is the grammar every key satisfies:
+  one path element of ASCII letters, digits, `.`, `_` and `-`, never leading `.`.
+  No key can contain `/`, `\` or `:`, and none can be `.` or `..`, so traversal
+  is not a check that passes but a string a key cannot be. The limits are the
+  reference's `limits.fileSize` of 5 MiB and its seven-extension `fileFilter`,
+  plus an outer bound on the whole request the reference does not have. Two
+  deviations are registered: `admin-upload-refusals-answer-the-admin-envelope`
+  and `admin-upload-base-url-is-derived-from-the-mount`.
+- **The admin console's OpenAPI document and its Swagger page**
+  (`openapi_admin.go`): `GET <admin>/api/openapi.json` and `GET <admin>/api/docs`
+  under `AdminOptions.Docs`, and `GenerateAdminOpenAPISpec` — the port of
+  `buildAdminOpenApiSpec` (`openapi.ts:672-1362`), the reference's **third**
+  generator, beside `GenerateOpenAPISpec` and `GenerateToolsOpenAPISpec`.
+  `(*Auth).AdminOpenAPIInfo` fills its eight flags from `adminFeatures`, so the
+  document and the console's own tabs cannot disagree.
+  **The pair carries no guard**, which is the one exception to a `guard` spread
+  onto every other `<admin>/api/*` route (`:1499`, `:1517`). That asymmetry is
+  reproduced rather than tidied — guarding it would answer `401` where the
+  reference answers `200` — and the decision is put where a host makes it: the
+  routes are off until `AdminOptions.Docs.Enabled` is set, the field says what
+  enabling them publishes, and the generated document's own `security` blocks
+  say it too. `docs-routes-are-opt-in` now covers all three routers. The page is
+  `SwaggerUIHandler` unchanged, so its title says "Tools API" here as well —
+  the third route this port reproduces that quirk on.
 - **`POST <tools>/track/{eventName}` and `POST <tools>/notify/{target}`**
   (`tools_track_notify.go`). The tools router's first two feature routes
   (`tools.router.ts:140-160`, `:165-179`), both behind

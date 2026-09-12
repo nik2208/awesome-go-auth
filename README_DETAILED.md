@@ -2866,10 +2866,13 @@ Four layers, in the reference's order, which is behaviour rather than style:
    answered `login.html` would be a different product, so the early return is
    reproduced exactly — and the uploaded assets below are on the far side of it,
    so they are not served either.
-3. **Uploaded assets**, when `UIOptions.Uploads` is set: the same `fs.FS` under
-   both `<prefix>/ui/assets/logo/` and `<prefix>/ui/assets/uploads/`, the legacy
-   path and the unified one. Unset — the default — serves neither rather than
-   failing; a file the directory does not hold falls through to the same `404`.
+3. **Uploaded assets**, when `UIOptions.Uploads` is set *or* a `Config.Uploads`
+   store is: the same `fs.FS` under both `<prefix>/ui/assets/logo/` and
+   `<prefix>/ui/assets/uploads/`, the legacy path and the unified one. With
+   neither — the default — serves neither rather than failing; a file the
+   filesystem does not hold falls through to the same `404`, and so does a name
+   that is not a valid upload key, so a traversal under either prefix ends
+   there too.
 4. **The SSR catch-all, then static serving.** A `GET` for a path with no file
    extension is a page: `<page>.html` if it exists, otherwise the first of
    `login.html`, `index.html`, `index.csr.html` that does, so no extensionless
@@ -2907,9 +2910,36 @@ render `login.html` at it.
 Both are `fs.FS`. `Assets` is the reference's `uiAssetsDir` and defaults to
 `UpstreamUIAssetFS()`; a host that supplies its own set replaces the built-in
 one outright, with no per-file fallback. `Uploads` is its `uploadDir` and is
-read-only: the `UploadStore` that writes into it lands in U15, and making the
-read side an `fs.FS` now means that store has to supply one rather than this
-seam having to change shape.
+read-only — the writing half is `Config.Uploads`, the `UploadStore` the admin
+console's upload routes go through.
+
+The two compose so a host wires one thing. `UIOptions.Uploads` wins when it is
+set; left nil with an `UploadStore` configured, `UIHandler` serves both asset
+mounts from that store through `UploadFS(store)`; with neither, neither path is
+mounted. So configuring `WithUploadStore` is enough to make an uploaded logo
+appear at the URL `POST <admin>/api/upload/logo` handed back. Set
+`UIOptions.Uploads` only to serve the read side from somewhere else — a
+read-through cache, a snapshot, an `os.DirFS` over a mounted volume — or when
+the read path needs per-request cancellation, which `fs.FS.Open` cannot carry.
+
+#### `UploadStore` and `MemoryUploadStore`
+
+`UploadStore` has four methods — `Put`, `List`, `Open`, `Delete` — and is the
+seam over the reference's `uploadDir`, which is a directory on a local disk and
+therefore not a portable answer for a host whose only writable path is a
+per-execution-environment `/tmp`. Nil is the feature turned off: the four upload
+routes are not registered, so they answer `404` rather than `401`, and the
+console's `features.upload` is `false`.
+
+Two rules an implementation has to keep. Every key satisfies `ValidUploadKey` —
+one path element of ASCII letters, digits, `.`, `_` and `-`, never starting with
+`.` — which is what makes `filepath.Join(root, key)` one element below `root` by
+construction rather than by check; a filesystem-backed store on Windows must
+additionally refuse the reserved device names, since `NUL.png` satisfies that
+grammar. And `List` returns newest first, ties broken by key ascending. `Put`
+must read its reader to EOF and leave nothing behind if it fails.
+`MemoryUploadStore` is the in-process implementation; `UploadContentType(key)`
+is the media type an object store should record at write time.
 
 ### `(*Auth).UIConfig(ctx, r *http.Request, cfg HTTPConfig) UIConfig`
 

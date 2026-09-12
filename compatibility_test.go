@@ -59,6 +59,8 @@ var wantDeviationIDs = []string{
 	"admin-guard-accepts-only-typed-session-tokens",
 	"admin-listings-are-ordered-by-id",
 	"admin-unauthenticated-get-serves-only-the-login-form",
+	"admin-upload-base-url-is-derived-from-the-mount",
+	"admin-upload-refusals-answer-the-admin-envelope",
 	"advertised-2fa-methods-require-store-support",
 	"config-require2fa-is-a-system-policy-term",
 	"cookie-max-age-follows-configured-ttl",
@@ -134,9 +136,38 @@ var wantClaims = map[string][]string{
 		"Provisional", "email verification", "nik2208/awesome-go-auth#21",
 		"cases_register_test.go", "EMAIL_NOT_VERIFIED",
 	},
+	// The last four claims are U15's: the entry now covers all three routers,
+	// and the one fact a reader must not lose is that the admin console's pair
+	// is the only route under <admin>/api/* that AdminGuard.Protect is not
+	// spread onto. An entry reduced to "the docs routes are opt-in" would read
+	// as a convenience default rather than as a published, unauthenticated
+	// description of the admin API.
 	"docs-routes-are-opt-in": {
 		"HTTPConfig.Docs.Enabled", "OpenAPIInfo.Docs", "NODE_ENV", "404",
 		"/openapi.json", "/docs", "swagger-ui-dist@5",
+		"AdminOptions.Docs.Enabled", "ToolsOptions.Docs.Enabled",
+		"AdminGuard.Protect", "anonymous caller",
+	},
+	// Which refusals are this port's and which is the reference's, the two
+	// numbers, and — the claim that keeps the entry from reading as a hardening
+	// — that the reference's own answer is produced by the *host application's*
+	// error handler and so cannot be ported at all. The last two pin the bound
+	// the reference does not have and the extension list that is unchanged,
+	// `svg` included: an entry that quietly dropped svg would be a different
+	// product from the reference's console.
+	"admin-upload-refusals-answer-the-admin-envelope": {
+		"multer", "fileFilter", "fileSize", "next(err)",
+		"host application", "400", "413", "500",
+		"Only image files are allowed", "No file uploaded",
+		"UploadStore", "svg",
+	},
+	// Both answers, the field that is unchanged beside the one that is not, and
+	// the reference mechanism — an option tested for truthiness against its own
+	// documented default — so the entry cannot be reduced to "the URL differs".
+	"admin-upload-base-url-is-derived-from-the-mount": {
+		"AdminOptions.UploadBaseURL", "effectiveUploadBaseUrl", "apiPrefix",
+		"@default '/auth'", "/ui/assets/uploads", "url === filename",
+		"filename", "UploadFS",
 	},
 	"cookie-max-age-follows-configured-ttl": {
 		"Max-Age=2592000", "Max-Age=604800", "RefreshTokenTTL", "refreshTokenExpiresIn",

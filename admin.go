@@ -67,6 +67,14 @@ const (
 	AdminJSPath     = "/assets/admin.js"  // admin.router.ts:696
 	AdminShellPath  = "/"                 // admin.router.ts:738
 	AdminPingPath   = "/api/ping"         // admin.router.ts:741
+
+	// AdminOpenAPIPath and AdminDocsPath are the console's own documentation
+	// pair (admin.router.ts:1499, :1517). They are the same two names the auth
+	// and tools routers serve, one segment further down — the reference spells
+	// them out there too — and they are the only two routes under /api/* that
+	// the reference registers with no guard. See AdminOptions.Docs.
+	AdminOpenAPIPath = "/api" + DocsSpecPath
+	AdminDocsPath    = "/api" + DocsUIPath
 )
 
 // adminTokenType is the typ claim on the token POST <admin>/login mints, and
@@ -257,11 +265,50 @@ type AdminOptions struct {
 	// HTTPConfig.Prefix(), which this port knows and the reference's separate
 	// router does not.
 	AuthAPIPrefix string
-	// UploadBaseURL is the public base the SPA builds uploaded-asset URLs from
-	// (:136-150). It is carried into the injected config and nothing in U12
-	// reads it; the upload routes are a later PR's, and adminFeatures reports
-	// upload as false until one exists.
+	// UploadBaseURL is the public base the SPA and the two upload routes build
+	// uploaded-asset URLs from — the reference's uploadBaseUrl (:136-150).
+	//
+	// Empty is not "no URL": with an UploadStore configured it is derived from
+	// the mount, as the reference derives it from apiPrefix, and the derived
+	// value is where UIHandler serves those objects back. See
+	// (*Auth).adminUploadBaseURL, whose comment carries the one place the
+	// derivation differs from the reference's.
+	//
+	// Set it when the assets are served from somewhere this deployment cannot
+	// know: a CDN in front of the UI mount, or a bucket served directly. The
+	// value is emitted as given, into the injected config and into the `url`
+	// member of both upload answers.
 	UploadBaseURL string
+	// Docs mounts the console's own documentation pair, GET <admin>/api/openapi.json
+	// and GET <admin>/api/docs, and says under which base path the document
+	// describes itself (admin.router.ts:1493-1521).
+	//
+	// It is DocsOptions, the same type HTTPConfig.Docs and ToolsOptions.Docs
+	// are, because the reference's three routers carry the same swagger option
+	// and the same swaggerBasePath beside it. BasePath defaults to
+	// HTTPConfig.AdminPath() here, which is the reference's own
+	// `options.swaggerBasePath ?? '/admin'` (:1498) read against a mount this
+	// port knows.
+	//
+	// # Enabling it publishes the admin API description to anonymous callers
+	//
+	// This is the one thing to weigh, and it is deliberate on both sides. Every
+	// other route under /api/* is registered with the guard; these two are not
+	// (:1499, :1517). So with this enabled, a caller holding no credential of
+	// any kind reads the whole documented admin surface — every path, every
+	// method, every request body — and, because the document's path items follow
+	// the configured stores, learns which optional features this deployment
+	// wired. The Swagger page beside it additionally loads swagger-ui-dist@5
+	// from the unpkg CDN onto the auth origin, with no subresource integrity;
+	// see DocsOptions.Enabled, which says the same of the auth router's pair.
+	//
+	// That asymmetry is reproduced rather than tidied away, because a port that
+	// quietly guarded these two would answer 401 where the reference answers
+	// 200 and would break any tooling that reads the document — and because the
+	// place to decide it is a host's configuration, which is why it is off by
+	// default here where the reference's is on outside production. That default
+	// is the docs-routes-are-opt-in deviation, which this pair now shares.
+	Docs DocsOptions
 }
 
 // AdminPath is AdminOptions.Path resolved: the configured value normalised the
@@ -284,6 +331,40 @@ func (c HTTPConfig) AdminPath() string {
 // the one thing that turns an unexpected 404 into a message.
 func (c HTTPConfig) AdminMounted() bool {
 	return c.Admin.Enabled && (c.Admin.AccessPolicy != nil || strings.TrimSpace(c.Admin.Secret) != "")
+}
+
+// AdminDocsBasePath is AdminOptions.Docs.BasePath resolved: the configured
+// value, normalised the way Prefix normalises the API prefix, or the admin mount
+// when none is configured.
+//
+// It is DocsBasePath's counterpart for this router and the reference's
+// `options.swaggerBasePath ?? '/admin'` (admin.router.ts:1498), which is the
+// same literal AdminOptions.Path defaults to — so the two agree by default and a
+// deployment that moves the mount without moving this one is saying the console
+// is reachable from outside under some other path.
+//
+// It moves the description, never the mount: the pair is always served below
+// AdminPath(), because that is where the adapter put the handler.
+func (c HTTPConfig) AdminDocsBasePath() string {
+	if strings.TrimSpace(c.Admin.Docs.BasePath) == "" {
+		return c.AdminPath()
+	}
+	return HTTPConfig{APIPrefix: c.Admin.Docs.BasePath}.Prefix()
+}
+
+// adminAuthAPIPrefix is AdminOptions.AuthAPIPrefix resolved: the configured
+// value, or the mount prefix this HTTPConfig already carries.
+//
+// The reference has to be told where the auth router lives (:152-157) because
+// its admin router is a separate Express router with no way to ask. Here the two
+// are configured together, so an unset value is the one the adapter was mounted
+// with. Both the shell's authApiPrefix and the derived upload base URL read it,
+// and reading it in one place is what keeps those two from disagreeing.
+func (c HTTPConfig) adminAuthAPIPrefix() string {
+	if prefix := strings.TrimSpace(c.Admin.AuthAPIPrefix); prefix != "" {
+		return prefix
+	}
+	return c.Prefix()
 }
 
 // ── the guard ────────────────────────────────────────────────────────────────
@@ -834,6 +915,35 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		a.serveAdminCredential(w, r, route, param)
 	}))
 
+	// U15's four upload routes, behind the same Protect and classified the same
+	// way. The reference spreads the guard onto all four (:1024, :1035, :1047,
+	// :1066); it is the two documentation routes below that carry none.
+	uploads := guard.Protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		route, param := matchAdminUpload(r.Method, adminRelativePath(r.URL.EscapedPath(), cfg.AdminPath()))
+		a.serveAdminUpload(w, r, cfg, route, param)
+	}))
+
+	// The console's own documentation pair, built once and both nil when
+	// AdminOptions.Docs.Enabled is unset, which is how the reference registers
+	// neither under `swagger: false` (:1494-1497).
+	//
+	// Neither goes behind Protect, because the reference gives neither a guard:
+	// an anonymous caller reads the admin API's description and its Swagger page
+	// even when every other route under /api/* answers 401. That is the one
+	// asymmetry on this surface and it is reproduced deliberately; what stands
+	// in front of it is the registration flag, which is off by default here.
+	// AdminOptions.Docs carries the argument and the consequence.
+	var spec, page http.Handler
+	if cfg.Admin.Docs.Enabled {
+		spec = AdminOpenAPIHandler(a.AdminOpenAPIInfo(cfg))
+		// The page is SwaggerUIHandler unchanged — the reference's one
+		// buildSwaggerUiHtml serving all three of its routers (openapi.ts:1646,
+		// read at admin.router.ts:1519) — so its title says "Tools API" on the
+		// admin console too. That is wrong there and wrong here, and it is the
+		// third route this port reproduces it on.
+		page = SwaggerUIHandler(cfg.AdminDocsBasePath() + AdminOpenAPIPath)
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rel := adminRouterPath(r, cfg)
 		// The read and write routes match on the escaped path, so a parameter is
@@ -842,6 +952,7 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		read, _ := matchAdminRead(escaped)
 		write, _ := matchAdminWrite(r.Method, escaped)
 		credential, _ := matchAdminCredential(r.Method, escaped)
+		upload, _ := matchAdminUpload(r.Method, escaped)
 		switch {
 		case rel == AdminLoginPath && r.Method == http.MethodPost:
 			if !guard.LoginRoutesMounted() {
@@ -878,6 +989,18 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		// each answers its own 404 for the store it was not given.
 		case credential != adminCredentialNone:
 			credentials.ServeHTTP(w, r)
+		// The four upload routes of admin_upload.go, registered only with an
+		// UploadStore — the reference's `if (options.uploadDir)` (:991). Without
+		// one this case never matches and all four answer the router's 404, the
+		// way GET /api/templates/* does without a TemplateStore.
+		case a.adminUploadRegistered(upload):
+			uploads.ServeHTTP(w, r)
+		// The documentation pair last, as the reference registers it last, and
+		// unguarded, as the reference registers it.
+		case spec != nil && rel == AdminOpenAPIPath && isAdminRead(r):
+			spec.ServeHTTP(w, r)
+		case page != nil && rel == AdminDocsPath && isAdminRead(r):
+			page.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1120,11 +1243,11 @@ type adminFeatureSet struct {
 // draws, which is the reference's arrangement and the reason the 501 carries an
 // empty page. WithAPIKeyStore and WithWebhookStore are what set them.
 //
-// One is still false and will stay false until the PR that owns the section
-// lands, and it is false rather than absent so the SPA hides the tab instead of
-// drawing one whose every request 404s: upload needs a writable asset directory,
-// and UIOptions.Uploads is an fs.FS, which is a read seam, where the reference's
-// uploadDir is a path it writes to.
+// upload is `!!options.uploadDir` (:656) read against Config.Uploads, which is
+// U15's UploadStore seam — so with this release every flag in the set follows
+// something a host actually configured, and none is pinned false waiting for a
+// PR. It is the store and not UIOptions.Uploads: that one is an fs.FS, a read
+// seam, and the flag turns on a file picker that writes.
 func (a *Auth) adminFeatures(cfg HTTPConfig) adminFeatureSet {
 	svc := a.service
 	_, sessions := svc.sessions.(SessionLister)
@@ -1141,7 +1264,7 @@ func (a *Auth) adminFeatures(cfg HTTPConfig) adminFeatureSet {
 		APIKeys:        a.apiKeys != nil,
 		Webhooks:       a.webhooks != nil,
 		Templates:      svc.cfg.Templates != nil,
-		Upload:         false,
+		Upload:         svc.cfg.Uploads != nil,
 	}
 }
 
@@ -1174,11 +1297,12 @@ func (a *Auth) adminShellHTML(cfg HTTPConfig, sessionBased, needsAuth bool) []by
 		features = adminFeatureSet{}
 	}
 
-	authAPIPrefix := strings.TrimSpace(cfg.Admin.AuthAPIPrefix)
-	if authAPIPrefix == "" {
-		authAPIPrefix = cfg.Prefix()
-	}
-	uploadBaseURL := cfg.Admin.UploadBaseURL
+	authAPIPrefix := cfg.adminAuthAPIPrefix()
+	// The injected value is effectiveUploadBaseUrl and not the raw option
+	// (:718, :733): with no base configured and an UploadStore wired, the SPA is
+	// given the derived one, which is the URL the objects are actually served
+	// from. See (*Auth).adminUploadBaseURL.
+	uploadBaseURL := a.adminUploadBaseURL(cfg)
 	if needsAuth {
 		uploadBaseURL = ""
 	}

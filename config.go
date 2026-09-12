@@ -132,6 +132,21 @@ type Config struct {
 	// calls, and which will hold the UI translations once the UI router reads
 	// them. Optional; nil renders the built-ins. WithTemplateStore sets it.
 	Templates TemplateStore
+	// Uploads is where the admin console's four upload routes write, and where
+	// the built-in UI's <prefix>/ui/assets/logo/ and <prefix>/ui/assets/uploads/
+	// mounts read back from: the seam over the reference's uploadDir
+	// (admin.router.ts:135, read at :991).
+	//
+	// Optional, and nil is the whole feature turned off rather than a degraded
+	// one — the four routes are not registered, so they answer 404 rather than
+	// 401, and the console's features.upload is false so the SPA draws no file
+	// picker. There is deliberately no default: see UploadStore.
+	//
+	// It is on Config rather than in HTTPConfig.Admin for the reason Templates
+	// and Settings are — it is a store, the reference carries it in the same
+	// options bag as the other stores, and both the admin router and the UI
+	// router read it. WithUploadStore sets it.
+	Uploads UploadStore
 	// Settings is the reference's routerOptions.settingsStore
 	// (auth.router.ts:92, read at :890-896): the global switches an
 	// administrator flips at run time. Optional; nil means the settings check is
