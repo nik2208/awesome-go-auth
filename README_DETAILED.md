@@ -133,6 +133,7 @@ type Config struct {
     Require2FA            bool
     TwoFactorAppName      string                        // TOTP issuer shown by authenticator apps; empty = Issuer — see TwoFactorAppName
     BuildTokenClaims      TokenClaimsBuilder            // see Custom Claims
+    PasswordVerifier      PasswordVerifier              // optional; accept another provider's password once and adopt it — see Password verifier
     SendMagicLink         MagicLinkSender               // required by POST /auth/magic-link/send
     SendSMSCode           SMSCodeSender                 // required by POST /auth/sms/send
     SendPasswordReset     PasswordResetSender           // optional; POST /auth/forgot-password
@@ -200,6 +201,98 @@ as constants, read by both the URI above and the verifier behind
 | `TOTPDigits` | `6` | otplib's default |
 | `TOTPPeriod` | `30 * time.Second` | otplib's default |
 | `TOTPSkew` | `1` | steps either side of now a code is accepted for; this port's tolerance — otplib's `epochTolerance` defaults to `0`, registered as the deviation `totp-accepts-one-step-of-skew` in [README.md](README.md) |
+
+### Password verifier (migration seam)
+
+`Config.PasswordVerifier`, set with `WithPasswordVerifier`, lets a deployment
+moving off another identity provider accept that provider's password on the
+first login, adopt it as a local bcrypt hash and stop calling the old system.
+
+**This is an additive port extension, not parity.** The reference has no such
+hook: its login path verifies the stored bcrypt hash directly
+(`local.strategy.ts:19-29` calling `password.service.ts:8-10`, and
+`POST /login` is that one call plus the 2FA decision,
+`auth.router.ts:541-544`), and nothing in its `AuthConfig` names a verifier, a
+legacy hash or a migration. Left unset — the default — the verifier is never
+called and `POST /auth/login` answers exactly as the reference does.
+
+It is nonetheless **not** in the deviation register, and the reason is not that
+its default matches the reference. That alone is not the register's test:
+`oauth-provisioning-is-a-policy-not-a-function` is registered even though a
+deployment that configures nothing cannot see any of its three codes — it is
+registered because configuring it puts three codes on the wire that the route
+could not produce before. This seam puts none. With a verifier configured,
+`POST /auth/login` still answers only what it already answered: the ordinary
+`200` token body, the `401 INVALID_CREDENTIALS` a wrong local password already
+produced, or the generic `500`. No new status, no new code, no new body field,
+on this route or any other.
+
+```go
+type PasswordVerifier func(ctx context.Context, user User, password string) (ok bool, migrated bool, err error)
+```
+
+```go
+a, err := auth.New(
+    auth.WithPasswordVerifier(func(ctx context.Context, u auth.User, pw string) (bool, bool, error) {
+        if u.Metadata["legacyIdP"] != "acme" {
+            return false, false, nil // not a migrated account: ordinary 401
+        }
+        ok, err := acme.CheckPassword(ctx, u.Email, pw)
+        return ok, ok, err // adopt the password iff the old system accepted it
+    }),
+)
+```
+
+When it runs, and what each answer means:
+
+| | |
+|---|---|
+| **When** | Only after the stored hash failed to verify the supplied password. A user whose local hash verifies never reaches the hook, so a finished migration costs nothing per login. A login for an address the store does not hold does not reach it either: the hook takes a `User`, and provisioning an unknown account is a different job. **Everything else does reach it**, which is wider than the imported row the seam was built for: an empty stored hash is a non-match, so *every* account that never had a password — OAuth-only, magic-link-only — has its failed logins handed to the verifier, carrying whatever plaintext the request held. The reference refuses those before it compares anything (`local.strategy.ts:23-25`); this port has no equivalent guard, so a verifier **must** key on its own migration marker and return `(false, false, nil)` before doing anything with the password it is given. |
+| `ok=false` | Not the password. `ErrInvalidCredentials` — the same value, and so the same `401 {"error":"Invalid credentials","code":"INVALID_CREDENTIALS"}`, an ordinary wrong password produces. |
+| `ok=true, migrated=true` | The password, and adopt it: hashed at `Config.BcryptCost` and written through `UserPasswordStore.UpdatePassword`, the path `ResetPassword` and `ChangePassword` already use, before anything is issued. **The write overwrites whatever hash was stored, not only an absent one** — the hook is reached for any hash that failed to verify, so a verifier that is not gated on a migration marker can answer `ok` for a live account and replace its working local password with the password the request carried. The adopted password deliberately bypasses `Config.MinPasswordLen`: it is an inherited credential rather than one being chosen, and `Register`, `ResetPassword` and `ChangePassword` still enforce the length where a password *is* chosen. The one value never written is the empty string — a bcrypt hash of `""` would make empty-password login succeed forever and would permanently close the passwordless initial-password path that keys on an empty `PasswordHash` — so an empty password behaves as `migrated=false`. |
+| `ok=true, migrated=false` | The password, keep nothing. The login proceeds, the stored hash is untouched, and the next login asks again. For a host that means to keep owning the credential. |
+| `err != nil` | A failure to *decide*, not a rejection. The login fails closed with the generic `500 {"error":"Internal server error"}` and `ok` is ignored. |
+
+Two properties the tests pin:
+
+- **No new failure a client can see.** Every failure in the seam — the hook
+  erroring, the hash not being computable, the store refusing the write or not
+  being a `UserPasswordStore` at all — comes back as an opaque error that maps
+  through `HTTPErrorFor`'s default to the generic `500`. In particular it is
+  *not* wrapped with `%w`, so a store returning `ErrFeatureNotSupported` cannot
+  turn one branch into a distinguishable `501 NOT_IMPLEMENTED`. The exception is
+  `ctx`: `context.Canceled` and `context.DeadlineExceeded` *are* wrapped with
+  `%w`, because `HTTPErrorFor` maps neither — both fall to the same generic
+  `500` — so keeping them leaks nothing and lets a caller tell a client that
+  hung up from a legacy provider that is down. Since the wire answer names no
+  branch, every failure is also passed to `Config.Logger` (user id, never the
+  password), which is the only place an operator can read what happened.
+- **The write is part of accepting the credential**, so it lands before the
+  email-verification gate. An account then refused for an unverified address has
+  still stopped depending on the old system; migrating only on a login that
+  completes would keep such an account calling it forever.
+
+And one statement of posture that **no test asserts**: timing. The seam adds no
+equalisation and removes none — the login path did not equalise before it (an
+address the store does not hold returns before any bcrypt work, a known one pays
+one bcrypt compare) and does not equalise now. But a configured verifier widens
+that pre-existing gap by its own latency: a known address whose hash does not
+verify now costs the bcrypt compare *plus* whatever the verifier does, which in
+the case this seam exists for is a call to the old provider. A signal that was
+milliseconds of key derivation becomes a network round trip. Equalising what is
+left is the verifier's job, not this library's.
+
+Two requirements on a verifier, then. The example above shows the first; the
+second is the host's to add around whatever call it makes:
+
+- **Gate on a locally-readable marker and return before any network call.** The
+  hook sits on an unauthenticated route and is reached for every account whose
+  stored hash does not verify, so a verifier that calls the old provider for any
+  address it is handed turns `POST /auth/login` into an amplifier aimed at that
+  provider — and at its lockout counters — for every address an attacker names.
+- **Bound and rate-limit whatever call survives the marker.** The hook runs on
+  the request goroutine, so a verifier that talks to the network must honour
+  `ctx`, cap its own time, and cap how often it goes out.
 
 ### `DefaultConfig(secret string) Config`
 
@@ -486,6 +579,7 @@ Pass to `auth.New(...)`:
 | `WithRequire2FA(bool)` | Require 2FA for all users |
 | `WithTwoFactorAppName(string)` | Issuer of the TOTP provisioning URI, the reference's `twoFactor.appName`; empty keeps `Issuer` — see [TwoFactorAppName](#twofactorappname-and-the-totp-parameters) |
 | `WithTokenClaimsBuilder(TokenClaimsBuilder)` | Custom JWT claims — see [Custom Claims](#custom-claims) |
+| `WithPasswordVerifier(PasswordVerifier)` | Accept the previous identity provider's password on first login and adopt it locally; a port extension, off unless set — see [Password verifier](#password-verifier-migration-seam) |
 | `WithMagicLinkSender(MagicLinkSender)` | Deliver magic links — see [Delivery](#delivery) |
 | `WithSMSCodeSender(SMSCodeSender)` | Deliver SMS codes — see [Delivery](#delivery) |
 | `WithPasswordResetSender(PasswordResetSender)` | Deliver password-reset tokens — see [Delivery](#delivery) |
