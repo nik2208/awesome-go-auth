@@ -12,7 +12,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -110,8 +109,17 @@ func main() {
 
 	// One call mounts every auth route under the configured prefix (/auth by
 	// default). Mounting on a group works too — the CSRF middleware locates the
-	// prefix on any segment boundary — via ginAdapter.MountWithConfig.
-	ginAdapter.Mount(r, a)
+	// prefix on any segment boundary.
+	//
+	// Docs.Enabled adds GET /auth/openapi.json (the generated document for this
+	// mount) and GET /auth/docs (the Swagger UI page reading it). The library
+	// takes a plain bool and never reads the environment itself, so resolving
+	// what the reference resolves against NODE_ENV is this one line. Leave it
+	// off in production: the UI page loads swagger-ui-dist from the unpkg CDN
+	// onto the auth origin.
+	cfg := auth.DefaultHTTPConfig()
+	cfg.Docs.Enabled = getEnv("APP_ENV", "development") != "production"
+	ginAdapter.MountWithConfig(r, a, cfg)
 
 	// OIDC IDP endpoints, on a mux of this application's own, under /oidc.
 	//
@@ -130,16 +138,17 @@ func main() {
 	r.GET("/admin", gin.WrapH(auth.ServeAdminUI()))
 	r.GET("/auth.js", gin.WrapH(auth.ServeAuthJS()))
 
-	// OpenAPI spec. APIPrefix must match the mount.
-	r.GET("/openapi.json", func(c *gin.Context) {
-		spec := auth.GenerateOpenAPISpec(auth.OpenAPIInfo{
-			Title:     "My App API",
-			ServerURL: "https://api.example.com",
-			APIPrefix: auth.DefaultAPIPrefix,
-		})
-		c.Header("Content-Type", "application/json")
-		_ = json.NewEncoder(c.Writer).Encode(spec)
-	})
+	// A second copy of the document, at the root and under this app's own name.
+	// The mount already serves one at /auth/openapi.json (see Docs.Enabled
+	// above); this is the exported handler, for a host that wants the document
+	// somewhere else or wants to fill in the fields that name its API rather
+	// than the library's. APIPrefix must match the mount.
+	r.GET("/openapi.json", gin.WrapH(auth.OpenAPIHandler(auth.OpenAPIInfo{
+		Title:     "My App API",
+		ServerURL: "https://api.example.com",
+		APIPrefix: cfg.Prefix(),
+		Docs:      cfg.Docs.Enabled,
+	})))
 
 	addr := getEnv("ADDR", ":8080")
 	log.Printf("listening on %s", addr)

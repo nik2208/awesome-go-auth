@@ -509,6 +509,16 @@ type HTTPConfig struct {
 	// no admin rateLimiter at all. No admin route exists here yet, so nothing
 	// below implements that half.
 	RateLimiter func(http.Handler) http.Handler
+
+	// Docs mounts the two documentation routes the reference's swagger option
+	// registers: GET <prefix>/openapi.json and GET <prefix>/docs, neither with
+	// a guard of its own (auth.router.ts:1656-1677), both behind the CSRF
+	// middleware as every reference route registered after its router-level
+	// auto-init is (:529-538) — which on a GET distributes the csrf-token
+	// cookie and rejects nothing. Nothing is mounted unless Docs.Enabled is
+	// set; see DocsOptions in docs.go for that field and for why it is a bool
+	// where the reference's option is also the string "auto".
+	Docs DocsOptions
 }
 
 // RateLimitMiddleware returns the configured rate limiter, or a pass-through

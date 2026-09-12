@@ -749,6 +749,71 @@ func CompatibilityNotes() APICompatibilityNotes {
 						"UI rather than reading the flag.",
 				}},
 			},
+			{
+				ID:      "docs-routes-are-opt-in",
+				Title:   "The documentation routes are off until asked for, and the document describes them",
+				Surface: "`HTTPConfig.Docs.Enabled`: `GET <prefix>/openapi.json` and `GET <prefix>/docs`",
+				Behaviour: "Registers neither route unless `HTTPConfig.Docs.Enabled` is set, so a " +
+					"deployment that configures nothing answers `404` for both. Set, the two " +
+					"answer what the reference answers, to a request carrying no credential of " +
+					"any kind: the generated document as `application/json`, and the reference's " +
+					"Swagger UI page reproduced byte for byte, `swagger-ui-dist@5` from the unpkg " +
+					"CDN included. Neither route has an auth gate, as neither has one there; both " +
+					"sit behind the CSRF middleware, as every reference route registered after " +
+					"the router-level auto-init does, which on a `GET` only writes the " +
+					"`csrf-token` cookie to a reader who arrives without one. The served document " +
+					"additionally describes those same two paths, which is what `OpenAPIInfo.Docs` " +
+					"adds; the reference's generator describes neither, under any option.",
+				Reference: "Registers both when `swagger === true || (swagger !== false && " +
+					"NODE_ENV !== 'production')`. The option defaults to `'auto'`, which is the " +
+					"second arm, so a deployment that configures nothing serves them everywhere " +
+					"except where the process environment sets `NODE_ENV` to exactly " +
+					"`production`. Its generator emits the auth routes and stops, so neither " +
+					"`/openapi.json` nor `/docs` appears in the document it serves.",
+				Citations: []string{
+					"auth.router.ts:123-131",
+					"auth.router.ts:529-538",
+					"auth.router.ts:1652-1654",
+					"auth.router.ts:1656-1677",
+					"openapi.ts:1646-1669",
+				},
+				Why: "What a library serves must follow from its own configuration, not from a " +
+					"process-wide variable it never sees set. `NODE_ENV` is a Node convention " +
+					"with no Go counterpart — there is no one variable a Go deployment agrees " +
+					"on, and picking one would make these routes appear and disappear on a value " +
+					"the caller never passed to this library. Reading the ambient environment is " +
+					"the host's call, and `Docs.Enabled` is where its answer goes, which is also " +
+					"the reference's own `swagger: true | false` for a host that wants to decide " +
+					"rather than infer. Defaulting to off rather than to on is the safe " +
+					"direction of that choice: an unserved document is a missing convenience, a " +
+					"served one is a description of the surface an attacker would otherwise have " +
+					"to guess — and `<prefix>/docs` is more than a description. The page is the " +
+					"reference's, so it loads `swagger-ui-dist@5` from the unpkg CDN with no " +
+					"subresource integrity, and whatever that CDN serves then runs on the auth " +
+					"origin, where the `csrf-token` cookie is readable from JavaScript by design. " +
+					"A deployment should keep the UI route off in production, or serve it behind " +
+					"a `Content-Security-Policy` that pins the CDN.",
+				Notes: []DeviationNote{
+					{
+						Label: "Restoring the reference's default",
+						Text: "One line where the `HTTPConfig` is built — " +
+							"`cfg.Docs.Enabled = os.Getenv(\"APP_ENV\") != \"production\"` — with " +
+							"whatever variable the deployment actually uses. Nothing else changes: " +
+							"the routes, the bodies and the mount are the same either way.",
+					},
+					{
+						Label: "Why the document lists itself",
+						Text: "The wire conformance suite compares the generated document to the " +
+							"mounted routes in both directions, on every adapter: a documented " +
+							"operation that answers `404` fails, and so does a mounted route the " +
+							"document omits. A document that hid the endpoint serving it would " +
+							"have to be exempted from the second half, and the exemption is what " +
+							"lets a spec drift. `OpenAPIInfo.Docs` is set with " +
+							"`HTTPConfig.Docs.Enabled` and describes exactly the two paths that " +
+							"flag mounts.",
+					},
+				},
+			},
 		},
 	}
 }

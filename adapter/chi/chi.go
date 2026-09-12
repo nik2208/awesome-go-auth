@@ -96,6 +96,22 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 	r.Method(http.MethodDelete, prefix+"/linked-accounts/{provider}/{providerAccountId}", h.UnlinkAccountHandler())
 	r.Method(http.MethodPost, prefix+"/link-request", h.LinkRequestHandler())
 	r.Method(http.MethodPost, prefix+"/link-verify", h.LinkVerifyHandler())
+
+	// Documentation, last: the reference registers both at the end of the
+	// router (auth.router.ts:1656-1677) and only under its swagger option,
+	// which is HTTPConfig.Docs.Enabled here. Neither route carries a guard of
+	// its own there, but both sit after the router-level CSRF auto-init
+	// (:529-538), so both go through the CSRF middleware here — the shared
+	// net/http handlers wrap themselves in it, as the OAuth ones do. HEAD is
+	// registered next to GET because chi, unlike net/http and Express, does not
+	// fall back from one to the other.
+	if resolved.Docs.Enabled {
+		spec, ui := h.OpenAPIHandler(), h.SwaggerUIHandler()
+		r.Method(http.MethodGet, prefix+auth.DocsSpecPath, spec)
+		r.Method(http.MethodHead, prefix+auth.DocsSpecPath, spec)
+		r.Method(http.MethodGet, prefix+auth.DocsUIPath, ui)
+		r.Method(http.MethodHead, prefix+auth.DocsUIPath, ui)
+	}
 }
 
 // mountCredentialRoutes registers the nineteen routes that create, prove,

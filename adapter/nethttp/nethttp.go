@@ -140,6 +140,18 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 	mux.Handle("DELETE "+prefix+"/linked-accounts/{provider}/{providerAccountId}", a.UnlinkAccountHandler())
 	mux.Handle("POST "+prefix+"/link-request", a.LinkRequestHandler())
 	mux.Handle("POST "+prefix+"/link-verify", a.LinkVerifyHandler())
+
+	// Documentation, last: the reference registers both at the end of the
+	// router (auth.router.ts:1656-1677) and only under its swagger option,
+	// which is HTTPConfig.Docs.Enabled here. Neither route carries a guard of
+	// its own there, but both sit after the router-level CSRF auto-init
+	// (:529-538), so both go through the CSRF middleware here — the handlers in
+	// docs.go wrap themselves in it, as the OAuth ones do. GET only, as there;
+	// net/http routes HEAD to a GET pattern itself.
+	if a.cfg.Docs.Enabled {
+		mux.Handle("GET "+prefix+auth.DocsSpecPath, a.OpenAPIHandler())
+		mux.Handle("GET "+prefix+auth.DocsUIPath, a.SwaggerUIHandler())
+	}
 }
 
 // mountCredentialRoutes registers the nineteen routes that create, prove,

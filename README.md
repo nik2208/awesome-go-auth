@@ -710,6 +710,60 @@ revision the whole contract was extracted from.
   `POST <prefix>/register` there, or runs in resource-server mode;
   `features.register` still answers `true` in the first case, so such a host
   hides the affordance in its own UI rather than reading the flag.
+
+### The documentation routes are off until asked for, and the document describes them
+
+`docs-routes-are-opt-in`
+
+- **Surface**: `HTTPConfig.Docs.Enabled`: `GET <prefix>/openapi.json` and
+  `GET <prefix>/docs`.
+- **This port**: Registers neither route unless `HTTPConfig.Docs.Enabled` is
+  set, so a deployment that configures nothing answers `404` for both. Set, the
+  two answer what the reference answers, to a request carrying no credential of
+  any kind: the generated document as `application/json`, and the reference's
+  Swagger UI page reproduced byte for byte, `swagger-ui-dist@5` from the unpkg
+  CDN included. Neither route has an auth gate, as neither has one there; both
+  sit behind the CSRF middleware, as every reference route registered after the
+  router-level auto-init does, which on a `GET` only writes the `csrf-token`
+  cookie to a reader who arrives without one. The served document additionally
+  describes those same two paths, which is what `OpenAPIInfo.Docs` adds; the
+  reference's generator describes neither, under any option.
+- **The reference**: Registers both when
+  `swagger === true || (swagger !== false && NODE_ENV !== 'production')`. The
+  option defaults to `'auto'`, which is the second arm, so a deployment that
+  configures nothing serves them everywhere except where the process environment
+  sets `NODE_ENV` to exactly `production`. Its generator emits the auth routes
+  and stops, so neither `/openapi.json` nor `/docs` appears in the document it
+  serves (`auth.router.ts:123-131`, `auth.router.ts:529-538`,
+  `auth.router.ts:1652-1654`, `auth.router.ts:1656-1677`,
+  `openapi.ts:1646-1669`).
+- **Why**: What a library serves must follow from its own configuration, not
+  from a process-wide variable it never sees set. `NODE_ENV` is a Node
+  convention with no Go counterpart — there is no one variable a Go deployment
+  agrees on, and picking one would make these routes appear and disappear on a
+  value the caller never passed to this library. Reading the ambient environment
+  is the host's call, and `Docs.Enabled` is where its answer goes, which is also
+  the reference's own `swagger: true | false` for a host that wants to decide
+  rather than infer. Defaulting to off rather than to on is the safe direction
+  of that choice: an unserved document is a missing convenience, a served one is
+  a description of the surface an attacker would otherwise have to guess — and
+  `<prefix>/docs` is more than a description. The page is the reference's, so it
+  loads `swagger-ui-dist@5` from the unpkg CDN with no subresource integrity,
+  and whatever that CDN serves then runs on the auth origin, where the
+  `csrf-token` cookie is readable from JavaScript by design. A deployment should
+  keep the UI route off in production, or serve it behind a
+  `Content-Security-Policy` that pins the CDN.
+- **Restoring the reference's default**: One line where the `HTTPConfig` is
+  built — `cfg.Docs.Enabled = os.Getenv("APP_ENV") != "production"` — with
+  whatever variable the deployment actually uses. Nothing else changes: the
+  routes, the bodies and the mount are the same either way.
+- **Why the document lists itself**: The wire conformance suite compares the
+  generated document to the mounted routes in both directions, on every adapter:
+  a documented operation that answers `404` fails, and so does a mounted route
+  the document omits. A document that hid the endpoint serving it would have to
+  be exempted from the second half, and the exemption is what lets a spec drift.
+  `OpenAPIInfo.Docs` is set with `HTTPConfig.Docs.Enabled` and describes exactly
+  the two paths that flag mounts.
 <!-- END GENERATED: deviations -->
 
 ## Parity Snapshot vs `awesome-node-auth`
@@ -736,7 +790,7 @@ release that closes the gap.
 | API keys (M2M) | ⚠️ Service-level | `APIKeyService` + `APIKeyMiddleware`; no management routes. | v0.10.0 |
 | Admin panel | ❌ Absent | `ServeAdminUI()` serves a static page; none of the reference's admin routes exist, and no admin guard. | v0.10.0 |
 | Built-in UI + auth runtime (`auth.js`) | ⚠️ Partial | `ServeAuthUI()`/`ServeAuthJS()` serve hand-written assets, not the reference's. `GET <prefix>/ui/config` is mounted on all four adapters under `HTTPConfig.UI.Enabled` and serves the reference's document — feature flags derived from the wiring, branding from `UIOptions.Branding` with the `SettingsStore` on top, translations from the template store's `config` page, the echoed `headless` flag and the reduced store-failure fallback. What keeps this ⚠️: the HTML pages, the static assets and the uploaded logos are not served yet. | v0.8.0 |
-| OpenAPI / Swagger docs | ⚠️ Partial | `GenerateOpenAPISpec` returns the document; nothing serves it. | v0.7.0 |
+| OpenAPI / Swagger docs | ✅ Implemented | `HTTPConfig.Docs.Enabled` makes all four adapters serve `GET <prefix>/openapi.json` and `GET <prefix>/docs`, with no auth guard of their own as the reference registers them and behind the CSRF middleware as its router-level auto-init puts every route registered after it — which on a `GET` only hands the `csrf-token` cookie to a reader who arrives without one; the page is the reference's, `swagger-ui-dist@5` from the unpkg CDN and all, and `DocsOptions.BasePath` is its `swaggerBasePath` — it moves the description, never the mount. Off by default, where the reference's `'auto'` reads `NODE_ENV`: that call is the host's here (`docs-routes-are-opt-in`). | — |
 | Event-driven tooling (event bus, SSE, inbound/outbound webhooks, telemetry, notify) | ⚠️ Primitives only | `EventBus`, `SseHub`, `WebhookDispatcher` and `TelemetryStore` exist, but the service publishes no events, there is no tools router, and the outbound webhook headers differ from the reference. | v0.11.0 |
 | Client libraries compatibility (Angular + Flutter) | ✅ For the auth surface | Verified by [awesome-lambda-auth](https://github.com/nik2208/awesome-lambda-auth) with both official clients unmodified against a live stack. | — |
 | Rate limiting | ✅ Slot implemented | The reference ships no algorithm — it declares a slot (`RouterOptions.rateLimiter`) and spreads it onto every auth route. `HTTPConfig.RateLimiter` is that slot: a `func(http.Handler) http.Handler` applied by all four adapters to every auth route, outside the CSRF and auth middlewares as the reference applies it, `nil` (the default) meaning none. The algorithm stays the integrator's middleware, as it is there. | — |

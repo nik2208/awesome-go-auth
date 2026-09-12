@@ -210,6 +210,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later change serves. **`(*Auth).UIConfig(ctx, r, cfg)`** returns the document
   as a value (`UIConfig`, `UIFeatures`, `UIConfigBranding`) for a host serving
   its own UI route.
+- **`GET <prefix>/openapi.json` and `GET <prefix>/docs`** — the reference's two
+  documentation routes (`auth.router.ts:1652-1677`), mounted by all four
+  adapters when `HTTPConfig.Docs.Enabled` is set and by none of them otherwise.
+  Neither has an auth gate, as neither has one in the reference: a reader
+  fetches both with no credential of any kind. Both do sit behind the CSRF
+  middleware, as every reference route registered after the router-level
+  auto-init (`auth.router.ts:529-538`) does — on a `GET` that only writes the
+  `csrf-token` cookie to a reader who arrives without one, and rejects nothing.
+  The first answers `GenerateOpenAPISpec` for that
+  mount as `application/json`; the second answers the reference's Swagger UI
+  page, reproduced byte for byte from `buildSwaggerUiHtml`
+  (`openapi.ts:1646-1669`) including the `swagger-ui-dist@5` bundles it loads
+  from the unpkg CDN, pointed at the document next door. `DocsOptions.BasePath`
+  is the reference's `swaggerBasePath` (`auth.router.ts:1657`): it moves the
+  description — the paths the served document writes and the URL the page
+  fetches — and never the mount, which stays at `HTTPConfig.Prefix()`. Covered
+  by the wiretest suite on all four adapters. See README_DETAILED.md, "OpenAPI".
+- **`OpenAPIHandler(info OpenAPIInfo)` and `SwaggerUIHandler(specURL string)`** —
+  the two `http.Handler`s behind those routes, exported for a host that serves
+  the document from a route of its own. `(*nethttp.Adapter).OpenAPIInfo()` is
+  the `OpenAPIInfo` describing that adapter's mount: the IdP flag, the JWKS path
+  and the resource-server flag are read off the mount and cannot disagree with
+  it, and `APIPrefix` is the documented base path — the mount prefix unless
+  `DocsOptions.BasePath` moves the description. Enabling the UI route puts the
+  reference's unpkg-hosted `swagger-ui-dist@5` bundle on the auth origin; see
+  the deviation note before turning it on in production.
+- **`OpenAPIInfo.Docs`** — adds those same two paths to the generated document.
+  The adapters set it with `HTTPConfig.Docs.Enabled`, so the document and the
+  mount agree in both directions; the conformance suite checks that, per
+  adapter, through the new `docs` conditional route set.
+- **Deviation register: `docs-routes-are-opt-in`.** The reference enables those
+  two routes whenever `swagger !== false && NODE_ENV !== 'production'`, so a
+  deployment that configures nothing serves them outside production. This port
+  takes a plain `bool` and defaults it to off: resolving an ambient environment
+  belongs to the host, and `cfg.Docs.Enabled = os.Getenv("APP_ENV") !=
+  "production"` is the whole of it. The served document also lists its own two
+  paths, which the reference's generator never does. Both halves are in
+  `CompatibilityNotes()` and the README's generated deviations section.
 
 ### Changed
 - **`POST /auth/register` refuses a missing email or password with
@@ -264,6 +302,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only way back to the previous behaviour is to stop setting `UIEnabled` and
   point the emailed links elsewhere. The generated OpenAPI document is not
   affected: it lists the route only under the separate `OpenAPIInfo.UI`.
+- **`HTTPConfig` gained `Docs DocsOptions`.** Purely additive: a `HTTPConfig`
+  built as before has `Docs.Enabled` false and mounts nothing new.
 
 ### Deprecated
 - **`HTTPConfig.UIEnabled`** — use `HTTPConfig.UI.Enabled`. It is an alias, not a

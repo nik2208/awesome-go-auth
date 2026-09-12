@@ -57,6 +57,7 @@ var wantDeviationIDs = []string{
 	"config-require2fa-is-a-system-policy-term",
 	"cookie-max-age-follows-configured-ttl",
 	"csrf-cookie-not-reissued-with-tokens",
+	"docs-routes-are-opt-in",
 	"forgot-password-succeeds-on-delivery-failure",
 	"jwks-cors-wildcard-string-form",
 	"jwks-unknown-kid-refetch-is-rate-limited",
@@ -118,6 +119,10 @@ var wantClaims = map[string][]string{
 		"sendTokens", "POST /login", "no knob",
 		"Provisional", "email verification", "nik2208/awesome-go-auth#21",
 		"cases_register_test.go", "EMAIL_NOT_VERIFIED",
+	},
+	"docs-routes-are-opt-in": {
+		"HTTPConfig.Docs.Enabled", "OpenAPIInfo.Docs", "NODE_ENV", "404",
+		"/openapi.json", "/docs", "swagger-ui-dist@5",
 	},
 	"cookie-max-age-follows-configured-ttl": {
 		"Max-Age=2592000", "Max-Age=604800", "RefreshTokenTTL", "refreshTokenExpiresIn",
