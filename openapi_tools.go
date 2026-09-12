@@ -46,9 +46,10 @@ type ToolsOpenAPIInfo struct {
 	// serve — HTTPConfig.ToolsOpenAPIInfo is the way not to have to remember
 	// that.
 	//
-	// They select no path items yet, because U22 mounts none of the four
-	// groups; what they select today is the tags block, which is the
-	// reference's own flag-driven vocabulary declaration (openapi.ts:1621-1625).
+	// Telemetry and Notify select a path item each as well as a tag, from U23
+	// on. Stream and Webhook still select only the tags block, which is the
+	// reference's own flag-driven vocabulary declaration (openapi.ts:1621-1625),
+	// until U24 and U25 mount the routes they gate.
 	Telemetry bool
 	Notify    bool
 	Stream    bool
@@ -86,10 +87,15 @@ func GenerateToolsOpenAPISpec(info ToolsOpenAPIInfo) map[string]any {
 	}
 
 	paths := map[string]any{}
-	// U23: base + "/track/{eventName}" and base + "/notify/{target}".
 	// U25: base + "/telemetry" and base + "/webhook/{provider}", the first of
 	// them under the reference's hasTelemetryQuery rather than the telemetry
 	// flag alone (openapi.ts:1378).
+	if info.Telemetry {
+		paths[base+ToolsTrackPath+"/{eventName}"] = toolsOpenAPITrackPath()
+	}
+	if info.Notify {
+		paths[base+ToolsNotifyPath+"/{target}"] = toolsOpenAPINotifyPath()
+	}
 	if info.Stream {
 		paths[base+ToolsStreamPath] = toolsOpenAPIStreamPath()
 	}
@@ -283,6 +289,117 @@ func toolsOpenAPIStreamPath() map[string]any {
 				},
 				"401": map[string]any{"description": "Unauthorized"},
 				"503": map[string]any{"description": "SSE not enabled on this server"},
+			},
+		},
+	}
+}
+
+// toolsOpenAPITrackPath describes POST <tools>/track/{eventName}
+// (openapi.ts:1385-1416), transcribed.
+//
+// Two things are added to the reference's item, and both are things this server
+// actually answers. The 400 is tools-request-bodies-are-typed — the reference
+// documents 202 and 401 only, because a cast cannot fail and its own refusal
+// comes from express.json before the route is reached. The description says
+// where the address in the record comes from, because
+// tools-track-ip-comes-from-the-configured-seam means a caller cannot set it by
+// sending a header, and a document that stayed silent about that would leave a
+// client trying.
+func toolsOpenAPITrackPath() map[string]any {
+	return map[string]any{
+		"post": map[string]any{
+			"summary": "Track a telemetry event",
+			"description": "Fans one event out to the four sinks of `AuthTools`: the telemetry " +
+				"store, the event bus, the SSE topics the identifiers resolve to, and every " +
+				"matching outgoing webhook. `userId` falls back to the authenticated " +
+				"principal when the body omits it. The recorded client address is " +
+				"`HTTPConfig.ClientIP` — the socket peer by default — and **not** " +
+				"`X-Forwarded-For`, which is read nowhere; `User-Agent` is recorded as sent.",
+			"operationId": "trackEvent",
+			"tags":        []string{"Telemetry"},
+			"security":    []map[string]any{{"BearerAuth": []string{}}},
+			"parameters": []map[string]any{
+				{
+					"name":        "eventName",
+					"in":          "path",
+					"required":    true,
+					"description": "Event name in domain.resource.action format (e.g. identity.auth.login.success)",
+					"schema":      map[string]any{"type": "string", "example": "identity.auth.login.success"},
+				},
+			},
+			"requestBody": map[string]any{
+				"required": false,
+				"content": map[string]any{
+					"application/json": map[string]any{
+						"schema": map[string]any{"$ref": "#/components/schemas/TrackPayload"},
+					},
+				},
+			},
+			"responses": map[string]any{
+				"202": map[string]any{
+					"description": "Event accepted",
+					"content": map[string]any{
+						"application/json": map[string]any{
+							"schema": map[string]any{"$ref": "#/components/schemas/OkResponse"},
+						},
+					},
+				},
+				"400": map[string]any{
+					"description": "The body is not JSON, or a field does not have the documented type — " +
+						"`data` in particular must be a JSON object",
+				},
+				"401": map[string]any{"description": "Unauthorized"},
+			},
+		},
+	}
+}
+
+// toolsOpenAPINotifyPath describes POST <tools>/notify/{target}
+// (openapi.ts:1456-1490), transcribed, with the same 400 and with the one fact
+// about this route a reader cannot get from the reference's own summary: it
+// reaches the SSE channel and only that one.
+func toolsOpenAPINotifyPath() map[string]any {
+	return map[string]any{
+		"post": map[string]any{
+			"summary": "Send a real-time SSE notification to a topic",
+			"description": "Broadcasts to the named topic and to no other. The `email` and `sms` " +
+				"channels of `AuthTools.Notify` are not reachable from this route — it sends " +
+				"no `channels`, so the default `['sse']` applies to every request, as in the " +
+				"reference. A topic no connection holds is delivered to nobody and still " +
+				"answers `202`.",
+			"operationId": "notifyTarget",
+			"tags":        []string{"Notifications"},
+			"security":    []map[string]any{{"BearerAuth": []string{}}},
+			"parameters": []map[string]any{
+				{
+					"name":        "target",
+					"in":          "path",
+					"required":    true,
+					"description": "Topic (e.g. user:123, tenant:acme, global)",
+					"schema":      map[string]any{"type": "string", "example": "user:123"},
+				},
+			},
+			"requestBody": map[string]any{
+				"required": true,
+				"content": map[string]any{
+					"application/json": map[string]any{
+						"schema": map[string]any{"$ref": "#/components/schemas/NotifyPayload"},
+					},
+				},
+			},
+			"responses": map[string]any{
+				"202": map[string]any{
+					"description": "Notification dispatched",
+					"content": map[string]any{
+						"application/json": map[string]any{
+							"schema": map[string]any{"$ref": "#/components/schemas/OkResponse"},
+						},
+					},
+				},
+				"400": map[string]any{
+					"description": "The body is not JSON, or a field does not have the documented type",
+				},
+				"401": map[string]any{"description": "Unauthorized"},
 			},
 		},
 	}

@@ -8,6 +8,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`POST <tools>/track/{eventName}` and `POST <tools>/notify/{target}`**
+  (`tools_track_notify.go`). The tools router's first two feature routes
+  (`tools.router.ts:140-160`, `:165-179`), both behind
+  `auth.ToolsProtectMiddleware` where the reference spreads `...protect`, both
+  answering `202 {"ok": true}` whatever the fan-out did. `track` takes `data`,
+  `userId`, `tenantId`, `sessionId` and `correlationId` off the body — `userId`
+  falling back to the authenticated principal on the context — and calls
+  `AuthTools.Track`; `notify` takes `data`, `type`, `tenantId`, `userId` and
+  `metadata` and calls `AuthTools.Notify`, which broadcasts to the single topic
+  `{target}` names and to no other. Neither route re-implements any of the
+  fan-out U21 pinned. `DisableTelemetry` and `DisableNotify` unmount their own
+  route, so a switched-off group answers the router's `404` and not a handler's
+  refusal — as does a name or target that is not exactly one path segment, and
+  as does any method but POST.
+- **The client address on `track` is a deviation**, and the substantive decision
+  of this PR. The reference resolves it at the route as the left-most element of
+  `X-Forwarded-For` with the socket as the fallback (`tools.router.ts:144`);
+  this port reads `HTTPConfig.ClientIP` — the socket peer with its port stripped
+  by default — so that one binary does not hold two address rules and a host's
+  stated trust configuration is not overridden by the one route that writes the
+  address into a durable record. The header is read nowhere, not even as a
+  fallback. See `tools-track-ip-comes-from-the-configured-seam`; a deployment
+  behind a proxy it operates sets `cfg.ClientIP` and gets the forwarded address
+  here and on the auth router's events alike.
+- **The bodies are decoded rather than cast**, which is the second deviation. A
+  field of the wrong type — `{"data": 42}` on `track`, where `Track` takes a
+  `map[string]any` — is a `400` carrying this router's own `{"error": ...}`
+  envelope instead of a `202` that recorded a number or silently dropped it. An
+  absent or empty body is still accepted, as `req.body = {}` is there. See
+  `tools-request-bodies-are-typed`.
+- **`notify` reaches the SSE channel and only that one**, reproduced rather than
+  repaired: the route never reads `channels`, so `NotifyOptions.Channels` falls
+  to its default `['sse']` on every request and the facade's `email` and `sms`
+  channels are unreachable over HTTP (`tools.router.ts:168`, `:171-176`). A host
+  that wants those calls the facade, where `Channels` is one field away — and a
+  route that took a channel list off the wire would let whoever gets past the
+  guard spend the deployment's mail and SMS budget.
+- **The document and the mount grew together**: `GenerateToolsOpenAPISpec` gained
+  the two path items (`openapi.ts:1385-1416`, `:1456-1490`), each with the `400`
+  the reference's own item does not carry, and
+  `adapter/internal/wiretest/tools.go` went from 21 cases to 31 — the two-way
+  comparison between the served document and the mount now runs over five routes
+  instead of three. U22's stop-point survives as `toolsFeatureRoutes`, which is
+  down to the telemetry query and the inbound webhook.
 - **`GET <tools>/stream`, the tools router's SSE endpoint** (`tools_stream.go`).
   The port of `tools.router.ts:184-221`: `503 {"error": "SSE not enabled"}`
   when the facade was built without a manager (`:193-196`), the authorised

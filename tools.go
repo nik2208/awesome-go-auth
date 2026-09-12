@@ -11,11 +11,11 @@ import (
 //
 // This is the port of createToolsRouter's front half (tools.router.ts:117-135)
 // together with its two documentation routes (:332-352). The four feature
-// groups the router exists to carry are the PRs after this one: track and
-// notify (:140-179), the SSE stream (:184-221), the telemetry query (:226-245)
-// and the inbound webhook (:250-326). Each of them is one case in the switch in
-// ToolsHandler and, where the reference guards it, one call to
-// ToolsProtectMiddleware.
+// groups the router exists to carry arrive one PR at a time: track and notify
+// (:140-179) in U23, the SSE stream (:184-221) in U24, the telemetry query
+// (:226-245) and the inbound webhook (:250-326) in U25. Each of them is one
+// case in the switch in ToolsHandler and, where the reference guards it, one
+// call to ToolsProtectMiddleware.
 //
 // # The posture
 //
@@ -104,10 +104,15 @@ import (
 // belong to the auth router, applied because the reference registers its auth
 // routes after a router-level CSRF auto-init (auth.router.ts:529-538); this is
 // a different router and carries none of them. The consequence to state rather
-// than hide is that once U23 lands, POST <tools>/track and POST <tools>/notify
-// accept a cross-site form post from a browser that holds a session — which is
-// the reference's own shape, and which is the first thing a host's
-// authMiddleware is there to stop.
+// than hide, now that U23 has landed the first two routes: POST <tools>/track
+// and POST <tools>/notify accept a cross-site form post from a browser that
+// holds a session — which is the reference's own shape, and which is the first
+// thing a host's authMiddleware is there to stop.
+//
+// The absent EventContextMiddleware has a second consequence, and that one is
+// not a hazard but an instruction: nothing installs the request provenance on
+// this router's requests, so a route that wants it reads it itself. Both of
+// U23's do, which is what the reference's own routes do too (:144-145).
 
 // The tools router's own paths, relative to its mount. The two documentation
 // routes reuse DocsSpecPath and DocsUIPath: the reference registers them at the
@@ -354,18 +359,26 @@ func ToolsProtectMiddleware(cfg HTTPConfig) func(http.Handler) http.Handler {
 // four adapters mount this at <ToolsPath> and <ToolsPath>/, and U23 through U25
 // add their routes to the switch below rather than to four mount functions.
 //
-// The shape a later route takes is the one GET <tools>/stream took below: the
+// The shape a later route takes is the one the three routes below share: the
 // handler built once outside the closure — the guard chain and anything it
 // captures must not be rebuilt per request — behind ToolsProtectMiddleware
 // where the reference spreads ...protect, left nil when its feature flag is
 // off, and matched on the nil in the case itself, so that the flag is read once
-// and the switch carries no second copy of it. Anything the switch does not
-// recognise is a 404, which is what an Express router with no matching layer
-// ends at.
+// and the switch carries no second copy of it. The flag belongs in that nil and
+// not inside the case body: a switched-off group has to fall through to the
+// default, because the reference does not register its route at all. Anything
+// the switch does not recognise is that 404, which is what an Express router
+// with no matching layer ends at.
 //
-// The receiver is unused today and is not decoration: U25's inbound webhook
-// resolves the enabled action set through Config.Settings, which this Auth
-// already holds — the reason ToolsOptions carries no settingsStore of its own.
+// A route carrying a path parameter matches on the parameter rather than on
+// rel. rel is the decoded path, and a parameter carrying %2F is one segment to
+// Express and two to it; toolsPathParam is the matcher, and U25's inbound
+// webhook will want it too.
+//
+// The receiver is what the stream reads its SseManager through, and U25's
+// inbound webhook will resolve the enabled action set through Config.Settings,
+// which this Auth already holds — the reason ToolsOptions carries no
+// settingsStore of its own.
 func (a *Auth) ToolsHandler(cfg HTTPConfig) http.Handler {
 	// The two documentation routes (tools.router.ts:332-352), built once. Both
 	// are nil when this router's own swagger option is off, which is how the
@@ -389,24 +402,46 @@ func (a *Auth) ToolsHandler(cfg HTTPConfig) http.Handler {
 		page = SwaggerUIHandler(cfg.ToolsDocsBasePath() + DocsSpecPath)
 	}
 
-	// GET <tools>/stream (tools.router.ts:192-220), built once and wrapped in
-	// the reference's two middlewares in the reference's order: extractSseToken
-	// (:185-190), which is the posture and is documented in tools_stream.go,
-	// then the guard it spreads ...protect onto. Nil when the stream flag is
-	// off, which is the `if (stream)` at :184 — the nil-handler shape the two
-	// documentation routes above already use for their own flag, so the switch
-	// reads one flag per route in one place.
-	var stream http.Handler
-	if cfg.Tools.Features().Stream {
-		stream = ToolsSseTokenMiddleware(ToolsProtectMiddleware(cfg)(a.toolsStreamHandler(cfg)))
+	// The three feature routes mounted so far, built once. Each is nil when its
+	// own flag is off, which is the reference's `if (telemetry)`, `if (notify)`
+	// and `if (stream)` (tools.router.ts:140, :165, :184) — the nil-handler
+	// shape the two documentation routes above already use, so the switch reads
+	// one flag per route in one place.
+	//
+	// track and notify go behind the guard the reference spreads ...protect onto
+	// and nothing else (:141, :166); see tools_track_notify.go. The stream goes
+	// behind the same guard with extractSseToken (:185-190) outside it, in the
+	// reference's own order; see tools_stream.go.
+	features := cfg.Tools.Features()
+	protect := ToolsProtectMiddleware(cfg)
+	var track, notify, stream http.Handler
+	if features.Telemetry {
+		track = protect(toolsTrackHandler(cfg))
+	}
+	if features.Notify {
+		notify = protect(toolsNotifyHandler(cfg))
+	}
+	if features.Stream {
+		stream = ToolsSseTokenMiddleware(protect(a.toolsStreamHandler(cfg)))
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch rel := toolsRouterPath(r, cfg); {
-		// U23 adds POST <tools>/track/:eventName and POST <tools>/notify/:target
-		// here, U25 GET <tools>/telemetry and POST <tools>/webhook/:provider.
+		// In the reference's own registration order: track, notify, stream, and
+		// then U25's GET <tools>/telemetry and POST <tools>/webhook/:provider.
 		// The documentation routes stay last, as the reference registers them
 		// last.
+		//
+		// The two parameterised routes match on the parameter rather than on
+		// rel, because rel is the decoded path: a name carrying %2F is one
+		// segment to Express and two to it. toolsPathParam is "" for every path
+		// that is not <prefix>/<one segment>, so the bare mount and a two-segment
+		// path fall through to the 404 Express answers them with — and do so
+		// ahead of the guard, as there.
+		case track != nil && r.Method == http.MethodPost && toolsPathParam(r, cfg, ToolsTrackPath) != "":
+			track.ServeHTTP(w, r)
+		case notify != nil && r.Method == http.MethodPost && toolsPathParam(r, cfg, ToolsNotifyPath) != "":
+			notify.ServeHTTP(w, r)
 		case stream != nil && rel == ToolsStreamPath && isToolsRead(r):
 			stream.ServeHTTP(w, r)
 		case spec != nil && rel == DocsSpecPath && isToolsRead(r):
@@ -428,8 +463,14 @@ func isToolsRead(r *http.Request) bool {
 // toolsRouterPath is the path below the tools mount, the way adminRouterPath is
 // the path below the admin mount.
 func toolsRouterPath(r *http.Request, cfg HTTPConfig) string {
-	mount := cfg.ToolsPath()
-	switch p := r.URL.Path; {
+	return toolsRelativePath(r.URL.Path, cfg.ToolsPath())
+}
+
+// toolsRelativePath is toolsRouterPath's body over an explicit path, so that the
+// parameterised routes can run it over r.URL.EscapedPath() instead — the split
+// adminRelativePath makes for the same reason. See toolsPathParam.
+func toolsRelativePath(p, mount string) string {
+	switch {
 	case p == mount:
 		return "/"
 	case strings.HasPrefix(p, mount+"/"):

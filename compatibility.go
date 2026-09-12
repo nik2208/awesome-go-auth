@@ -1439,6 +1439,131 @@ func CompatibilityNotes() APICompatibilityNotes {
 					},
 				},
 			},
+			{
+				ID:      "tools-track-ip-comes-from-the-configured-seam",
+				Title:   "The tracked client address comes from `HTTPConfig.ClientIP`, never from `X-Forwarded-For`",
+				Surface: "`POST <tools>/track/{eventName}`: the `ip` of the telemetry record it persists, of the SSE frame that carries that record, and of the event it publishes on the bus",
+				Behaviour: "Resolves the address through `HTTPConfig.ClientIP`, the one seam every " +
+					"event this port raises already uses: the socket peer with its port " +
+					"stripped by default, and whatever a configured function returns " +
+					"otherwise. `X-Forwarded-For` is read nowhere on this route and changes " +
+					"nothing — not even as a fallback when `ClientIP` is unset, which would be " +
+					"the untrusted parser under another name and would make the default " +
+					"deployment the spoofable one. A deployment behind a proxy it operates " +
+					"sets `cfg.ClientIP` once and gets the forwarded address here and on the " +
+					"auth router's events alike; one that configures nothing records the peer " +
+					"that connected, which is a value no caller can choose. `User-Agent` is " +
+					"recorded as sent, as there.",
+				Reference: "Resolves it at the route, and differently from anywhere else in the tree: " +
+					"`req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim() ?? " +
+					"req.socket.remoteAddress` — the left-most element of the header, trusted " +
+					"unconditionally, with `req.socket.remoteAddress` only as the fallback. " +
+					"Behind a proxy the deployment does not control, or behind none at all, " +
+					"the caller therefore chooses the address that is written into the " +
+					"telemetry store, broadcast to every connection holding the topic as part " +
+					"of the whole record, and carried on the event the host's own bus " +
+					"subscribers act on.",
+				Citations: []string{
+					"tools.router.ts:144",
+					"tools.router.ts:154-155",
+					"auth-tools.ts:203-214",
+					"auth-tools.ts:233-246",
+				},
+				Why: "Reproducing the route's own rule would not add a second address rule " +
+					"beside the host's, it would override it. `HTTPConfig.ClientIP` exists " +
+					"because Express's `req.ip` means the socket peer or the left-most " +
+					"unvouched `X-Forwarded-For` element depending on `trust proxy`, which is " +
+					"an application setting this port cannot see — so the port takes the " +
+					"unambiguous half and hands the host the function pointer, shipping no " +
+					"parser of its own. A deployment that has set it has stated in its own " +
+					"source which hop it trusts; a route that read element 0 of the header " +
+					"anyway would discard that statement on the one surface where the address " +
+					"is written into a durable record. A seam a single route is free to ignore " +
+					"is not a seam. " +
+					"The record is also the wrong place to be wrong. `Track` puts the address " +
+					"on the `TelemetryEvent` the store keeps, on the frame every SSE " +
+					"connection holding the topic receives, and — once a host calls `Bridge` — " +
+					"in the same column as the library's own `identity.*` events, which is a " +
+					"security log in every deployment that keeps one. And this is the surface " +
+					"an unauthenticated caller is most likely to be standing on: see " +
+					"`tools-router-requires-an-explicit-guard-decision`. " +
+					"`admin-cookie-secure-flag-is-configured-not-forwarded` decided the same " +
+					"class of question in the same direction one release earlier, and the " +
+					"asymmetry of the two failures settles it: a lost client address is " +
+					"recovered by one line of configuration, and a forged one already written " +
+					"into a telemetry store is not recovered at all. Nothing shipped is " +
+					"affected either way — `ng-awesome-node-auth`, the Flutter client and the " +
+					"served `auth.js` never call `/tools`.",
+				Notes: []DeviationNote{
+					{
+						Label: "Restoring the reference's rule",
+						Text: "`cfg.ClientIP = func(r *http.Request) string { ... }`, reading " +
+							"whichever header the deployment's own balancer sets and trusting " +
+							"only the hops it operates. It applies to the auth router's events " +
+							"too, which is the point: one statement about the deployment, one " +
+							"meaning everywhere. A host that wants the reference's exact line " +
+							"writes the first comma-separated element of `X-Forwarded-For` with " +
+							"`RemoteAddr` as the fallback, in its own source, where a reviewer " +
+							"can see that the deployment vouches for it.",
+					},
+				},
+			},
+			{
+				ID:      "tools-request-bodies-are-typed",
+				Title:   "The tools bodies are decoded, so a field of the wrong type is refused instead of recorded",
+				Surface: "`POST <tools>/track/{eventName}` and `POST <tools>/notify/{target}`: the JSON request body",
+				Behaviour: "Decodes the body into the documented types and answers `400` with this " +
+					"router's own error envelope — a bare `{\"error\": ...}` — when it does not " +
+					"fit, handing the facade nothing. On `track` that means `data` must be a " +
+					"JSON object, because `AuthTools.Track` takes a `map[string]any`, and " +
+					"`userId`, `tenantId`, `sessionId` and `correlationId` must be strings. On " +
+					"`notify` only `metadata` is constrained, to an object; `data` there is " +
+					"`any` and a scalar or an array is accepted, because `AuthTools.Notify` " +
+					"takes `any`. An absent or empty body is not an error on either route: it " +
+					"is the reference's `req.body = {}`, so a bodyless POST tracks an event " +
+					"with no payload and still answers `202`.",
+				Reference: "Reads its fields off `req.body as Record<string, unknown>` and casts each " +
+					"one, and a TypeScript cast is a no-op at runtime. `{\"data\": 42}` is " +
+					"therefore tracked as the number 42 and `{\"userId\": 5}` reaches the " +
+					"telemetry record as the number 5 in a field the store interface declares " +
+					"a string — both answered `202`. Its only refusal on these two routes is " +
+					"`express.json`'s own, before the handler runs, for a body that is not " +
+					"JSON at all.",
+				Citations: []string{
+					"tools.router.ts:143",
+					"tools.router.ts:149-157",
+					"tools.router.ts:168",
+					"tools.router.ts:171-176",
+					"auth-tools.ts:199",
+				},
+				Why: "Go has to decide what a mistyped field means, and the three answers are " +
+					"not equal. Widening is not available: `data` becomes `Event.Data` at step " +
+					"2 of the fan-out and that field is `map[string]any` across this package " +
+					"so that an event is assignable to the webhook envelope and the telemetry " +
+					"record without a runtime type check — the narrowing is older than this " +
+					"route and `Track` cannot undo it. Reading each field leniently and " +
+					"dropping what does not fit would answer `202` — *accepted* — to a caller " +
+					"whose payload was silently discarded, which is the one outcome that " +
+					"cannot be noticed from the outside. Refusing says so, at the edge, where " +
+					"the caller can see it and fix it. " +
+					"The status is also the reference's own in the case that actually happens: " +
+					"a client sending a malformed body already gets `400` there, from " +
+					"`express.json`, and what differs is the body — an Express error page " +
+					"written by the host application against this router's `{\"error\": ...}`, " +
+					"which is the envelope its own `503`, `501` and `400` use. No shipped " +
+					"client is affected; the callers of these two routes are a host's own " +
+					"services.",
+				Notes: []DeviationNote{
+					{
+						Label: "Sending a scalar payload to track",
+						Text: "Name it: `{\"data\": {\"value\": 42}}` rather than " +
+							"`{\"data\": 42}`. That is what every publication point in both trees " +
+							"does anyway — all twenty-six of the dev line's publish sites pass " +
+							"an object literal — and it is the shape a consumer of the telemetry " +
+							"record or the SSE frame can read a named field out of.",
+					},
+				},
+			},
 		},
 	}
 }
