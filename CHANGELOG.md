@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`POST <tools>/webhook/{provider}`, the inbound webhook, and the
+  `InboundScriptRunner` seam** (`tools_webhook.go`). The port of
+  `tools.router.ts:250-326` — the one route of this router with **no guard at
+  all**, there and here: the caller is a third-party provider with no session
+  to present, the reference spreads no `protect` onto it (`:251`) and its
+  OpenAPI operation carries no `security` entry. **No JavaScript engine enters
+  this repository.** The reference runs the administrator's `jsScript` in a
+  `node:vm` sandbox in the API process; this package's dependency rule is
+  stdlib plus `golang.org/x/crypto`, and an in-process interpreter would put
+  script typed into an admin form in the same address space as the signing keys
+  and the password hashes. So the core exposes `InboundScriptRunner` —
+  `RunInboundScript(ctx, InboundScriptRequest) (InboundScriptResult, bool,
+  error)` — and the host implements it out of process, where its own
+  credentials are the sandbox. What crosses: the provider, the webhook id, the
+  script, the **raw body** and the **resolved action allowlist**. What cannot:
+  the webhook's secret, the settings store, the request headers, a callable of
+  any kind. The allowlist is the intersection of
+  `AuthSettings.EnabledWebhookActions` with `WebhookConfig.AllowedActions`
+  (`webhook-action.ts:105`), resolved **in the core** because it is the
+  administrator's policy — a runner may narrow it and must never widen it. The
+  settings read reproduces the reference's `.catch(() => ({}))`, which fails
+  into an *empty* allowlist: a settings store that is down, or absent
+  altogether, means no actions rather than all of them. **A configuration with
+  a script and no runner is refused** — `400 {"error": "Webhook processing
+  failed"}`, nothing tracked — rather than acknowledged, so the provider
+  redelivers instead of the event being lost silently; a runner that *fails* is
+  refused the same way, while a script that *throws* is reported as "no result"
+  and acknowledged, which is what the reference does. `ToolsOptions.OnWebhook`
+  is the reference's `onWebhook` fallback (`:63-67`) and is where a host
+  verifies the provider's signature — nothing else on this route authenticates
+  anything, and the `X-Hub-Signature-256` header the reference's own document
+  advertises is read by no line of its code. Two limits the reference leaves to
+  its host and this route cannot: `ToolsOptions.WebhookMaxBytes` (100 KiB,
+  `express.json()`'s default) and `ToolsOptions.ScriptTimeout` (5s, the
+  reference's `vm` timeout — which there bounds only the synchronous prefix
+  before the first `await`, and here bounds the whole run). Registered as
+  `inbound-webhook-script-runs-out-of-process`.
+- **`GET <tools>/telemetry`, the tools router's query endpoint**
+  (`tools_telemetry.go`). The port of `tools.router.ts:226-245`, behind the
+  same guard as `track` (`:227`) and mounted on the reference's two-part
+  condition: the telemetry flag **and** a configured
+  `ToolsOptions.TelemetryStore` (`:226`), so without a store the path answers
+  404 rather than an empty list. Seven query parameters — `event`, `userId`,
+  `tenantId`, `from`, `to`, `limit`, `offset` — become a `TelemetryFilter`;
+  `sessionId` is *not* one of them, which is the reference's own destructure
+  (`:233`). Nothing is clamped, so `?limit=1000000` is what the store is asked
+  for, and an unparseable value is treated as absent — the answer
+  `adminQueryInt` already gives, since `parseInt('abc', 10)` is `NaN` and
+  `new Date('x')` is an Invalid Date and neither fits in an `int` or a
+  `time.Time`. The body is `{"data": [...]}` in the reference's
+  `TelemetryEvent` spelling — `event`, `data`, an ISO timestamp — which is this
+  package's `trackedRecord` and not its `TelemetryEvent`. **The result is not
+  scoped to the caller**: `userId` is a filter and not a claim, so any caller
+  the guard admits reads every user's records, IP and user agent included. That
+  is the reference's shape, and it is the sharpest illustration of why
+  `tools-router-requires-an-explicit-guard-decision` exists.
+- **`TelemetryFilter.Offset`** (`telemetry.go`), the reference's `offset`
+  (`telemetry-store.interface.ts:38`), which arrived with the route that sends
+  it. `MemoryTelemetryStore` applies it after every other filter and before
+  `Limit` counts; a store that ignores it does not paginate, and its caller has
+  no way to find out.
+
 ## [0.10.0] - 2026-09-12
 
 The admin console. Fifty-one routes, split across five pull requests not by

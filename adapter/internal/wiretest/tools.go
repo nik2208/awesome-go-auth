@@ -62,23 +62,22 @@ import (
 // mounted the two documentation routes, U23 the two POST routes and U24 the
 // stream; U25 adds /telemetry and /webhook/{provider}.
 var toolsDocumentedRoutes = map[string]string{
-	auth.DocsSpecPath:                    http.MethodGet,
-	auth.DocsUIPath:                      http.MethodGet,
-	auth.ToolsTrackPath + "/{eventName}": http.MethodPost,
-	auth.ToolsNotifyPath + "/{target}":   http.MethodPost,
-	auth.ToolsStreamPath:                 http.MethodGet,
+	auth.DocsSpecPath:                     http.MethodGet,
+	auth.DocsUIPath:                       http.MethodGet,
+	auth.ToolsTrackPath + "/{eventName}":  http.MethodPost,
+	auth.ToolsNotifyPath + "/{target}":    http.MethodPost,
+	auth.ToolsStreamPath:                  http.MethodGet,
+	auth.ToolsTelemetryPath:               http.MethodGet,
+	auth.ToolsWebhookPath + "/{provider}": http.MethodPost,
 }
 
-// toolsFeatureRoutes are the feature routes of the reference's router that are
-// not mounted yet. Every case that probes "not mounted" walks these as well as
-// the documented ones, so a route cannot arrive without the PR that owns it
-// noticing this list — U24 moved /stream out of here and into
-// toolsDocumentedRoutes and U23 moved track and notify, which is what mounting
-// one of these looks like.
-var toolsFeatureRoutes = []string{
-	auth.ToolsTelemetryPath,
-	auth.ToolsWebhookPath + "/probe",
-}
+// The list of feature routes that are not mounted yet is gone with U25, which
+// mounted the last two. It existed as U22's stop-point — every case that probed
+// "not mounted" walked it, so a route could not arrive without the PR that owned
+// it editing the list — and each of U23, U24 and U25 discharged its entries by
+// moving them into toolsDocumentedRoutes above. All five feature routes of
+// tools.router.ts are now mounted and documented, and the both-direction
+// comparison in "the document and the mount agree" is what holds them there.
 
 // toolsDocsRoutes are the two documentation routes alone: the subset of
 // toolsDocumentedRoutes that is GET, carries no guard, and is switched by
@@ -115,6 +114,17 @@ func toolsConfig(t *testing.T, opts ...func(*auth.ToolsOptions)) auth.HTTPConfig
 		Enabled:   true,
 		AuthTools: toolsFacade(t),
 		Access:    auth.ToolsPublic(),
+		// The two slots U25's routes are mounted on, so that the default
+		// configuration serves every route it documents: a telemetry store, which
+		// is the second half of the query route's condition (tools.router.ts:226),
+		// and an OnWebhook that declares nothing, which is the cheaper half of the
+		// inbound route's (:250). Without them "the document and the mount agree"
+		// would be comparing against a configuration that mounts two fewer routes
+		// than it describes.
+		TelemetryStore: auth.NewMemoryTelemetryStore(),
+		OnWebhook: func(*http.Request, string, []byte) (auth.InboundScriptResult, bool, error) {
+			return auth.InboundScriptResult{}, false, nil
+		},
 	}
 	cfg.Tools.Docs.Enabled = true
 	for _, opt := range opts {
@@ -249,11 +259,6 @@ func assertNoToolsRoutes(t *testing.T, env *Env) {
 	for path, method := range toolsDocumentedRoutes {
 		for _, probe := range []string{http.MethodGet, method} {
 			assertToolsUnrouted(t, env.Do(toolsRequest(env, probe, path)))
-		}
-	}
-	for _, path := range toolsFeatureRoutes {
-		for _, method := range []string{http.MethodGet, http.MethodPost} {
-			assertToolsUnrouted(t, env.Do(toolsRequest(env, method, path)))
 		}
 	}
 }
@@ -469,20 +474,6 @@ func testTools(t *testing.T, mount Mounter) {
 		for path := range generated["paths"].(map[string]any) {
 			if _, ok := paths[path]; !ok {
 				t.Errorf("the served document omits %q, which the generator describes", path)
-			}
-		}
-	})
-
-	t.Run("the remaining feature groups are not mounted yet", func(t *testing.T) {
-		// The telemetry query and the inbound webhook are U25's. This case is
-		// U22's stop-point — the PR that mounts one of these replaces its entry
-		// in toolsFeatureRoutes with real assertions, the way U23 did for track
-		// and notify and U24 for the stream, so a route cannot arrive without
-		// this list being edited.
-		env := NewEnv(t, mount, toolsConfig(t))
-		for _, path := range toolsFeatureRoutes {
-			for _, method := range []string{http.MethodGet, http.MethodPost} {
-				assertToolsUnrouted(t, env.Do(toolsRequest(env, method, path)))
 			}
 		}
 	})
@@ -925,6 +916,12 @@ func testTools(t *testing.T, mount Mounter) {
 	// returns once the handler does — and this one does not return until the
 	// connection ends.
 	t.Run("Stream", func(t *testing.T) { testToolsStream(t, mount) })
+
+	// The two U25 mounted, each in its own file: they have nothing in common
+	// beyond the router — one is the only route here that reads stored data, and
+	// the other the only one with no guard at all.
+	t.Run("Telemetry", func(t *testing.T) { testToolsTelemetry(t, mount) })
+	t.Run("InboundWebhook", func(t *testing.T) { testToolsInboundWebhook(t, mount) })
 
 	t.Run("the bare mount is a 404", func(t *testing.T) {
 		// The reference's router has no layer on '/', so GET /tools itself ends

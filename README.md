@@ -1660,6 +1660,95 @@ revision the whole contract was extracted from.
   **not** onto `POST <admin>/login`, which is unlimited on both lines whatever a
   host configures. A deployment that wants the console's login limited wraps the
   handler its adapter mounts.
+
+### Inbound webhook scripts run through a seam, not an in-process JavaScript sandbox
+
+`inbound-webhook-script-runs-out-of-process`
+
+- **Surface**: `POST <tools>/webhook/{provider}` where the stored
+  `WebhookConfig` carries a `jsScript`.
+- **This port**: No JavaScript is executed in this process, ever. The route
+  resolves the action allowlist — the intersection of
+  `AuthSettings.EnabledWebhookActions` with `WebhookConfig.AllowedActions` — and
+  hands the script, the raw request body and that resolved list to
+  `ToolsOptions.ScriptRunner`, an `InboundScriptRunner` the host implements out
+  of process. What comes back is the reference's own `result`, or nothing. Three
+  client-visible consequences. **With no runner configured, a webhook whose
+  configuration carries a `jsScript` is refused**:
+  `400 {"error": "Webhook processing failed"}`, nothing tracked, and no
+  fall-through to `onWebhook` — so the provider's own redelivery is preserved
+  instead of the event being acknowledged and lost. A runner that *fails* —
+  unreachable, throttled, past its deadline — is refused the same way. A script
+  that **throws** is not: a runner reports that as "no result", and the route
+  acknowledges it and falls through to `onWebhook`, which is what the reference
+  does. **The five-second timeout bounds the whole run**, not a prefix of it.
+  **The body is read under a limit** — `ToolsOptions.WebhookMaxBytes`, 100 KiB
+  by default — and must be a JSON object or array, which is what
+  `express.json()` enforces one layer up there.
+- **The reference**: Executes the script in a `node:vm` sandbox inside the API
+  process. It builds the actions object from the same intersection via
+  `ActionRegistry.buildContext`, wraps the script in an async IIFE, creates a
+  context holding `body`, `actions`, `result` and a `console`, and runs it with
+  `{ timeout: 5_000 }`. A script that throws — synchronously or in its promise —
+  is logged with `console.error` and treated as no result. The timeout applies
+  to *synchronous* execution only: an async IIFE returns at its first `await`,
+  and the route then awaits the rest with no deadline at all, so a script
+  awaiting a hanging action holds the request open for as long as the socket
+  lives. The body is whatever the host's parser left on `req.body`
+  (`tools.router.ts:250-326`, `tools.router.ts:259-292`,
+  `tools.router.ts:293-306`, `tools.router.ts:308-322`,
+  `webhook-action.ts:104-115`, `webhook-store.interface.ts:35-72`).
+- **Why**: The dependency rule for this package is the standard library plus
+  `golang.org/x/crypto`, and a JavaScript engine is not going to be the
+  exception. Every option is either `cgo` around a C++ VM or a large pure-Go
+  interpreter, and both put script an administrator typed into an admin form
+  into the same address space as the signing keys, the session store and the
+  password hashes — with a sandbox written by somebody else as the only
+  boundary. `node`'s own `vm` documentation says that module is not a security
+  mechanism, which is the reference's position on its own sandbox. So the
+  sandbox moves to where a real one exists: another process, whose own
+  credentials bound what a script can reach. That is also what makes the actions
+  declarative rather than a call back into this process. There is nothing here
+  to call back into — this package has no action registry, and
+  `GET <admin>/api/actions` answers an empty list and says why — and a round
+  trip would put the effects back inside the process whose privileges the seam
+  exists to escape. None of the reference's script semantics are lost by it:
+  there the script and its actions share one address space, and here they still
+  do, the runner's. What stays in the core is the half that cannot be delegated,
+  which is the administrator's policy: the two lists are intersected here, from
+  this package's own settings store, and cross as a closed list of ids a runner
+  may narrow and must never widen. The refusal when no runner is configured is
+  the same judgement in the small. A script is how a deployment reacts to an
+  event it does not otherwise see — the cancellation that deprovisions a tenant,
+  the payment failure that suspends an account. Acknowledging a webhook whose
+  script never ran tells the provider the event was handled, and a provider that
+  has been told that does not send it again: the event is gone, silently and
+  permanently, and nothing will correct the deployment's own state. A refusal
+  costs redeliveries and a red line in someone's provider dashboard, and it is
+  recoverable — configure the runner and the backlog arrives.
+- **What crosses the seam, and what cannot**: `InboundScriptRequest` carries the
+  provider, the webhook id, the script, the raw body and the resolved action ids
+  — and has a field for nothing else. Not the webhook's `secret`, not the
+  settings store, not the request headers, not a callable of any kind. Every
+  member is plain data, because the intended implementation encodes this struct
+  and sends it elsewhere. The consequence worth stating: a runner cannot verify
+  the provider's signature and is not meant to. That belongs in
+  `ToolsOptions.OnWebhook`, in this process, where the secret is and before the
+  body has gone anywhere.
+- **What an implementation has to get right**: One thing above all: report a
+  script's own exception as *no result*, and an invocation failure as an
+  *error*. Reporting an exception as an error turns every broken script into an
+  endless redelivery loop; reporting an invocation failure as no result silently
+  drops webhooks the provider believes were delivered and will never send again.
+  The second: treat the action list as closed — drop an id that is not
+  implemented or whose dependencies are unmet, and never expose one the core did
+  not send.
+- **What is unchanged**: The route, the statuses and the bodies.
+  `200 {"ok": true}` on acceptance, `400 {"error": "Webhook processing failed"}`
+  on failure, no guard in front of it, `onWebhook` as the fallback when no
+  script declared anything, and `InboundWebhookStore.FindByProvider` still not
+  filtering on `IsActive` — so a deactivated webhook's inbound script still
+  runs, which is the reference's own trap, reproduced rather than corrected.
 <!-- END GENERATED: deviations -->
 
 ## Parity Snapshot vs `awesome-node-auth`

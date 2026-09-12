@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 	"strings"
+	"time"
 )
 
 // The tools router's skeleton: where it mounts, which of its four feature
@@ -155,8 +156,10 @@ type ToolsAccess struct {
 	// Two of the six route groups never see it, there or here. The inbound
 	// webhook is registered with no protect at all (:251), because the caller
 	// is a third-party provider that has no session to present; and the two
-	// documentation routes carry none either (:333, :348). U25 owns the first
-	// of those and should verify the sender some other way.
+	// documentation routes carry none either (:333, :348). What stands in for a
+	// guard on the first of those is the provider's own signature over the body,
+	// which nothing in this package verifies — ToolsOptions.OnWebhook is where a
+	// host does, and tools_webhook.go says why it cannot be anywhere else.
 	Middleware func(http.Handler) http.Handler
 }
 
@@ -191,10 +194,12 @@ func ToolsPublic() *ToolsAccess { return &ToolsAccess{} }
 // ToolsOptions is HTTPConfig.Tools: whether the adapters mount the tools
 // router, where, with which feature groups, and behind what.
 //
-// It is the reference's ToolsRouterOptions (tools.router.ts:13-102) less the
-// store and callback slots that belong to the routes that read them —
-// telemetryStore, webhookStore, settingsStore and onWebhook arrive with U25,
-// which owns the two routes that consult them.
+// It is the reference's ToolsRouterOptions (tools.router.ts:13-102), with one
+// of its four store and callback slots left out: settingsStore has no field
+// here, because the only route that reads it — the inbound webhook, for the
+// action allowlist — reaches it through Config.Settings, which the Auth this
+// handler hangs off already holds. The other three are below, each on the route
+// that consults it.
 type ToolsOptions struct {
 	// Enabled mounts the tools router, the way Docs.Enabled mounts the
 	// documentation routes and Admin.Enabled mounts the console. Unset — the
@@ -256,6 +261,72 @@ type ToolsOptions struct {
 	// BasePath is this router's swaggerBasePath: empty means ToolsPath(). It
 	// moves the description and the page's spec URL, never the mount.
 	Docs DocsOptions
+
+	// TelemetryStore is the reference's telemetryStore (tools.router.ts:49) and
+	// the second half of GET <tools>/telemetry's mount condition: with the
+	// Telemetry flag on and this nil, the query route is not registered and
+	// answers 404, which is `telemetry && options.telemetryStore?.query` (:226).
+	//
+	// It is not the store the AuthTools facade writes through. The reference has
+	// the same two slots and lets a host pass different values, so a deployment
+	// that persists to one store and queries a read replica through another is
+	// expressible; passing the same value to both is the ordinary case and is
+	// what a host that configured AuthToolsOptions.Telemetry should do here.
+	TelemetryStore TelemetryStore
+	// InboundWebhooks is the reference's webhookStore (:74), narrowed to the one
+	// method that route calls: findByProvider. Together with OnWebhook it is the
+	// inbound webhook's mount condition (:250) — with neither, POST
+	// <tools>/webhook/{provider} is not registered.
+	//
+	// Note the trap it carries, which is U9's and the reference's:
+	// FindByProvider does not filter on IsActive and this route does not check
+	// it, so deactivating a webhook stops its outgoing deliveries and leaves its
+	// inbound script running.
+	InboundWebhooks InboundWebhookStore
+	// ScriptRunner runs WebhookConfig.JSScript, out of this process. It is the
+	// port's answer to the reference's vm sandbox (:269-292), which this package
+	// will not have: see tools_webhook.go, which is the whole argument, and
+	// InboundScriptRunner, which is the contract.
+	//
+	// Nil is the fail-closed configuration rather than the permissive one. A
+	// configuration that reaches a WebhookConfig with a script and has no runner
+	// refuses the webhook — 400, nothing tracked — instead of acknowledging an
+	// event whose handling never happened. Leaving it nil is perfectly fine for
+	// a deployment whose inbound webhooks are handled by OnWebhook and whose
+	// stored configurations carry no script.
+	ScriptRunner InboundScriptRunner
+	// OnWebhook is the reference's onWebhook callback (:63-67): the non-scripted
+	// way to handle an inbound webhook, called when no script declared anything
+	// — no inbound store, no configuration for this provider, no script on it,
+	// or a script that left its result null (:308-315).
+	//
+	// It runs in this process, so it is where a host verifies the provider's
+	// signature: nothing else on this route authenticates anything, and it is
+	// handed the request (for the headers) and the exact bytes the signature
+	// covers. r.Body has already been read and is not readable again; body is
+	// what was read, capped at WebhookMaxBytes and checked to be JSON.
+	//
+	// The three answers are InboundScriptRunner's three: a result to track, no
+	// result, or an error — which is the reference's rejected promise landing in
+	// the route's catch, and answers 400 without tracking anything.
+	OnWebhook func(r *http.Request, provider string, body []byte) (InboundScriptResult, bool, error)
+	// ScriptTimeout is the deadline on one ScriptRunner call. Zero means
+	// DefaultInboundScriptTimeout, which is the reference's own vm timeout —
+	// read that constant for what the reference's five seconds actually bound,
+	// which is not the same thing.
+	//
+	// It is configurable where the reference's is a literal because the call it
+	// bounds leaves the process: a cold start on the far side can cost more than
+	// the whole of a script's own budget.
+	ScriptTimeout time.Duration
+	// WebhookMaxBytes is the largest inbound webhook body that is read. Zero
+	// means DefaultInboundWebhookMaxBytes, which is express.json()'s own
+	// default, and a body over it is refused with the route's 400.
+	//
+	// The reference's router has no such option because it never reads a body —
+	// its host's body parser does, and enforces its own limit there. This route
+	// reads it, so the limit is here.
+	WebhookMaxBytes int64
 }
 
 // ToolsFeatures is the four feature flags resolved: which groups of routes the
@@ -327,7 +398,11 @@ func (c HTTPConfig) ToolsOpenAPIInfo() ToolsOpenAPIInfo {
 		Notify:    features.Notify,
 		Stream:    features.Stream,
 		Webhook:   features.Webhook,
-		Docs:      c.Tools.Docs.Enabled,
+		// The reference's hasTelemetryQuery (openapi.ts:1378), which is the
+		// telemetry flag *and* a store: the query route is documented only when
+		// it is mounted, and both are decided by the same two fields.
+		TelemetryQuery: features.Telemetry && c.Tools.TelemetryStore != nil,
+		Docs:           c.Tools.Docs.Enabled,
 	}
 }
 
@@ -425,14 +500,31 @@ func (a *Auth) ToolsHandler(cfg HTTPConfig) http.Handler {
 		stream = ToolsSseTokenMiddleware(protect(a.toolsStreamHandler(cfg)))
 	}
 
+	// GET <tools>/telemetry (tools.router.ts:226-245), behind the same guard as
+	// track, and nil unless a telemetry store was configured as well as the flag
+	// — the reference's two-part condition (:226).
+	var telemetry http.Handler
+	if cfg.Tools.Features().Telemetry && cfg.Tools.TelemetryStore != nil {
+		telemetry = ToolsProtectMiddleware(cfg)(a.toolsTelemetryHandler(cfg))
+	}
+
+	// POST <tools>/webhook/{provider} (tools.router.ts:250-326), behind nothing.
+	// The absence of ToolsProtectMiddleware here is the design and not an
+	// oversight: the caller is a third-party provider with no session to
+	// present, the reference spreads no protect onto this route either (:251),
+	// and tools_webhook.go says what that means for a deployment.
+	var inbound http.Handler
+	if toolsInboundMounted(cfg) {
+		inbound = a.toolsInboundWebhookHandler(cfg)
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch rel := toolsRouterPath(r, cfg); {
-		// In the reference's own registration order: track, notify, stream, and
-		// then U25's GET <tools>/telemetry and POST <tools>/webhook/:provider.
-		// The documentation routes stay last, as the reference registers them
-		// last.
+		// In the reference's own registration order: track, notify, stream, the
+		// telemetry query and the inbound webhook. The documentation routes stay
+		// last, as the reference registers them last.
 		//
-		// The two parameterised routes match on the parameter rather than on
+		// The three parameterised routes match on the parameter rather than on
 		// rel, because rel is the decoded path: a name carrying %2F is one
 		// segment to Express and two to it. toolsPathParam is "" for every path
 		// that is not <prefix>/<one segment>, so the bare mount and a two-segment
@@ -444,6 +536,10 @@ func (a *Auth) ToolsHandler(cfg HTTPConfig) http.Handler {
 			notify.ServeHTTP(w, r)
 		case stream != nil && rel == ToolsStreamPath && isToolsRead(r):
 			stream.ServeHTTP(w, r)
+		case telemetry != nil && rel == ToolsTelemetryPath && isToolsRead(r):
+			telemetry.ServeHTTP(w, r)
+		case inbound != nil && r.Method == http.MethodPost && toolsPathParam(r, cfg, ToolsWebhookPath) != "":
+			inbound.ServeHTTP(w, r)
 		case spec != nil && rel == DocsSpecPath && isToolsRead(r):
 			spec.ServeHTTP(w, r)
 		case page != nil && rel == DocsUIPath && isToolsRead(r):

@@ -46,14 +46,25 @@ type ToolsOpenAPIInfo struct {
 	// serve — HTTPConfig.ToolsOpenAPIInfo is the way not to have to remember
 	// that.
 	//
-	// Telemetry and Notify select a path item each as well as a tag, from U23
-	// on. Stream and Webhook still select only the tags block, which is the
-	// reference's own flag-driven vocabulary declaration (openapi.ts:1621-1625),
-	// until U24 and U25 mount the routes they gate.
+	// Each of the four selects at least one path item as well as its entry in
+	// the tags block, which is the reference's own flag-driven vocabulary
+	// declaration (openapi.ts:1621-1625). Telemetry selects two: POST
+	// /track/{eventName} always, and — with TelemetryQuery below — the query
+	// route.
 	Telemetry bool
 	Notify    bool
 	Stream    bool
 	Webhook   bool
+	// TelemetryQuery is the reference's hasTelemetryQuery (openapi.ts:1378):
+	// `telemetry && !!options.telemetryStore?.query`, which is the second half of
+	// the condition GET <tools>/telemetry is mounted under (tools.router.ts:226).
+	//
+	// It is a field of its own rather than a second store pointer because the
+	// document needs the answer and not the store, and because ToolsOpenAPIInfo
+	// is what a caller building a document by hand fills in — a bool it can
+	// answer, a TelemetryStore it would have to invent.
+	// HTTPConfig.ToolsOpenAPIInfo fills it from the mounted configuration.
+	TelemetryQuery bool
 	// Docs mirrors ToolsOptions.Docs.Enabled: the two documentation routes the
 	// adapters then mount, GET <tools>/openapi.json and GET <tools>/docs, are
 	// described by the document too. Set the two together, or the document
@@ -86,18 +97,37 @@ func GenerateToolsOpenAPISpec(info ToolsOpenAPIInfo) map[string]any {
 		base = DefaultToolsPath
 	}
 
+	// The five feature path items, in the reference's own order (openapi.ts:
+	// 1383-1588).
 	paths := map[string]any{}
-	// U25: base + "/telemetry" and base + "/webhook/{provider}", the first of
-	// them under the reference's hasTelemetryQuery rather than the telemetry
-	// flag alone (openapi.ts:1378).
 	if info.Telemetry {
 		paths[base+ToolsTrackPath+"/{eventName}"] = toolsOpenAPITrackPath()
+	}
+	// The query route alone is under hasTelemetryQuery rather than the telemetry
+	// flag (openapi.ts:1378), which is its mount condition exactly.
+	if info.TelemetryQuery {
+		paths[base+ToolsTelemetryPath] = toolsOpenAPITelemetryPath()
 	}
 	if info.Notify {
 		paths[base+ToolsNotifyPath+"/{target}"] = toolsOpenAPINotifyPath()
 	}
 	if info.Stream {
 		paths[base+ToolsStreamPath] = toolsOpenAPIStreamPath()
+	}
+	// The inbound webhook, under the webhook flag alone — which is the
+	// reference's condition (openapi.ts:1525) and is *not* the condition the
+	// route is mounted under (tools.router.ts:250, which also wants an onWebhook
+	// or a store). So a configuration with the flag on and neither documents an
+	// operation that answers 404.
+	//
+	// Reproduced rather than tightened, for the reason every other quirk here
+	// is: the document is the reference's document, a consumer generating a
+	// client from either tree must get the same operations, and the mismatch is
+	// the reference's own. The conformance suite pins it explicitly
+	// (adapter/internal/wiretest/tools_webhook.go) so that it reads as a
+	// reproduction rather than as a bug nobody noticed.
+	if info.Webhook {
+		paths[base+ToolsWebhookPath+"/{provider}"] = toolsOpenAPIWebhookPath()
 	}
 	if info.Docs {
 		paths[base+DocsSpecPath] = toolsOpenAPIDocsSpecPath()
@@ -400,6 +430,160 @@ func toolsOpenAPINotifyPath() map[string]any {
 					"description": "The body is not JSON, or a field does not have the documented type",
 				},
 				"401": map[string]any{"description": "Unauthorized"},
+			},
+		},
+	}
+}
+
+// toolsOpenAPITelemetryPath describes GET <tools>/telemetry, transcribed from
+// openapi.ts:1418-1452.
+//
+// The seven parameters are the reference's seven, in its order, with its two
+// bounds — `limit` has a minimum of 1 and `offset` a minimum of 0, neither of
+// which anything enforces at run time on either side: the route clamps nothing
+// and the store is handed whatever parseInt produced. They are documentation,
+// and they are transcribed because a generated client reads them.
+//
+// The description is this port's, as the stream's is. The reference documents no
+// description here at all, and the one fact a reader most needs is not visible
+// from the parameter list: the result is not scoped to the caller.
+func toolsOpenAPITelemetryPath() map[string]any {
+	return map[string]any{
+		"get": map[string]any{
+			"summary":     "Query persisted telemetry events",
+			"operationId": "queryTelemetry",
+			"tags":        []string{"Telemetry"},
+			"security":    []map[string]any{{"BearerAuth": []string{}}},
+			"description": "Returns stored telemetry records, in whatever order the configured " +
+				"store returns them. " +
+				"**The result is not scoped to the caller.** Every filter below comes from " +
+				"the query string and nothing is read from the authenticated principal, so " +
+				"`userId` is a filter and not a claim: any caller the guard admits can read " +
+				"any user's records, including the `ip` and `userAgent` on them. Scope this " +
+				"in `ToolsOptions.Access`, or do not mount it. " +
+				"Mounted only when a telemetry store is configured; without one the path is " +
+				"not registered and answers `404`. Nothing is clamped — `limit` and `offset` " +
+				"reach the store as given — and an unparseable value is treated as absent.",
+			"parameters": []map[string]any{
+				{
+					"name":        ToolsTelemetryEventParam,
+					"in":          "query",
+					"description": "Filter by event name",
+					"schema":      map[string]any{"type": "string"},
+				},
+				{"name": ToolsTelemetryUserIDParam, "in": "query", "schema": map[string]any{"type": "string"}},
+				{"name": ToolsTelemetryTenantIDParam, "in": "query", "schema": map[string]any{"type": "string"}},
+				{
+					"name":   ToolsTelemetryFromParam,
+					"in":     "query",
+					"schema": map[string]any{"type": "string", "format": "date-time"},
+				},
+				{
+					"name":   ToolsTelemetryToParam,
+					"in":     "query",
+					"schema": map[string]any{"type": "string", "format": "date-time"},
+				},
+				{
+					"name":   ToolsTelemetryLimitParam,
+					"in":     "query",
+					"schema": map[string]any{"type": "integer", "minimum": 1},
+				},
+				{
+					"name":   ToolsTelemetryOffsetParam,
+					"in":     "query",
+					"schema": map[string]any{"type": "integer", "minimum": 0},
+				},
+			},
+			"responses": map[string]any{
+				"200": map[string]any{
+					"description": "List of telemetry events",
+					"content": map[string]any{
+						"application/json": map[string]any{
+							"schema": map[string]any{
+								"type": "object",
+								"properties": map[string]any{
+									"data": map[string]any{
+										"type":  "array",
+										"items": map[string]any{"$ref": "#/components/schemas/TelemetryEvent"},
+									},
+								},
+							},
+						},
+					},
+				},
+				"401": map[string]any{"description": "Unauthorized"},
+			},
+		},
+	}
+}
+
+// toolsOpenAPIWebhookPath describes POST <tools>/webhook/{provider}, transcribed
+// from openapi.ts:1525-1563.
+//
+// It carries no `security` entry, and that is the reference's: this is the one
+// operation of the five that is not behind the guard, because its caller is a
+// third-party provider with no credential to present.
+//
+// The X-Hub-Signature-256 header is transcribed with it, and it is worth
+// knowing what it is: a parameter the reference's document advertises and which
+// no line of the reference's code reads. It is reproduced — a generated client
+// that offers the header against one implementation must offer it against the
+// other — and the description says plainly that nothing here verifies it, which
+// the reference's does not.
+func toolsOpenAPIWebhookPath() map[string]any {
+	return map[string]any{
+		"post": map[string]any{
+			"summary":     "Receive an inbound webhook from an external provider",
+			"operationId": "inboundWebhook",
+			"tags":        []string{"Webhooks"},
+			"description": "**Unauthenticated by design**: no guard runs in front of this route, " +
+				"because the caller is a third-party provider with no session. The " +
+				"`X-Hub-Signature-256` parameter below is documented by the reference and " +
+				"**verified by nothing** — neither there nor here; a deployment that needs " +
+				"the sender authenticated verifies the signature itself in " +
+				"`ToolsOptions.OnWebhook`, which is handed the request and the exact bytes " +
+				"the signature covers. " +
+				"The body is read under `ToolsOptions.WebhookMaxBytes` (100 KiB by default) " +
+				"and must be a JSON object or array. When the stored `WebhookConfig` for " +
+				"this provider carries a `jsScript`, the script is executed **out of " +
+				"process** through `ToolsOptions.ScriptRunner`, with the resolved action " +
+				"allowlist; with no runner configured the webhook is refused rather than " +
+				"acknowledged. `200 {\"ok\": true}` means accepted, not that anything was " +
+				"emitted: a script that declares no result is acknowledged in silence.",
+			"parameters": []map[string]any{
+				{
+					"name":        "provider",
+					"in":          "path",
+					"required":    true,
+					"description": "Provider identifier (e.g. stripe, github)",
+					"schema":      map[string]any{"type": "string", "example": "stripe"},
+				},
+				{
+					"name":        "X-Hub-Signature-256",
+					"in":          "header",
+					"required":    false,
+					"description": "HMAC-SHA256 signature for payload verification (optional)",
+					"schema":      map[string]any{"type": "string"},
+				},
+			},
+			"requestBody": map[string]any{
+				"required": true,
+				"content": map[string]any{
+					"application/json": map[string]any{
+						"schema": map[string]any{"type": "object", "description": "Provider-specific payload"},
+					},
+				},
+			},
+			"responses": map[string]any{
+				"200": map[string]any{
+					"description": "Webhook accepted",
+					"content": map[string]any{
+						"application/json": map[string]any{
+							"schema": map[string]any{"$ref": "#/components/schemas/OkResponse"},
+						},
+					},
+				},
+				"400": map[string]any{"description": "Webhook processing failed"},
 			},
 		},
 	}

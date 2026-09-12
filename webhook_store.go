@@ -23,13 +23,15 @@ import (
 //     X-Signature-SHA256 header and was removed in v0.11.0 as a deliberate
 //     BREAKING change. There is one wire now and it is the reference's.
 //
-//   - The routes are not here. The admin Webhooks screens, which are what call
+//   - The inbound route is here. POST <tools>/webhook/{provider} is what calls
+//     FindByProvider (tools.router.ts:250-259), and tools_webhook.go is what it
+//     does with the answer. The admin Webhooks screens, which are what call
 //     ListWebhooks, AddWebhook, UpdateWebhook and RemoveWebhook
-//     (admin.router.ts:1362-1440), are U14 (M8); the tools router, which is
-//     what calls FindByProvider (tools.router.ts:250-259), is M9. No adapter
-//     changes.
+//     (admin.router.ts:1362-1440), are U14 (M8).
 //
-//   - No script runs. See WebhookConfig's inbound-webhook fields.
+//   - No script runs *here*. The inbound route reads JSScript and hands it to
+//     an InboundScriptRunner, which executes it out of process; nothing in this
+//     package interprets it. See WebhookConfig's inbound-webhook fields.
 //
 // The one behaviour worth stating up front, because it decides how strict a
 // store has to be: the reference's caller adds no filtering of its own. The
@@ -131,14 +133,13 @@ type WebhookConfig struct {
 	// keys and the password hashes, with a sandbox as the only boundary. The
 	// decision taken on 2026-09-12 is that the core exposes an
 	// InboundScriptRunner seam and the product implements it out of process,
-	// where an IAM role is the real sandbox. That seam is U25's; nothing in
-	// this package reads these three fields before it.
+	// where an IAM role is the real sandbox.
 	//
-	// So they are carried for the reason AuthCode.CodeChallenge,
-	// CodeChallengeMethod and Scope are carried in store.go: this package does
-	// not act on them yet, and a store that persists them today needs no schema
-	// change when something does. A store must round-trip them unchanged and
-	// must never interpret them.
+	// That seam landed with the route. Provider selects the configuration,
+	// AllowedActions is intersected with AuthSettings.EnabledWebhookActions to
+	// produce the allowlist that crosses, and JSScript is handed over verbatim
+	// — read, never interpreted, by anything in this package. A store must
+	// round-trip all three unchanged and must never interpret them either.
 	Provider       string   `json:"provider,omitempty"`
 	AllowedActions []string `json:"allowedActions,omitempty"`
 	JSScript       string   `json:"jsScript,omitempty"`
@@ -338,9 +339,9 @@ type WebhookAdminStore interface {
 // never accepts inbound webhooks should be able to say so by not implementing
 // it.
 //
-// The tools router that calls it is M9, and what it does with the result —
-// running JSScript — this port will not do in process; see WebhookConfig's
-// inbound fields and U25's InboundScriptRunner.
+// The tools router calls it from POST <tools>/webhook/{provider}, and what it
+// does with the result — running JSScript — it does through
+// InboundScriptRunner, out of process. See tools_webhook.go.
 type InboundWebhookStore interface {
 	// FindByProvider returns the inbound configuration registered for provider,
 	// and false when there is none — the reference's WebhookConfig | null, in

@@ -101,7 +101,10 @@ type AuthSettings struct {
 	Require2FA *bool `json:"require2FA,omitempty"`
 	// EnabledWebhookActions is the global allowlist of inbound-webhook action
 	// ids (settings-store.interface.ts:74), the circuit breaker above each
-	// webhook own allowedActions list. Stored only until the tools router lands.
+	// webhook own allowedActions list. It is read by
+	// POST <tools>/webhook/{provider}, which intersects it with the webhook's
+	// own AllowedActions to decide what an inbound script may call — so an empty
+	// list, or no settings store at all, means no script can call anything.
 	//
 	// nil and empty are different values here, as they are everywhere else in
 	// this type: nil is absent and keeps what is stored, an empty non-nil slice
