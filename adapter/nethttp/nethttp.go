@@ -177,6 +177,24 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 		mux.Handle(adminPath, admin)
 		mux.Handle(adminPath+"/", admin)
 	}
+
+	// The tools router, mounted only when it is configured — Tools.Enabled, an
+	// AuthTools to serve and an access decision, which is what
+	// HTTPConfig.ToolsMounted reports. It mounts at Tools.Path and not under
+	// prefix, for the reason the admin console does: the reference's
+	// createToolsRouter is a sibling of the auth router, not a child
+	// (auth.ToolsOptions).
+	//
+	// Two patterns, as for the admin console, because net/http's subtree pattern
+	// does not cover its own root. Every method: from U23 on this router answers
+	// POST on /track, /notify and /webhook as well as GET on the read routes,
+	// and the handler itself is what 404s a method it does not serve.
+	if a.cfg.ToolsMounted() {
+		tools := a.ToolsHandler()
+		toolsPath := a.cfg.ToolsPath()
+		mux.Handle(toolsPath, tools)
+		mux.Handle(toolsPath+"/", tools)
+	}
 }
 
 // mountCredentialRoutes registers the nineteen routes that create, prove,

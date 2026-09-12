@@ -148,6 +148,25 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 		r.Handle(adminPath, admin)
 		r.Handle(adminPath+"/*", admin)
 	}
+
+	// The tools router, mounted only when it is configured — Tools.Enabled, an
+	// AuthTools to serve and an access decision, which is what
+	// HTTPConfig.ToolsMounted reports. It mounts at Tools.Path and not under
+	// prefix: the reference's createToolsRouter is a sibling of the auth router,
+	// not a child (auth.ToolsOptions).
+	//
+	// One shared net/http handler for the whole subtree, as for the admin
+	// console, and two patterns because chi's wildcard does not match the bare
+	// mount path. r.Handle rather than r.Method: from U23 on this router answers
+	// POST as well as GET, and the handler itself 404s a method it does not
+	// serve. It carries none of the auth router's middleware;
+	// adapter/nethttp/tools.go says why.
+	if resolved.ToolsMounted() {
+		tools := h.ToolsHandler()
+		toolsPath := resolved.ToolsPath()
+		r.Handle(toolsPath, tools)
+		r.Handle(toolsPath+"/*", tools)
+	}
 }
 
 // mountCredentialRoutes registers the nineteen routes that create, prove,
