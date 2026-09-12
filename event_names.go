@@ -43,7 +43,7 @@ package auth
 // would cost a conversion at every boundary that already speaks `string`:
 // Event.Name, EventBus.Subscribe's first parameter, WebhookConfig.Events,
 // OutgoingWebhookEvent.Event, TelemetryEvent.EventName, TelemetryFilter.EventName
-// and SseMessage.Event are all `string` today, and every one of them is a place a
+// and StreamEvent.Type are all `string` today, and every one of them is a place a
 // caller will want to write a constant from this list. Untyped constants are
 // assignable to all of them with no conversion and no API change, and they
 // still fail the compile on a misspelling at the call site, which is the whole

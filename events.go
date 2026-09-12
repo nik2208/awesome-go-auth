@@ -195,29 +195,84 @@ func (e Event) WebhookMetadata() map[string]any {
 // event-handler-panic-does-not-fail-the-publisher, and safeCall is where it
 // lives.
 //
-// One piece of the reference's surface has no counterpart yet. AuthEventBus
-// exposes offEvent (auth-event-bus.ts:79-81), and this bus has no way to
-// unsubscribe at all. The port is not a line-for-line one: Go functions are not
-// comparable, so `Unsubscribe(name, handler)` cannot be written, and the Go
-// shape is a cancel function returned from Subscribe. That is a change to
-// Subscribe's signature, and it belongs with the first consumer that needs it —
-// the SSE hub in U20, whose per-connection subscriptions are the only thing in
-// the plan that ever ends. Nothing before then subscribes and stops.
+// One piece of the reference's surface is ported by shape rather than by
+// signature. AuthEventBus exposes offEvent (auth-event-bus.ts:79-81), which
+// takes the same listener reference that was registered and removes it. Go
+// functions are not comparable, so `Unsubscribe(name, handler)` cannot be
+// written at all, and the Go shape is a cancel function returned from Subscribe
+// — the thing the caller already holds, rather than a value it has to keep and
+// hand back. It arrived with the first consumer that needed it, the SSE manager
+// in U20, whose per-connection subscriptions are the only ones in the plan that
+// end before the process does.
 type EventBus struct {
 	mu          sync.RWMutex
-	subscribers map[string][]func(Event)
+	nextID      uint64
+	subscribers map[string][]busSubscription
+}
+
+// busSubscription is one registration. The id exists only so that cancelling
+// finds the right entry: two Subscribe calls with the same func value, or with
+// two closures over the same variable, are two subscriptions and cancelling one
+// must not remove the other.
+type busSubscription struct {
+	id      uint64
+	handler func(Event)
 }
 
 func NewEventBus() *EventBus {
-	return &EventBus{subscribers: make(map[string][]func(Event))}
+	return &EventBus{subscribers: make(map[string][]busSubscription)}
 }
 
 // Subscribe registers handler for one event name, or for EventBusWildcard to
 // receive every event. It is the reference's onEvent (auth-event-bus.ts:72-74).
-func (b *EventBus) Subscribe(event string, handler func(Event)) {
+//
+// The returned function cancels this one subscription and is the port of
+// offEvent (auth-event-bus.ts:79-81) — see the comment on EventBus for why the
+// shape differs. It is idempotent: calling it twice, or after the bus has been
+// dropped, is a no-op.
+//
+// Cancelling does not reach a dispatch already in flight. Publish copies the
+// handler list under the read lock and releases it before calling anything, so
+// a handler cancelled while an event is being delivered may still be called for
+// that event — exactly as EventEmitter, which clones its listener array before
+// emitting, still calls a listener removed by an earlier one. A handler that
+// must not run after its cancel returns has to guard itself.
+//
+// A caller with nothing to cancel may discard the result; that is why adding it
+// leaves every existing call site compiling unchanged.
+func (b *EventBus) Subscribe(event string, handler func(Event)) (cancel func()) {
+	b.mu.Lock()
+	b.nextID++
+	id := b.nextID
+	b.subscribers[event] = append(b.subscribers[event], busSubscription{id: id, handler: handler})
+	b.mu.Unlock()
+	return func() { b.unsubscribe(event, id) }
+}
+
+// unsubscribe removes one registration by id.
+//
+// It rebuilds the slice rather than shifting in place because Publish's snapshot
+// is taken under the read lock and this runs under the write lock: the two never
+// overlap, but a future reader that iterates without copying would see a slice
+// being rewritten under it, and the copy costs nothing at the sizes a bus holds.
+func (b *EventBus) unsubscribe(event string, id uint64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.subscribers[event] = append(b.subscribers[event], handler)
+	subs := b.subscribers[event]
+	for i, s := range subs {
+		if s.id != id {
+			continue
+		}
+		if len(subs) == 1 {
+			delete(b.subscribers, event)
+			return
+		}
+		next := make([]busSubscription, 0, len(subs)-1)
+		next = append(next, subs[:i]...)
+		next = append(next, subs[i+1:]...)
+		b.subscribers[event] = next
+		return
+	}
 }
 
 // EventBusWildcard is the subscription name that receives every event: the
@@ -245,14 +300,14 @@ func (b *EventBus) Publish(ev Event) {
 		ev.Timestamp = time.Now()
 	}
 	b.mu.RLock()
-	handlers := append([]func(Event){}, b.subscribers[ev.Name]...)
-	wildcard := append([]func(Event){}, b.subscribers[EventBusWildcard]...)
+	handlers := append([]busSubscription{}, b.subscribers[ev.Name]...)
+	wildcard := append([]busSubscription{}, b.subscribers[EventBusWildcard]...)
 	b.mu.RUnlock()
-	for _, h := range handlers {
-		safeCall(h, ev)
+	for _, s := range handlers {
+		safeCall(s.handler, ev)
 	}
-	for _, h := range wildcard {
-		safeCall(h, ev)
+	for _, s := range wildcard {
+		safeCall(s.handler, ev)
 	}
 }
 

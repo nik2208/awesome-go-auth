@@ -75,6 +75,7 @@ var wantDeviationIDs = []string{
 	"register-route-is-always-mounted",
 	"resource-server-gates-all-credential-routes",
 	"session-rotated-reports-one-session-id",
+	"sse-slow-consumer-is-disconnected",
 	"temp-token-is-typed-not-an-access-token",
 	"totp-accepts-one-step-of-skew",
 	"totp-issuer-defaults-to-config-issuer",
@@ -221,6 +222,19 @@ var wantClaims = map[string][]string{
 	"admin-cookie-secure-flag-is-configured-not-forwarded": {
 		"X-Forwarded-Proto", "CookieOptions.Secure", "__Host-", "__Secure-",
 		"HTTPConfig.ClientIP", "resolveAdminCookieName", "CookiePrefix",
+	},
+	// Both policies — the bound here and the unbounded queue there — the Node
+	// mechanism that makes the reference's behaviour checkable rather than
+	// asserted, the knob, and the two facts a reader needs in order not to
+	// misread the entry: that ending the stream is what makes the gap visible
+	// (an entry reduced to "slow clients are dropped" reads as a defect), and
+	// that neither implementation replays, so a reconnect resumes from now.
+	// Without that last claim the entry invites a host to believe the browser's
+	// automatic reconnect repairs what the disconnect cost.
+	"sse-slow-consumer-is-disconnected": {
+		"WithSseSendBuffer", "64", "res.write", "backpressure",
+		"EventSource", "Last-Event-ID", "http.ResponseController",
+		"EventBus.Publish",
 	},
 }
 

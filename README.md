@@ -897,6 +897,59 @@ revision the whole contract was extracted from.
   propagation, because a bus whose delivery semantics depend on configuration is
   a bus no downstream consumer can reason about.
 
+### A slow SSE consumer is disconnected instead of being buffered without limit
+
+`sse-slow-consumer-is-disconnected`
+
+- **Surface**: `auth.SseManager.Serve` — every `text/event-stream` this port
+  writes.
+- **This port**: Each connection has a bounded queue of pending frames,
+  `WithSseSendBuffer` frames deep and 64 by default. `Broadcast` never blocks
+  and never waits on a reader: a frame that does not fit means the connection is
+  closed, its registration removed and the handler returned, so the stream ends.
+  A single write is bounded the same way, by a ten second deadline set through
+  `http.ResponseController`, and a write that misses it ends the stream too. A
+  browser's `EventSource` reconnects on its own afterwards.
+- **The reference**: `SseManager` writes straight to the Express `Response` and
+  ignores the `false` that `res.write` returns when the socket buffer is full —
+  the backpressure signal Node offers. The unwritten frames sit in the stream's
+  internal queue, which has no bound, so a consumer that stops reading costs the
+  server memory until the socket is torn down by the client or the OS. Nothing
+  disconnects it, and nothing tells the publisher, because `broadcast` returns
+  `void` (`sse-manager.ts:204-221`, `sse-manager.ts:249-253`).
+- **Why**: There is no portable way to reproduce it. Node's answer comes from
+  stream backpressure, where an ignored `false` degrades into memory growth and
+  nothing else; Go's equivalent is a channel, and the three things a full one
+  can do are block the publisher, drop the frame, or end the connection.
+  Blocking is not available: `EventBus.Publish` is synchronous and runs on the
+  goroutine serving an HTTP request, so one client that stopped reading would
+  stall every login in the process. Dropping is available and is the worse of
+  the two remaining, because it is silent — neither implementation replays, so a
+  dropped frame is not recoverable by any client, and a client that is never
+  told has no way to know its view is now wrong. Ending the connection makes the
+  same gap visible at the one moment a client can act on it. The bound is also
+  what keeps one misbehaving reader from being a memory-exhaustion vector
+  against the auth process, which on the reference is the operator's problem and
+  here is not.
+- **Observing it**: Open a stream, stop reading from the socket, and broadcast
+  more than `WithSseSendBuffer` frames to a topic it holds: the response ends
+  and `ConnectionCount` drops. Under the reference the stream stays open and the
+  frames accumulate in the server's memory.
+- **What a reconnecting client gets**: Nothing it missed. Neither implementation
+  reads the `Last-Event-ID` header a browser sends when its `EventSource`
+  reconnects, neither retains a delivered event, and the per-connection last
+  event id is only ever compared against the next event's — so a reconnect
+  resumes from *now*. Whatever was raised while the client was away is gone in
+  both, and the difference this entry records is only how the gap happens:
+  abruptly and observably here, silently and without bound there.
+- **For a host that wants the frames kept**: Raise `WithSseSendBuffer` to the
+  burst the slowest client must survive; it trades memory for tolerance, one
+  queue per connection. There is no unbounded setting, and there deliberately is
+  not: an unbounded queue on a Go server is the memory-exhaustion vector above
+  with a configuration flag in front of it. Delivery that has to survive a
+  disconnect needs an event log the client can replay from, which is a guarantee
+  neither this port nor the reference offers.
+
 ### The SSR-injected `__AUTH_CONFIG__` is HTML-escaped JSON, and cannot be broken out of
 
 `ui-ssr-config-json-is-html-escaped`

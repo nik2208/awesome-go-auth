@@ -98,14 +98,27 @@ func main() {
 		log.Printf("new user registered: %s", e.UserID)
 	})
 
-	// ── 3. Optional SSE hub ────────────────────────────────────────────────
-	hub := auth.NewSseHub()
-	bus.Subscribe("*", func(e auth.Event) {
-		_ = hub.Publish(context.Background(), e.UserID, auth.SseMessage{
-			Event: e.Name,
-			Data:  map[string]any{"userId": e.UserID},
-		})
+	// ── 3. Optional SSE manager ────────────────────────────────────────────
+	// The manager holds the open text/event-stream connections. ctx bounds the
+	// distributor subscription, and there is no distributor here: this process
+	// is one instance, so in-process fan-out reaches every connection there is.
+	// A deployment behind more than one process needs auth.SseDistributor, or
+	// an event raised on one instance reaches only the clients connected to it.
+	sse, err := auth.NewSseManager(context.Background())
+	if err != nil {
+		log.Fatalf("sse: %v", err)
+	}
+	// One bus event becomes one StreamEvent on one topic: the user's own
+	// channel. The topic scheme is the reference's, and choosing which of its
+	// channels an event goes to is the AuthTools facade's job — this is the
+	// low-level seam, wired here so the example streams something.
+	stopSSE := sse.BridgeEventBus(context.Background(), bus, func(e auth.Event) []string {
+		if e.UserID == "" {
+			return nil
+		}
+		return []string{"user:" + e.UserID}
 	})
+	defer stopSSE()
 
 	// ── 4. Optional outgoing webhooks ──────────────────────────────────────
 	// Subscriptions live in a WebhookStore, not in a list hard-coded here, and
@@ -170,8 +183,19 @@ func main() {
 	r.Get("/admin", auth.ServeAdminUI().ServeHTTP) //nolint:staticcheck // no replacement until the admin router lands
 
 	// SSE endpoint, behind the same access-token middleware the auth routes use.
-	r.With(chiAdapter.Middleware(a)).Get("/events/{userID}", func(w http.ResponseWriter, r *http.Request) {
-		auth.ServeSSE(hub, chi.URLParam(r, "userID"))(w, r)
+	// The topics are the server's decision — never the client's — so they are
+	// derived from the authenticated principal and not from the path. Serve
+	// holds this goroutine for the life of the stream.
+	r.With(chiAdapter.Middleware(a)).Get("/events", func(w http.ResponseWriter, r *http.Request) {
+		user, ok := auth.UserFromContext(r.Context())
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		topics := []string{"user:" + user.ID, "global"}
+		if err := sse.Serve(w, r, topics, auth.SseConnectionMeta{UserID: user.ID, TenantID: user.TenantID}); err != nil {
+			log.Printf("sse stream for %s ended: %v", user.ID, err)
+		}
 	})
 
 	// MCP tool server
