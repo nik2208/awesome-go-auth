@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-12
+
+The store seams the admin surface needs, and nothing that mounts a route: the
+admin router itself is the next milestone, and this one exists so that it finds
+every interface it needs already designed, implemented in memory, and pinned by
+tests.
+
+Three groups. `AdminUserStore`, `SessionLister` and `RoleLister` close the gap
+the parity review called the real bottleneck of the admin surface — before them
+the library could reach a user only through tenant membership, so a single-tenant
+deployment with no membership rows had nothing to paginate. `APIKeyStore` gains
+the five methods the reference declares and this port had not ported, and a
+memory implementation of all of them. `WebhookStore` arrives whole, subscriptions
+included, with the inbound-webhook fields carried as data that no store may
+interpret.
+
+One breaking change, to a store interface rather than to the wire:
+`APIKeyStore` now requires `FindByID`, which the reference makes mandatory too.
+
 ### Added
 - **`WebhookStore`, `WebhookConfig` and `MemoryWebhookStore` — the webhook
   subscription seam.** The reference's `IWebhookStore`, `WebhookConfig` and
