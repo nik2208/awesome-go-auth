@@ -45,6 +45,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already strikes: a store written today needs no schema change when M9 arrives.
   Nothing in the library reads a `WebhookStore` yet, no wire surface changed,
   and no entry was added to the deviation register.
+- **`AdminUserStore`, `SessionLister` and `RoleLister` — the store seams the
+  admin surface needs.** The reference declares three optional methods for it:
+  `IUserStore.listUsers` (`user-store.interface.ts:130`),
+  `ISessionStore.getAllSessions` (`session-store.interface.ts:91`) and
+  `IRolesPermissionsStore.getAllRoles`
+  (`roles-permissions-store.interface.ts:155`). All three are now interfaces in
+  `store.go`, optional in the way `SessionAdminStore` and `UserMetadataStore`
+  already are — a narrow interface the core type-asserts the configured store to
+  — with `Service.ListUsers`, `Service.ListAllSessions` and
+  `Service.ListAllRoles` resolving them and answering `ErrFeatureNotSupported`
+  when the assertion fails. That sentinel is what M8 turns into the reference's
+  own `501 {error: 'IUserStore.listUsers is not implemented', users: [], total: 0}`
+  (`admin.router.ts:754`, and `:1093`, `:1133` for the other two). **No routes
+  are mounted by this change**; the admin router is M8. `MemoryUserStore`,
+  `MemorySessionStore` and `MemoryRolesPermissionsStore` implement all three.
+- **`User.IsAdmin`.** The reference's `BaseUser.isAdmin` (`user.model.ts:81-90`),
+  a stored flag rather than a projection of `Role`: the admin router's
+  `'is-admin-flag'` access policy reads it as `granted = user.isAdmin === true`
+  (`admin.router.ts:370`) and `buildPolicyGuard` consults no role anywhere, its
+  own doc routing anyone wanting role-shaped admin-ness to RBAC and a custom
+  predicate instead. Absent is `false` on both sides, so a store that never
+  persisted the column needs no migration. It is deliberately not projected onto
+  `PublicUser`: the reference serialises it nowhere, the admin users table picks
+  its keys one by one and does not pick this one (`admin.router.ts:764-773`), and
+  publishing which accounts are admin is not an addition this contract wants.
+
+### Fixed
+- **`MemorySessionStore.ListSessionsForUser` now returns a stable order.** It
+  ranged over a map, so the device list a user got from `GET /sessions` was
+  shuffled on every call. It is now `Session.ID` ascending, the same order
+  `SessionLister.GetAllSessions` beside it uses. Nothing could have depended on
+  the previous order, because there was not one.
 
 ## [0.7.0] - 2026-09-12
 

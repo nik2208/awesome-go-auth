@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -467,6 +468,11 @@ func (s *MemorySessionStore) ListSessionsForUser(_ context.Context, userID, tena
 			out = append(out, session)
 		}
 	}
+	// Same order as GetAllSessions below, for the same reason: the range above is
+	// over a map, so without this the device list a user sees at GET /sessions is
+	// shuffled on every call. Nothing could have depended on the previous order —
+	// there was not one — so fixing it here is free.
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 
@@ -495,4 +501,70 @@ func (s *MemorySessionStore) DeleteExpiredSessions(_ context.Context, now time.T
 		}
 	}
 	return deleted, nil
+}
+
+// pageOf applies the limit/offset contract the three admin listers share to an
+// already-ordered slice, and is the one place that contract is implemented: a
+// non-positive limit is an empty page, a negative offset is read as zero, an
+// offset at or past the end is an empty page, and no result ever aliases items.
+//
+// The copy is not defensive tidiness. items is built out of the store's own maps
+// while the lock is held, and a caller handed a sub-slice of it would be holding
+// a window onto memory the store still owns; a fresh slice is what lets the doc
+// on the three interfaces promise the page belongs to the caller.
+func pageOf[T any](items []T, limit, offset int) []T {
+	if limit <= 0 || offset >= len(items) {
+		return []T{}
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	// end < 0 is offset+limit overflowing int, which a limit parsed out of a
+	// query string can reach; it means "everything from offset", same as an end
+	// past the tail.
+	end := offset + limit
+	if end > len(items) || end < 0 {
+		end = len(items)
+	}
+	page := make([]T, end-offset)
+	copy(page, items[offset:end])
+	return page
+}
+
+// ListUsers makes MemoryUserStore satisfy AdminUserStore, and with it defines
+// the order this package calls normative: User.ID ascending, by Go string
+// comparison. See AdminUserStore for why the order is a contract and not an
+// implementation detail, and for what tenantID does and does not select — in
+// particular that an empty tenantID lists every user rather than only the users
+// stored under the empty tenant.
+func (s *MemoryUserStore) ListUsers(_ context.Context, tenantID string, limit, offset int) ([]User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all := make([]User, 0, len(s.byID))
+	for _, user := range s.byID {
+		if tenantID != "" && user.TenantID != tenantID {
+			continue
+		}
+		all = append(all, user)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
+	return pageOf(all, limit, offset), nil
+}
+
+// GetAllSessions makes MemorySessionStore satisfy SessionLister: every session
+// of every user, ordered by Session.ID ascending, paged by the shared rules.
+//
+// Revoked and expired sessions are both included, which is what SessionLister
+// specifies and what ListSessionsForUser beside it already does — this store
+// tombstones rather than deletes, so dropping the dead ones belongs above the
+// store, not in it.
+func (s *MemorySessionStore) GetAllSessions(_ context.Context, limit, offset int) ([]Session, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all := make([]Session, 0, len(s.byID))
+	for _, session := range s.byID {
+		all = append(all, session)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
+	return pageOf(all, limit, offset), nil
 }

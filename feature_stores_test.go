@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -584,5 +585,70 @@ func TestMemoryTelemetryStore_FilterByUserID(t *testing.T) {
 		if e.UserID != "u1" {
 			t.Fatalf("expected only u1 events, got %s", e.UserID)
 		}
+	}
+}
+
+// --- RoleLister ---
+
+func TestMemoryRolesPermissionsStore_GetAllRoles(t *testing.T) {
+	store := NewMemoryRolesPermissionsStore()
+	ctx := context.Background()
+
+	roles, err := store.GetAllRoles(ctx)
+	if err != nil {
+		t.Fatalf("GetAllRoles on an empty store: %v", err)
+	}
+	if len(roles) != 0 {
+		t.Fatalf("expected no roles, got %v", roles)
+	}
+
+	// Created out of alphabetical order; "viewer" deliberately has no
+	// permissions, because CreateRole with an empty list still creates a role and
+	// GET /admin/api/roles exists to show it.
+	_ = store.CreateRole(ctx, "editor", []string{"posts:write", "posts:read"})
+	_ = store.CreateRole(ctx, "admin", []string{"users:manage"})
+	_ = store.CreateRole(ctx, "viewer", nil)
+
+	roles, err = store.GetAllRoles(ctx)
+	if err != nil {
+		t.Fatalf("GetAllRoles: %v", err)
+	}
+	if got := strings.Join(roles, ","); got != "admin,editor,viewer" {
+		t.Fatalf("expected role names ascending, got %s", got)
+	}
+}
+
+// The set is the roles the store defines, not the roles some user happens to
+// hold: a role assigned to nobody is still listed, and one whose last holder
+// dropped it does not disappear.
+func TestMemoryRolesPermissionsStore_GetAllRoles_IsNotDerivedFromAssignments(t *testing.T) {
+	store := NewMemoryRolesPermissionsStore()
+	ctx := context.Background()
+	_ = store.CreateRole(ctx, "editor", []string{"posts:write"})
+	_ = store.CreateRole(ctx, "orphan", []string{"nothing:atall"})
+	if err := store.AddRoleToUser(ctx, "u1", "editor", "t1"); err != nil {
+		t.Fatalf("AddRoleToUser: %v", err)
+	}
+
+	roles, _ := store.GetAllRoles(ctx)
+	if got := strings.Join(roles, ","); got != "editor,orphan" {
+		t.Fatalf("an unassigned role is still a role, got %s", got)
+	}
+
+	if err := store.RemoveRoleFromUser(ctx, "u1", "editor", "t1"); err != nil {
+		t.Fatalf("RemoveRoleFromUser: %v", err)
+	}
+	roles, _ = store.GetAllRoles(ctx)
+	if got := strings.Join(roles, ","); got != "editor,orphan" {
+		t.Fatalf("unassigning must not delete the role, got %s", got)
+	}
+
+	// DeleteRole is what removes it, and then the listing follows.
+	if err := store.DeleteRole(ctx, "orphan"); err != nil {
+		t.Fatalf("DeleteRole: %v", err)
+	}
+	roles, _ = store.GetAllRoles(ctx)
+	if got := strings.Join(roles, ","); got != "editor" {
+		t.Fatalf("expected the deleted role gone, got %s", got)
 	}
 }

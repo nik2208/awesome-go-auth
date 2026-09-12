@@ -101,6 +101,197 @@ type RolesPermissionsStore interface {
 	UserHasPermission(ctx context.Context, userID, permission, tenantID string) (bool, error)
 }
 
+// The three admin listers — AdminUserStore, SessionLister and RoleLister —
+// are the store seams M8's admin router needs in order to enumerate anything.
+//
+// The reference declares exactly three optional methods for that surface:
+// IUserStore.listUsers (user-store.interface.ts:130), ISessionStore.getAllSessions
+// (session-store.interface.ts:91) and IRolesPermissionsStore.getAllRoles
+// (roles-permissions-store.interface.ts:155). All three are optional there and
+// all three are optional here, by the convention SessionAdminStore and
+// UserMetadataStore already follow: a narrow interface the core type-asserts the
+// configured store to, answering ErrFeatureNotSupported when the assertion
+// fails. That sentinel is what the router turns into the reference's own status
+// — `501 {error: 'IUserStore.listUsers is not implemented', users: [], total: 0}`
+// (admin.router.ts:754) and its two siblings (:1093, :1133).
+//
+// No route in this package consumes them yet; M8 does. They ship now because the
+// seam is what a store implementor builds against, and because one of them is the
+// bottleneck of the whole admin surface: until this interface existed, the only
+// way for this package to reach a user whose id it did not already hold was
+// TenantStore.GetUsersForTenant, so a single-tenant deployment whose tenant had
+// no membership rows had nothing to page through at all.
+//
+// # Ordering
+//
+// All three answer in a total order, and that order is part of the contract
+// rather than an implementation detail, because two of the reference's own
+// consumers depend on it:
+//
+//   - The 'first-user' access policy hands the admin surface to
+//     `listUsers(1, 0)[0]`, described as "the first registered user (lowest-ID)"
+//     (admin.router.ts:27; the check is at :373-374). A store with no order gives
+//     the console to an arbitrary user, and to a different one after a restart.
+//   - POST /admin/api/2fa-policy walks the entire table in pages of 100 —
+//     `listUsers(batchSize, offset)` until a page comes back shorter than the
+//     batch (admin.router.ts:836-847). Without an order that is stable across
+//     those calls the walk silently skips users and updates others twice.
+//
+// The reference does not itself supply that order. Every implementation it ships
+// is `SELECT * FROM users LIMIT ? OFFSET ?` with no ORDER BY
+// (sqlite-user-store.example.ts:305, mysql-user-store.example.ts:356),
+// `find({}).skip().limit()` in natural order (mongodb-user-store.example.ts:327),
+// or a Map's insertion order (in-memory-user-store.ts:175) — so "lowest-ID" is a
+// promise its own stores do not keep. This port keeps it. The normative order is
+// **ID ascending, by Go string comparison**: MemoryUserStore sorts on User.ID,
+// MemorySessionStore on Session.ID, MemoryRolesPermissionsStore on the role name,
+// which is what every other list method in this package already does
+// (TenantStore.GetAllTenants, GetUsersForTenant, RolesPermissionsStore.GetRolesForUser).
+// A store whose natural key order differs — a single-table design with a
+// tenant-prefixed sort key, say — may answer in its own order, but that is a
+// deviation its own register has to carry, not a licence this one grants.
+//
+// # Paging
+//
+// limit and offset are the reference's, positionally and in meaning, and the
+// rules below bind all three interfaces:
+//
+//   - limit <= 0 returns an empty page and no error. The 2fa-policy walk
+//     terminates on a short page, so a store that reads a non-positive limit as
+//     "no limit" turns a malformed query string into a full-table update.
+//   - offset < 0 is read as 0; an offset at or past the end returns an empty page
+//     rather than an error.
+//   - A page shorter than limit means nothing follows it. That is the walk's
+//     termination condition, so a store may not return a short page mid-list.
+//   - The slice belongs to the caller and shares no backing array with the store.
+//
+// There is deliberately no Count method. `GET /admin/api/users` reports
+// `safe.length + offset + (safe.length === limit ? 1 : 0)` (admin.router.ts:782),
+// a number whose only job is to tell the table whether to draw a "next" button
+// and which is off by one whenever the last page happens to be full; the sessions
+// route computes the same thing (:1109). Reproducing that is M8's work and needs
+// no store support, whereas a real count is the one query a keyed store cannot
+// serve cheaply — and no reference consumer asks for it.
+
+// AdminUserStore lists users for the admin surface. It is the reference's
+// IUserStore.listUsers (user-store.interface.ts:130) with one parameter added.
+//
+// # What tenantID means, and what it does not
+//
+// tenantID filters on User.TenantID: the column every user record already
+// carries, and which userEmailKey already makes part of a user's identity. It is
+// *not* a membership query. TenantStore.AssociateUserWithTenant and
+// GetUsersForTenant (tenant-store.interface.ts:112) answer "which users belong to
+// this tenant", a many-to-many relation kept in its own table, and this interface
+// deliberately never consults it: a user whose TenantID is "acme" and who is
+// additionally associated with "globex" is listed under "acme" and nowhere else.
+// Keeping the two apart is the point of the parameter — the membership join is
+// precisely the reachability dead end this interface exists to route around, and
+// answering listing out of it would rebuild the dead end inside the fix.
+//
+// An empty tenantID is the one place in this package where an empty tenant is a
+// wildcard rather than a literal: it means no filter at all — every user, in
+// every tenant, including users whose own TenantID is empty. Everywhere else in
+// store.go, "" is an ordinary tenant value matching only records stored under it.
+// The exception is not cosmetic. GET /admin/api/users takes no tenant parameter
+// (admin.router.ts:748 onwards) and neither does the 'first-user' policy's
+// `listUsers(1, 0)` (:373), so "every user" has to be expressible, and the
+// reference's signature — which carries no tenant at all — says that is the
+// default reading. The ambiguity this introduces is unobservable in the
+// deployment that would suffer from it: where every user's TenantID is empty,
+// filtering on the empty tenant and not filtering at all return the same set —
+// which is the single-tenant deployment, the common one. It becomes
+// observable only in a tree that mixes tenanted users with untenanted ones, which
+// is migration residue rather than a configuration.
+//
+// # Why the parameter exists
+//
+// The reference has no tenancy on this route, so the faithful signature is
+// ListUsers(ctx, limit, offset) and a multi-tenant console would filter the page
+// after the fact. That is wrong in the direction that matters: filtering after
+// the page has been cut means a tenant with ten users is invisible behind a
+// hundred thousand belonging to someone else, and every route above it inherits
+// the problem. Pushing the predicate into the store instead costs one parameter,
+// is what every other user-facing method in store.go already does, and — see
+// below — is the form a keyed store can actually satisfy. U13 passes "" and gets
+// the reference's behaviour exactly.
+//
+// # Implementing it on a key-value store
+//
+// The first implementor is a DynamoDB single-table design, and the requirement
+// there is that this be served without a table Scan. It can be: a secondary index
+// with a *constant* partition key (GSI1PK = "USER") and a sort key of
+// `<tenantID>#<id>` answers both forms as a Query — unscoped with no sort-key
+// condition, scoped with begins_with(GSI1SK, tenantID+"#"). Nothing here is
+// keyed on the tenant itself, which is deliberate: a tenant-partitioned index
+// serves the scoped form and forces a cross-partition Scan for the unscoped one,
+// which is the form the reference's only consumers use.
+//
+// Two honest limits on that. First, the constant partition key is a hot key under
+// write load; sharding it (USER#0..USER#n) is the usual answer and costs an
+// n-way merge to keep the order. Second, offset is positional, and no key-value
+// store can seek to the Nth item: offset N costs reading and discarding N index
+// entries. That is bounded rather than unbounded — the route clamps limit to 100
+// and the filter path asks for 500 rows at offset 0 — but it is a real cost, and
+// the only signature that removes it is a cursor, which cannot express the
+// reference's `total` arithmetic and would change the wire. Offset stays.
+//
+// The `<tenantID>#<id>` sort key above orders the unscoped listing by
+// (TenantID, ID) rather than by ID alone. That is a deviation from the normative
+// order documented above, and the store that makes it registers it.
+type AdminUserStore interface {
+	ListUsers(ctx context.Context, tenantID string, limit, offset int) ([]User, error)
+}
+
+// SessionLister lists sessions across all users, for the admin sessions table.
+// It is the reference's ISessionStore.getAllSessions (session-store.interface.ts:91),
+// consumed by GET /admin/api/sessions (admin.router.ts:1086 onwards).
+//
+// Unlike AdminUserStore this carries no tenantID, and the asymmetry is
+// deliberate rather than an oversight. The tenant parameter on the user lister
+// buys reachability: without it, a tenant's users can only be found through a
+// membership table that a single-tenant deployment never populates. Sessions have
+// no such dead end — every session is already listable, and Session.TenantID
+// rides on each record returned — so a tenant parameter here would buy a
+// predicate a caller can apply itself, at the price of a second signature the
+// reference does not have. GET /admin/api/sessions has no tenant notion either.
+//
+// The order is Session.ID ascending, and the paging rules are the ones stated
+// above.
+//
+// Nothing is filtered out. Revoked and expired sessions are both returned, which
+// matches SessionAdminStore.ListSessionsForUser and is the same division of
+// labour: this port tombstones a revoked session rather than deleting it, because
+// /refresh needs the tombstone to answer SESSION_REVOKED instead of "not found",
+// so dropping the dead ones is the presentation layer's job and Auth.ListSessions
+// is where it already happens. The reference's interface doc says "all active
+// sessions" (session-store.interface.ts:85) and gets that for free, because its
+// revokeSession deletes the row. A store that also deletes is therefore not in
+// conflict with this rule — it simply has nothing to return.
+type SessionLister interface {
+	GetAllSessions(ctx context.Context, limit, offset int) ([]Session, error)
+}
+
+// RoleLister enumerates every role name defined in the store. It is the
+// reference's IRolesPermissionsStore.getAllRoles (roles-permissions-store.interface.ts:155),
+// consumed by GET /admin/api/roles (admin.router.ts:1129 onwards).
+//
+// It is separate from RolesPermissionsStore rather than a method on it for the
+// same reason the reference marks it optional: every other method there is keyed
+// on a role, a user or a permission the caller already names, and a store can
+// serve all of them without ever being able to enumerate. Folding this in would
+// make the whole RBAC surface unimplementable for such a store.
+//
+// There is no limit/offset, matching the reference — the roles of a deployment
+// are a bounded, human-authored set, and the route pairs each name with its
+// permissions in a fan-out it makes no attempt to page (admin.router.ts:1136-1141).
+// The order is the role name ascending, matching GetPermissionsForRole and
+// GetRolesForUser. Roles with no permissions are still roles and are still
+// listed; CreateRole with an empty permission list creates one.
+type RoleLister interface {
+	GetAllRoles(ctx context.Context) ([]string, error)
+}
+
 // AuthCode is one OIDC authorization code as the IDP stores it between
 // /authorize and /token. CodeHash is hashToken of the value the client was
 // given; the clear-text code is never persisted. RedirectURI is the canonical

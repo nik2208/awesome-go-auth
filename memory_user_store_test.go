@@ -2,6 +2,10 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1017,5 +1021,352 @@ func TestMemoryLinkedAccounts_MultipleProviders(t *testing.T) {
 	github, _ := store.FindByProvider(ctx, "github", "gb")
 	if google.Provider != "google" || github.Provider != "github" {
 		t.Fatal("each provider should resolve independently")
+	}
+}
+
+// --- AdminUserStore -------------------------------------------------------
+
+func seedUsers(t *testing.T, store *MemoryUserStore, users ...User) {
+	t.Helper()
+	ctx := context.Background()
+	for _, user := range users {
+		if _, err := store.CreateUser(ctx, user); err != nil {
+			t.Fatalf("seed %s: %v", user.ID, err)
+		}
+	}
+}
+
+func userIDs(users []User) string {
+	ids := make([]string, 0, len(users))
+	for _, user := range users {
+		ids = append(ids, user.ID)
+	}
+	return strings.Join(ids, ",")
+}
+
+// The normative order. Insertion order and tenant are both varied so that a
+// store answering in map order could not pass, and the loop is what makes a
+// map-order answer fail reliably rather than one run in twenty.
+func TestMemoryUserStore_ListUsers_OrdersByIDAscending(t *testing.T) {
+	store := NewMemoryUserStore()
+	seedUsers(t, store,
+		User{ID: "u3", Email: "c@example.com", TenantID: "t2"},
+		User{ID: "u1", Email: "a@example.com", TenantID: "t1"},
+		User{ID: "u4", Email: "d@example.com", TenantID: "t1"},
+		User{ID: "u2", Email: "b@example.com", TenantID: "t2"},
+	)
+	for range 8 {
+		users, err := store.ListUsers(context.Background(), "", 10, 0)
+		if err != nil {
+			t.Fatalf("ListUsers: %v", err)
+		}
+		if got := userIDs(users); got != "u1,u2,u3,u4" {
+			t.Fatalf("expected User.ID ascending, got %s", got)
+		}
+	}
+}
+
+// The reference's 'first-user' access policy is listUsers(1, 0)[0], documented
+// as "the first registered user (lowest-ID)" (admin.router.ts:27, :373-374). If
+// this stops being the lowest id, M8 hands the admin console to another account.
+func TestMemoryUserStore_ListUsers_FirstPageIsLowestID(t *testing.T) {
+	store := NewMemoryUserStore()
+	seedUsers(t, store,
+		User{ID: "u9", Email: "i@example.com"},
+		User{ID: "u0", Email: "z@example.com"},
+		User{ID: "u5", Email: "m@example.com"},
+	)
+	first, err := store.ListUsers(context.Background(), "", 1, 0)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if len(first) != 1 || first[0].ID != "u0" {
+		t.Fatalf("expected the lowest id, got %q", userIDs(first))
+	}
+}
+
+// tenantID filters on the User.TenantID column, and an empty tenantID is a
+// wildcard rather than a literal — the one place in this package where it is.
+func TestMemoryUserStore_ListUsers_TenantFilter(t *testing.T) {
+	store := NewMemoryUserStore()
+	seedUsers(t, store,
+		User{ID: "u1", Email: "a@example.com", TenantID: "acme"},
+		User{ID: "u2", Email: "b@example.com", TenantID: "globex"},
+		User{ID: "u3", Email: "c@example.com", TenantID: "acme"},
+		User{ID: "u4", Email: "d@example.com", TenantID: ""},
+	)
+	ctx := context.Background()
+
+	acme, err := store.ListUsers(ctx, "acme", 10, 0)
+	if err != nil {
+		t.Fatalf("ListUsers acme: %v", err)
+	}
+	if got := userIDs(acme); got != "u1,u3" {
+		t.Fatalf("expected only the acme users, got %s", got)
+	}
+
+	all, err := store.ListUsers(ctx, "", 10, 0)
+	if err != nil {
+		t.Fatalf("ListUsers unscoped: %v", err)
+	}
+	if got := userIDs(all); got != "u1,u2,u3,u4" {
+		t.Fatalf("empty tenantID must list every user, the untenanted one included, got %s", got)
+	}
+
+	none, err := store.ListUsers(ctx, "nosuchtenant", 10, 0)
+	if err != nil {
+		t.Fatalf("ListUsers unknown tenant: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("expected an empty page for an unknown tenant, got %s", userIDs(none))
+	}
+}
+
+// The tenant membership table is deliberately not consulted: TenantID is the
+// user's own column, and an association with a second tenant neither moves a
+// user nor duplicates them.
+func TestMemoryUserStore_ListUsers_IgnoresTenantMembership(t *testing.T) {
+	store := NewMemoryUserStore()
+	tenants := NewMemoryTenantStore()
+	ctx := context.Background()
+	seedUsers(t, store, User{ID: "u1", Email: "a@example.com", TenantID: "acme"})
+	if _, err := tenants.CreateTenant(ctx, Tenant{ID: "globex", Name: "Globex"}); err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if err := tenants.AssociateUserWithTenant(ctx, "u1", "globex"); err != nil {
+		t.Fatalf("associate: %v", err)
+	}
+
+	if users, _ := store.ListUsers(ctx, "globex", 10, 0); len(users) != 0 {
+		t.Fatalf("membership in globex must not list u1 under globex, got %s", userIDs(users))
+	}
+	if users, _ := store.ListUsers(ctx, "acme", 10, 0); userIDs(users) != "u1" {
+		t.Fatalf("u1 must stay under its own TenantID, got %s", userIDs(users))
+	}
+}
+
+func TestMemoryUserStore_ListUsers_PagingEdges(t *testing.T) {
+	store := NewMemoryUserStore()
+	seedUsers(t, store,
+		User{ID: "u1", Email: "a@example.com"},
+		User{ID: "u2", Email: "b@example.com"},
+		User{ID: "u3", Email: "c@example.com"},
+	)
+	ctx := context.Background()
+
+	cases := []struct {
+		name          string
+		limit, offset int
+		want          string
+	}{
+		{"first page", 2, 0, "u1,u2"},
+		{"short last page", 2, 2, "u3"},
+		{"offset at the end", 2, 3, ""},
+		{"offset past the end", 2, 99, ""},
+		// A non-positive limit is an empty page and never "everything": the
+		// 2fa-policy walk stops on a short page, so reading 0 as unlimited turns
+		// a malformed query string into a full-table update.
+		{"zero limit", 0, 0, ""},
+		{"negative limit", -5, 0, ""},
+		{"negative offset", 2, -7, "u1,u2"},
+		{"limit past the end", 100, 1, "u2,u3"},
+		// offset+limit overflows int; the page is still everything from offset.
+		{"limit overflows int", math.MaxInt, 1, "u2,u3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			users, err := store.ListUsers(ctx, "", tc.limit, tc.offset)
+			if err != nil {
+				t.Fatalf("ListUsers: %v", err)
+			}
+			if users == nil {
+				t.Fatal("a page is never nil")
+			}
+			if got := userIDs(users); got != tc.want {
+				t.Fatalf("want %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+// The page belongs to the caller: it shares no backing array with the store, or
+// a caller that sorts or edits its page corrupts the next reader's view.
+func TestMemoryUserStore_ListUsers_PageDoesNotAliasTheStore(t *testing.T) {
+	store := NewMemoryUserStore()
+	seedUsers(t, store,
+		User{ID: "u1", Email: "a@example.com"},
+		User{ID: "u2", Email: "b@example.com"},
+	)
+	ctx := context.Background()
+	page, err := store.ListUsers(ctx, "", 10, 0)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	page[0].Email = "tampered@example.com"
+
+	again, _ := store.ListUsers(ctx, "", 10, 0)
+	if again[0].Email != "a@example.com" {
+		t.Fatalf("mutating a page changed the next page: %s", again[0].Email)
+	}
+	stored, _ := store.GetUserByID(ctx, "u1", "")
+	if stored.Email != "a@example.com" {
+		t.Fatalf("mutating a page changed the record: %s", stored.Email)
+	}
+}
+
+// POST /admin/api/2fa-policy walks the whole table in pages of batchSize until a
+// page comes back short (admin.router.ts:836-847). This is that walk: it has to
+// terminate, and it has to visit every user exactly once.
+func TestMemoryUserStore_ListUsers_FullTableWalkVisitsEachUserOnce(t *testing.T) {
+	store := NewMemoryUserStore()
+	for i := range 25 {
+		id := fmt.Sprintf("u%02d", i)
+		seedUsers(t, store, User{ID: id, Email: id + "@example.com", TenantID: "t1"})
+	}
+	ctx := context.Background()
+
+	const batchSize = 7
+	seen := map[string]int{}
+	offset, pages := 0, 0
+	for {
+		batch, err := store.ListUsers(ctx, "", batchSize, offset)
+		if err != nil {
+			t.Fatalf("ListUsers: %v", err)
+		}
+		if pages++; pages > 100 {
+			t.Fatal("the walk did not terminate")
+		}
+		if len(batch) == 0 {
+			break
+		}
+		for _, user := range batch {
+			seen[user.ID]++
+		}
+		if len(batch) < batchSize {
+			break
+		}
+		offset += batchSize
+	}
+	if len(seen) != 25 {
+		t.Fatalf("expected to visit 25 users, visited %d", len(seen))
+	}
+	for id, count := range seen {
+		if count != 1 {
+			t.Fatalf("%s was visited %d times", id, count)
+		}
+	}
+}
+
+// --- User.IsAdmin ---------------------------------------------------------
+
+// IsAdmin is a stored field, so the only thing a store owes it is that it
+// survives a write and a read. It is also absent from the wire, which is the
+// half a future PublicUser edit could quietly break.
+func TestUser_IsAdmin_RoundTripsAndStaysOffTheWire(t *testing.T) {
+	store := NewMemoryUserStore()
+	ctx := context.Background()
+	seedUsers(t, store,
+		User{ID: "u1", Email: "admin@example.com", TenantID: "t1", IsAdmin: true, Role: "user"},
+		User{ID: "u2", Email: "plain@example.com", TenantID: "t1"},
+	)
+
+	admin, err := store.GetUserByID(ctx, "u1", "t1")
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if !admin.IsAdmin {
+		t.Fatal("IsAdmin must survive CreateUser/GetUserByID")
+	}
+	// Role is not a source of admin-ness: the reference reads the flag and no
+	// role (admin.router.ts:370), so "user" beside IsAdmin is not a conflict.
+	if admin.Role != "user" {
+		t.Fatalf("Role should be untouched, got %q", admin.Role)
+	}
+	plain, err := store.GetUserByID(ctx, "u2", "t1")
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if plain.IsAdmin {
+		t.Fatal("a user with no flag set must not be an admin")
+	}
+
+	body, err := json.Marshal(NewPublicUser(admin))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(strings.ToLower(string(body)), "isadmin") {
+		t.Fatalf("isAdmin must not reach the wire: %s", body)
+	}
+}
+
+// --- Capability resolution ------------------------------------------------
+
+// bareUserStore and bareSessionStore implement their required interface and
+// nothing else. They are the stores that make M8 answer the reference's 501.
+type bareUserStore struct{}
+
+func (bareUserStore) CreateUser(_ context.Context, user User) (User, error) { return user, nil }
+func (bareUserStore) GetUserByEmail(context.Context, string, string) (User, error) {
+	return User{}, ErrInvalidCredentials
+}
+func (bareUserStore) GetUserByID(context.Context, string, string) (User, error) {
+	return User{}, ErrInvalidCredentials
+}
+
+type bareSessionStore struct{}
+
+func (bareSessionStore) CreateSession(_ context.Context, session Session) (Session, error) {
+	return session, nil
+}
+func (bareSessionStore) GetSessionByRefreshTokenHash(context.Context, string) (Session, error) {
+	return Session{}, ErrSessionNotFound
+}
+func (bareSessionStore) UpdateSession(context.Context, Session) error { return nil }
+
+func TestServiceAdminListers_ResolveTheCapability(t *testing.T) {
+	ctx := context.Background()
+	rbac := NewMemoryRolesPermissionsStore()
+	svc, err := NewService(testConfig("01234567890123456789012345678901"),
+		NewMemoryUserStore(), NewMemorySessionStore(), WithRolesPermissionsStore(rbac))
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	if _, err := svc.ListUsers(ctx, "", 10, 0); err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if _, err := svc.ListAllSessions(ctx, 10, 0); err != nil {
+		t.Fatalf("ListAllSessions: %v", err)
+	}
+	if err := rbac.CreateRole(ctx, "editor", []string{"posts:write"}); err != nil {
+		t.Fatalf("CreateRole: %v", err)
+	}
+	roles, err := svc.ListAllRoles(ctx)
+	if err != nil {
+		t.Fatalf("ListAllRoles: %v", err)
+	}
+	if len(roles) != 1 || roles[0] != "editor" {
+		t.Fatalf("unexpected roles: %v", roles)
+	}
+}
+
+// A store that cannot enumerate answers ErrFeatureNotSupported, the sentinel M8
+// turns into the reference's 501. An empty page is a different answer, and the
+// two must not collapse into each other.
+func TestServiceAdminListers_UnsupportedStores(t *testing.T) {
+	ctx := context.Background()
+	svc, err := NewService(testConfig("01234567890123456789012345678901"), bareUserStore{}, bareSessionStore{})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	if _, err := svc.ListUsers(ctx, "", 10, 0); !errors.Is(err, ErrFeatureNotSupported) {
+		t.Fatalf("ListUsers: want ErrFeatureNotSupported, got %v", err)
+	}
+	if _, err := svc.ListAllSessions(ctx, 10, 0); !errors.Is(err, ErrFeatureNotSupported) {
+		t.Fatalf("ListAllSessions: want ErrFeatureNotSupported, got %v", err)
+	}
+	// No RBAC store at all: the nil interface fails the assertion rather than
+	// panicking, so one check covers "not configured" and "cannot enumerate".
+	if _, err := svc.ListAllRoles(ctx); !errors.Is(err, ErrFeatureNotSupported) {
+		t.Fatalf("ListAllRoles with no rbac store: want ErrFeatureNotSupported, got %v", err)
 	}
 }
