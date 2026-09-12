@@ -750,9 +750,12 @@ func CompatibilityNotes() APICompatibilityNotes {
 				}},
 			},
 			{
-				ID:      "docs-routes-are-opt-in",
-				Title:   "The documentation routes are off until asked for, and the document describes them",
-				Surface: "`HTTPConfig.Docs.Enabled`: `GET <prefix>/openapi.json` and `GET <prefix>/docs`",
+				ID:    "docs-routes-are-opt-in",
+				Title: "The documentation routes are off until asked for, and the document describes them",
+				Surface: "`HTTPConfig.Docs.Enabled`: `GET <prefix>/openapi.json` and " +
+					"`GET <prefix>/docs`; `ToolsOptions.Docs.Enabled` and " +
+					"`AdminOptions.Docs.Enabled` for the same pair on the tools router and the " +
+					"admin console",
 				Behaviour: "Registers neither route unless `HTTPConfig.Docs.Enabled` is set, so a " +
 					"deployment that configures nothing answers `404` for both. Set, the two " +
 					"answer what the reference answers, to a request carrying no credential of " +
@@ -763,19 +766,34 @@ func CompatibilityNotes() APICompatibilityNotes {
 					"the router-level auto-init does, which on a `GET` only writes the " +
 					"`csrf-token` cookie to a reader who arrives without one. The served document " +
 					"additionally describes those same two paths, which is what `OpenAPIInfo.Docs` " +
-					"adds; the reference's generator describes neither, under any option.",
+					"adds; the reference's generator describes neither, under any option. " +
+					"The same flag, the same default and the same unguarded posture apply to the " +
+					"tools router's pair under `ToolsOptions.Docs.Enabled` and to the admin " +
+					"console's `GET <admin>/api/openapi.json` and `GET <admin>/api/docs` under " +
+					"`AdminOptions.Docs.Enabled`, each served by its own generator — " +
+					"`GenerateToolsOpenAPISpec` and `GenerateAdminOpenAPISpec`, the ports of the " +
+					"reference's second and third builders. The admin pair is the one that costs " +
+					"most to enable: every other route under `<admin>/api/*` is registered behind " +
+					"`AdminGuard.Protect` and these two are not, so an anonymous caller reads the " +
+					"whole admin API description and — because the document's path items follow " +
+					"the configured stores — learns which optional features the deployment wired.",
 				Reference: "Registers both when `swagger === true || (swagger !== false && " +
 					"NODE_ENV !== 'production')`. The option defaults to `'auto'`, which is the " +
 					"second arm, so a deployment that configures nothing serves them everywhere " +
 					"except where the process environment sets `NODE_ENV` to exactly " +
 					"`production`. Its generator emits the auth routes and stops, so neither " +
-					"`/openapi.json` nor `/docs` appears in the document it serves.",
+					"`/openapi.json` nor `/docs` appears in the document it serves. All three of " +
+					"its routers carry the same option and the same default, and all three " +
+					"register the pair with no guard — on `createAdminRouter` that is the only " +
+					"exception to a `guard` spread onto every other `/api/*` route.",
 				Citations: []string{
 					"auth.router.ts:123-131",
 					"auth.router.ts:529-538",
 					"auth.router.ts:1652-1654",
 					"auth.router.ts:1656-1677",
 					"openapi.ts:1646-1669",
+					"admin.router.ts:1493-1521",
+					"tools.router.ts:332-352",
 				},
 				Why: "What a library serves must follow from its own configuration, not from a " +
 					"process-wide variable it never sees set. `NODE_ENV` is a Node convention " +
@@ -792,14 +810,26 @@ func CompatibilityNotes() APICompatibilityNotes {
 					"subresource integrity, and whatever that CDN serves then runs on the auth " +
 					"origin, where the `csrf-token` cookie is readable from JavaScript by design. " +
 					"A deployment should keep the UI route off in production, or serve it behind " +
-					"a `Content-Security-Policy` that pins the CDN.",
+					"a `Content-Security-Policy` that pins the CDN. " +
+					"The admin console's pair is where that argument is sharpest, and the " +
+					"decision there was to reproduce the reference's posture rather than to " +
+					"tidy it: putting `AdminGuard.Protect` in front of those two would answer " +
+					"`401` where the reference answers `200` and would break any tooling that " +
+					"reads the document, and a port that silently closes a door is a port whose " +
+					"other doors a reader can no longer trust to be the reference's. What this " +
+					"port does instead is put the decision where a host makes it — the routes " +
+					"are not registered until `AdminOptions.Docs.Enabled` is set — and say on " +
+					"that field, in the generated document's own `security` blocks, and here " +
+					"what enabling them publishes.",
 				Notes: []DeviationNote{
 					{
 						Label: "Restoring the reference's default",
 						Text: "One line where the `HTTPConfig` is built — " +
 							"`cfg.Docs.Enabled = os.Getenv(\"APP_ENV\") != \"production\"` — with " +
-							"whatever variable the deployment actually uses. Nothing else changes: " +
-							"the routes, the bodies and the mount are the same either way.",
+							"whatever variable the deployment actually uses, and the same for " +
+							"`cfg.Tools.Docs.Enabled` and `cfg.Admin.Docs.Enabled`. Nothing else " +
+							"changes: the routes, the bodies and the mount are the same either " +
+							"way.",
 					},
 					{
 						Label: "Why the document lists itself",
@@ -1625,6 +1655,119 @@ func CompatibilityNotes() APICompatibilityNotes {
 							"record or the SSE frame can read a named field out of.",
 					},
 				},
+			},
+			{
+				ID:      "admin-upload-refusals-answer-the-admin-envelope",
+				Title:   "A refused upload is answered by the router, not by the host application",
+				Surface: "`POST <admin>/api/upload/logo` and `POST <admin>/api/upload/bg-image`",
+				Behaviour: "Refuses in the admin router's own `{\"error\": \"…\"}` envelope, with a " +
+					"status naming the problem. A name that is not one of the seven image " +
+					"extensions is `400 {\"error\": \"Only image files are allowed\"}` — the " +
+					"reference's own `fileFilter` message. A body past `auth.UploadMaxBytes`, " +
+					"five megabytes, is `413 {\"error\": \"File too large\"}`, and so is a " +
+					"multipart request whose total exceeds that plus 64 KiB of slack. An " +
+					"`UploadStore` that fails is `500` carrying the error's own message, the " +
+					"shape `PATCH <admin>/api/settings/ui` already has on this router. The one " +
+					"refusal that is the reference's unchanged is `400 {\"error\": \"No file " +
+					"uploaded\"}`, which is also where a request that is not `multipart/" +
+					"form-data` ends up.",
+				Reference: "Configures `multer` with `limits: { fileSize: 5 * 1024 * 1024 }` and a " +
+					"`fileFilter` that calls back `new Error('Only image files are allowed')`, " +
+					"then mounts `upload.single('file')` between the guard and the handler. " +
+					"Both refusals are `next(err)`, the admin router registers no error " +
+					"middleware, and neither reaches the handler — so the status and the body " +
+					"are whatever the *host application's* error handler produces, which for a " +
+					"plain Express app is a `500` carrying an HTML error page. The handler's " +
+					"own `if (!req.file)` branch is the only refusal it writes itself. No " +
+					"bound is placed on the rest of the request: `limits.fields`, " +
+					"`limits.parts` and the non-file field size are all left at their " +
+					"defaults, so a body carrying one small image and a gigabyte of text " +
+					"fields is read whole.",
+				Citations: []string{
+					"admin.router.ts:1001-1022",
+					"admin.router.ts:1016",
+					"admin.router.ts:1018-1022",
+					"admin.router.ts:1024-1032",
+					"admin.router.ts:1025",
+				},
+				Why: "There is no Express error pipeline to port. The reference's answer to a " +
+					"refused upload is not its own — it is produced by middleware the host " +
+					"registered on the application this router was mounted into, so it differs " +
+					"between two deployments of the same library and cannot be reproduced by " +
+					"anything this package writes. Handing the refusal back to the caller in " +
+					"the envelope every other route on this router uses is the only answer " +
+					"that is this router's, and the console reads it without changing: " +
+					"`admin.js` shows `e.error || res.statusText` on any non-`ok` response. " +
+					"The outer bound has no counterpart at all and is not optional. A port " +
+					"that streams a client-supplied body into storage has to bound both the " +
+					"part and the request, or an anonymous-to-the-network administrator " +
+					"session can make the process buffer arbitrarily much — and the " +
+					"deployment this seam exists for is a Lambda with a fixed memory " +
+					"allocation, where that is a crash rather than a slowdown. The slack is " +
+					"64 KiB because the shipped console sends exactly one part.",
+				Notes: []DeviationNote{{
+					Label: "What is unchanged",
+					Text: "The accepted set, exactly: one part named `file` carrying a " +
+						"filename, whose name ends in `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, " +
+						"`.webp` or `.ico`, compared case-insensitively against the name and " +
+						"nothing else — no magic-byte sniffing on either side. A file of " +
+						"exactly five megabytes is accepted on both. `svg` is on that list " +
+						"here because it is on that list there: an uploaded SVG may carry " +
+						"script and is served back from the auth origin, so a deployment that " +
+						"would rather not take that trade serves the upload prefix from a " +
+						"separate origin or behind a `Content-Security-Policy`.",
+				}},
+			},
+			{
+				ID:    "admin-upload-base-url-is-derived-from-the-mount",
+				Title: "An upload answers with a usable URL where the reference answers with a bare filename",
+				Surface: "the `url` member of `POST <admin>/api/upload/logo` and `…/bg-image`, and " +
+					"`uploadBaseUrl` in the console's injected configuration",
+				Behaviour: "Resolves `AdminOptions.UploadBaseURL` when it is set, and otherwise — with " +
+					"an `auth.UploadStore` configured — derives " +
+					"`<AuthAPIPrefix>/ui/assets/uploads`, where `AuthAPIPrefix` falls back to " +
+					"the `HTTPConfig.Prefix()` the adapter was mounted with. So a deployment " +
+					"that configures neither still answers " +
+					"`{\"url\": \"/auth/ui/assets/uploads/<filename>\"}`, and that URL is " +
+					"served by this same deployment: `UIHandler` reads the configured " +
+					"`UploadStore` back through `UploadFS` at exactly that path. With no " +
+					"store there is nothing to derive and the `url` is the bare filename, as " +
+					"there.",
+				Reference: "`effectiveUploadBaseUrl = options.uploadBaseUrl || ''`, then derives " +
+					"`${apiPrefix}/ui/assets/uploads` only when `options.apiPrefix` was " +
+					"*passed* and an `uploadDir` is configured. `apiPrefix` is an option of " +
+					"the separate admin router and is documented `@default '/auth'`, but the " +
+					"code tests it for truthiness rather than defaulting it — so a host that " +
+					"omits it gets an empty base, and both upload routes answer " +
+					"`url === filename`, a value the browser cannot resolve.",
+				Citations: []string{
+					"admin.router.ts:136-157",
+					"admin.router.ts:638-643",
+					"admin.router.ts:1028-1031",
+					"admin.router.ts:718",
+					"ui.router.ts:185-191",
+				},
+				Why: "The reference's admin router is a separate Express router that cannot " +
+					"know where the auth router was mounted, which is why `apiPrefix` is an " +
+					"option at all; here the two are configured from one `HTTPConfig` and the " +
+					"mount is known. Resolving it is the identical treatment `authApiPrefix` " +
+					"already gets in the injected console configuration, one field further " +
+					"along, and it makes the option's own documented default true instead of " +
+					"aspirational. The alternative is a deployment whose administrator " +
+					"uploads a logo, is handed a string the branding form then stores as a " +
+					"`logoUrl`, and serves a broken image — which is the reference's " +
+					"out-of-the-box behaviour and is not worth reproducing faithfully. " +
+					"A client that parses `url` sees a resolvable path where it would have " +
+					"seen a filename; `filename` is sent beside it and is unchanged, and the " +
+					"shipped console reads `data.url || data.filename`, so both answers work " +
+					"there.",
+				Notes: []DeviationNote{{
+					Label: "Matching the reference exactly",
+					Text: "Not available from configuration, and deliberately: every value " +
+						"`AdminOptions.UploadBaseURL` can take is a base, so there is no way " +
+						"to ask for \"no base\". A host that needs the bare filename reads " +
+						"`filename`, which both routes always send.",
+				}},
 			},
 		},
 	}

@@ -117,15 +117,27 @@ type UIOptions struct {
 	Assets fs.FS
 	// Uploads is the reference's uploadDir (:16-20): the logos and backgrounds
 	// an administrator uploaded, served under both <prefix>/ui/assets/logo/ and
-	// <prefix>/ui/assets/uploads/ (ui.router.ts:185-191). nil — the default —
-	// mounts neither path, exactly as the reference's `if (uploadDir)` leaves
-	// them unmounted, so an unconfigured deployment answers 404 there rather
-	// than failing on a store it does not have.
+	// <prefix>/ui/assets/uploads/ (ui.router.ts:185-191).
 	//
-	// It is read-only on purpose. The reference's upload *writer* is an admin
-	// route, and this port has no UploadStore to write through until U15; making
-	// the read side an fs.FS now means the store, when it lands, has to supply
-	// one rather than this seam having to change shape.
+	// It is read-only on purpose, and U15 is where the other half arrived:
+	// Config.Uploads is the UploadStore the admin console writes through, and
+	// UploadFS presents one as exactly this fs.FS. UIHandler composes the two
+	// so that a host wires one thing:
+	//
+	//   - Uploads set wins, always. A host that wants the read side served from
+	//     somewhere else — a read-through cache, a snapshot, an os.DirFS over a
+	//     mounted volume — says so here and the store is not consulted.
+	//   - Uploads nil with an UploadStore configured serves that store's
+	//     objects, through UploadFS. This is the ordinary arrangement and is
+	//     what makes the URL the upload routes hand back resolve against this
+	//     same deployment.
+	//   - Neither mounts neither path, exactly as the reference's
+	//     `if (uploadDir)` leaves them unmounted, so an unconfigured deployment
+	//     answers 404 there rather than failing on a store it does not have.
+	//
+	// The one thing UploadFS cannot carry is a request context: fs.FS.Open takes
+	// none. A host that needs per-request cancellation on the read path sets
+	// this field to its own fs.FS. See UploadFS.
 	Uploads fs.FS
 }
 

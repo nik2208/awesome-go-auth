@@ -407,6 +407,33 @@ func WithTemplateStore(store TemplateStore) Option {
 	}
 }
 
+// WithUploadStore sets Config.Uploads: the store the admin console's upload
+// routes write through and the built-in UI serves uploaded assets back from —
+// the seam over the reference's uploadDir (admin.router.ts:135).
+//
+// One store wires both halves. With it set, POST <admin>/api/upload/logo and its
+// three siblings are registered, the console's upload feature flag turns on, and
+// <prefix>/ui/assets/logo/ and <prefix>/ui/assets/uploads/ serve what was
+// uploaded — the last of those without setting UIOptions.Uploads, which stays as
+// the override for a host that wants the read side to come from somewhere else.
+//
+//	store := auth.NewMemoryUploadStore()
+//	a, err := auth.New(auth.WithUploadStore(store))
+//
+// MemoryUploadStore keeps everything in process memory and is for tests and
+// single-process deployments; a deployment that must not lose an uploaded logo
+// supplies its own. See UploadStore for the contract, and ValidUploadKey for the
+// one rule an implementation has to honour.
+func WithUploadStore(store UploadStore) Option {
+	return func(b *authBuilder) error {
+		if store == nil {
+			return errors.New("auth: upload store is required")
+		}
+		b.cfg.Uploads = store
+		return nil
+	}
+}
+
 // WithSettingsStore sets Config.Settings: the store holding the global runtime
 // settings an administrator flips — the reference's routerOptions.settingsStore
 // (auth.router.ts:92). Only AuthSettings.Require2FA is acted on, by
