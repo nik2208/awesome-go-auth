@@ -16,7 +16,8 @@ type Auth struct {
 	// oauth is nil unless WithOAuth was supplied; see oauth_wire.go.
 	oauth *OAuthWiring
 	// idp is nil unless WithIDP was supplied. It is what makes the adapters
-	// mount the JWKS route; see JWKSHandler.
+	// mount the JWKS route and the four OIDC endpoints; see JWKSHandler and
+	// (*IDP).OIDCMounts.
 	idp *IDP
 }
 
@@ -88,7 +89,8 @@ func NewWithConfig(cfg Config, opts ...Option) (*Auth, error) {
 func (a *Auth) Service() *Service { return a.service }
 
 // IDP reports the Identity Provider WithIDP configured, or nil. The adapters
-// consult it to decide whether to mount the JWKS route and where.
+// consult it to decide whether to mount the JWKS route and where, and to walk
+// OIDCMounts for the four OIDC endpoints.
 func (a *Auth) IDP() *IDP { return a.idp }
 
 // JWKSHandler returns the handler serving the IdP's JWKS document with the
@@ -424,14 +426,19 @@ func WithSiteURLs(urls ...string) Option {
 
 // WithIDP registers an OIDC Identity Provider on the Auth, which is what makes
 // every adapter mount its JWKS document at GET <prefix><IDPConfig.JWKSPath>,
-// public and ahead of any middleware. That is the one route the Option adds:
-// the discovery, authorize, token and userinfo endpoints stay where they were,
-// behind (*IDP).RegisterHandlers, and nothing about how /login, /refresh or the
-// session tokens work changes.
+// public and ahead of any middleware.
 //
-// The reference registers the same route from the same condition — an
-// idProvider block with a key, or enabled (auth.router.ts:473-475) — where here
-// the condition is having built an IDP and passed it here.
+// The reference registers that route from the same condition — an idProvider
+// block with a key, or enabled (auth.router.ts:473-475) — where here the
+// condition is having built an IDP and passed it here.
+//
+// The same switch mounts the four OIDC endpoints beside it, at the paths
+// (*IDP).RegisterHandlers uses and below the same prefix: OIDCDiscoveryPath,
+// OIDCAuthorizePath, OIDCTokenPath and OIDCUserInfoPath, each for every method.
+// Those four are this port's own — the reference has no OIDC authorization
+// server — and see OIDCMounts for the list and RegisterHandlers for the host
+// that would rather serve them on a mux of its own. Nothing about how /login,
+// /refresh or the session tokens work changes either way.
 //
 // An IDP built with a nil Service adopts the one this Auth is being built
 // around, which is the only order a host can write: NewIDP wants a *Service and

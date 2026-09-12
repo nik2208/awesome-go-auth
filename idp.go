@@ -29,6 +29,25 @@ const DefaultIDPKeyID = "provisioner-key-1"
 // `idProvider.jwksPath ?? '/.well-known/jwks.json'` (auth.router.ts:475).
 const DefaultJWKSPath = "/.well-known/jwks.json"
 
+// The four OIDC endpoints, below the mount prefix. They are constants because
+// four places have to spell them identically: RegisterHandlers, the four
+// adapters' MountWithConfig, the JWKSPath collision check, and the generated
+// OpenAPI document.
+//
+// Unlike the JWKS route these paths are not configurable. They have no
+// counterpart in the reference, which ships no OIDC authorization server, so
+// there is nothing to track: the discovery document is the well-known path RFC
+// 8414 fixes, and the other three are the names the discovery document this
+// package has always served advertises (handleDiscovery below derives them
+// from Issuer, so a second spelling would advertise one path and serve
+// another).
+const (
+	OIDCDiscoveryPath = "/.well-known/openid-configuration"
+	OIDCAuthorizePath = "/authorize"
+	OIDCTokenPath     = "/token"
+	OIDCUserInfoPath  = "/userinfo"
+)
+
 // jwksCacheControl is the caching directive the reference sets on every JWKS
 // response (auth.router.ts:502). A relying party fetches the document once per
 // key rotation, not once per token, so an hour of shared caching is what makes
@@ -126,9 +145,9 @@ type IDPConfig struct {
 	// Empty resolves to DefaultJWKSPath. NewIDP refuses a path that the four
 	// adapters and RegisterHandlers cannot all route as the same literal path:
 	// it must start with "/" and must not end with one, must not contain "{",
-	// "}", "?", "#" or "//", and must not collide with a path RegisterHandlers
-	// already mounts (/authorize, /token, /userinfo,
-	// /.well-known/openid-configuration).
+	// "}", "?", "#" or "//", and must not collide with one of the four OIDC
+	// endpoints, which the adapters and RegisterHandlers both mount
+	// (OIDCAuthorizePath, OIDCTokenPath, OIDCUserInfoPath, OIDCDiscoveryPath).
 	//
 	// An Auth built WithIDP makes every adapter serve GET <prefix><JWKSPath>,
 	// public and ahead of any middleware, exactly where the reference registers
@@ -292,15 +311,15 @@ func (idp *IDP) JWKS() JWKS {
 	return JWKS{Keys: keys}
 }
 
-// jwksReservedPaths are the suffixes RegisterHandlers already mounts below its
-// basePath. A JWKSPath equal to one of them would register the same ServeMux
+// jwksReservedPaths are the suffixes the OIDC endpoints occupy below the mount
+// prefix. A JWKSPath equal to one of them would register the same ServeMux
 // pattern twice, which panics at mount time — inside the host's own
 // initialisation, far from the configuration that caused it.
 var jwksReservedPaths = []string{
-	"/authorize",
-	"/token",
-	"/userinfo",
-	"/.well-known/openid-configuration",
+	OIDCAuthorizePath,
+	OIDCTokenPath,
+	OIDCUserInfoPath,
+	OIDCDiscoveryPath,
 }
 
 // validateJWKSPath refuses an IDPConfig.JWKSPath that the four adapters and
@@ -314,7 +333,7 @@ var jwksReservedPaths = []string{
 // literal trailing segment in chi. It must not contain "{" or "}", which chi,
 // gin and echo read as a wildcard parameter, nor "?" or "#", which are not part
 // of a path at all, nor "//", which is an empty segment the routers normalise
-// differently. And it must not collide with a path RegisterHandlers mounts.
+// differently. And it must not collide with one of the four OIDC endpoints.
 func validateJWKSPath(path string) error {
 	if path == "" {
 		return nil
@@ -334,7 +353,7 @@ func validateJWKSPath(path string) error {
 	}
 	for _, reserved := range jwksReservedPaths {
 		if path == reserved {
-			return fmt.Errorf("auth: idp: JWKSPath %q is a path RegisterHandlers already mounts: "+
+			return fmt.Errorf("auth: idp: JWKSPath %q is one of the four OIDC endpoints: "+
 				"registering the same pattern twice panics in http.ServeMux", path)
 		}
 	}
@@ -500,7 +519,111 @@ func (idp *IDP) signWithLifetime(claims map[string]any, now time.Time, ttl time.
 	return BuildRS256JWT(idp.signer, idp.keyID, payload)
 }
 
+// OIDCMount is one OIDC endpoint as the adapters mount it: Path is below the
+// mount prefix and Handler serves it.
+//
+// The handler is mounted for every method, which is what (*IDP).RegisterHandlers
+// has always done with a method-less http.ServeMux pattern, and what the
+// handlers expect — /authorize reads r.Method itself to tell its login form
+// from its credential post, /token and /userinfo read the form and the
+// Authorization header rather than the method. So there is no method to narrow
+// to without changing an answer, and the four adapters register the handler for
+// all methods rather than for a list they would then have to keep in step.
+type OIDCMount struct {
+	// Path is the endpoint below the mount prefix, leading "/" included.
+	Path string
+	// Handler serves it, for every method.
+	Handler http.Handler
+	// ResourceServerGated reports that this endpoint creates or exchanges a
+	// credential, so HTTPConfig.ResourceServer leaves it unmounted the way it
+	// leaves /login and /refresh unmounted. Every adapter skips a gated mount
+	// under that flag; see oidcResourceServerGated for which two carry it and
+	// why. RegisterHandlers ignores the field: it mounts a host's own mux, with
+	// no HTTPConfig in sight, so the host decides what goes on it.
+	ResourceServerGated bool
+}
+
+// oidcResourceServerGated is the OIDC half of ResourceServerGatedRoutes: the
+// endpoints HTTPConfig.ResourceServer leaves unmounted, keyed by path.
+//
+// Two of the four are in it. POST <prefix>/authorize reads an email, a password
+// and a tenant off the form and hands them to Service.Login, then mints an
+// authorization code for the answer; POST <prefix>/token spends that code and
+// returns this instance's own HS256 session pair. Both are routes that create
+// or change a credential by the definition at the top of resource_server.go, so
+// a deployment that set the flag to unmount /login and /refresh must not regain
+// a password-accepting endpoint and a session-minting one by also building
+// WithIDP.
+//
+// The other two are not. The discovery document is metadata, like the JWKS
+// route it sits beside and is gated no more than that one is;
+// <prefix>/userinfo reads a bearer token and returns a profile, which is the
+// same shape as GET /me, and /me stays mounted for the reason that list gives —
+// resource-server mode is about credentials, not about store independence.
+//
+// It is not part of ResourceServerGatedRoutes because that map is the base
+// surface's, replayed against an adapter mounted without an IdP, where these
+// two paths are not routes at all.
+var oidcResourceServerGated = map[string]bool{
+	OIDCAuthorizePath: true,
+	OIDCTokenPath:     true,
+}
+
+// OIDCMounts returns the four OIDC endpoints — discovery, authorize, token and
+// userinfo — as the adapters and RegisterHandlers mount them.
+//
+// It is the one list: every adapter's MountWithConfig walks it, and so does
+// RegisterHandlers, so an endpoint cannot appear on one mount and not another.
+// The JWKS route is not in it — that one is the reference's, configurable
+// through IDPConfig.JWKSPath and GET-only, and the adapters mount it from
+// JWKSPath() and JWKSHandler() for that reason.
+//
+// Two of the four carry ResourceServerGated, which is the adapters' cue to skip
+// them under HTTPConfig.ResourceServer; the flag travels on the mount rather
+// than splitting the walk in four adapters, so this stays the one list.
+//
+// These four have no counterpart in the reference, which ships no OIDC
+// authorization server; their shapes are described where the handlers are, and
+// nothing here changes them.
+func (idp *IDP) OIDCMounts() []OIDCMount {
+	mounts := []OIDCMount{
+		{Path: OIDCDiscoveryPath, Handler: http.HandlerFunc(idp.handleDiscovery)},
+		{Path: OIDCAuthorizePath, Handler: http.HandlerFunc(idp.handleAuthorize)},
+		{Path: OIDCTokenPath, Handler: http.HandlerFunc(idp.handleToken)},
+		{Path: OIDCUserInfoPath, Handler: http.HandlerFunc(idp.handleUserInfo)},
+	}
+	// Read from the one map rather than spelled twice, so openapi.go and the
+	// adapters cannot drift from each other about which two are gated.
+	for i := range mounts {
+		mounts[i].ResourceServerGated = oidcResourceServerGated[mounts[i].Path]
+	}
+	return mounts
+}
+
 // RegisterHandlers mounts OIDC endpoints on the given mux.
+//
+// An Auth built with WithIDP makes all four adapters mount the same four
+// endpoints under the adapter's own prefix, from the same OIDCMounts list, so a
+// host that mounts an adapter no longer needs this at all. It stays for the host
+// that serves the OIDC endpoints on a mux of its own — under a different base
+// path, or behind its own middleware — and for the one that uses the IdP
+// without mounting an adapter.
+//
+// All four are mounted here whatever OIDCMount.ResourceServerGated says. That
+// flag is the adapters' reading of HTTPConfig.ResourceServer, and this method
+// is handed a mux with no HTTPConfig behind it: a host mounting the endpoints
+// itself is choosing the surface itself.
+//
+// Calling it with the adapter's own prefix, on the mux the adapter was mounted
+// on, is a mistake rather than a way to mount the endpoints twice, and it is a
+// loud one: both registrations use the same method-less pattern, so the second
+// panics at mount time — ServeMux reports the two patterns as conflicting and
+// names both registration sites — the same way the JWKS route already panics
+// when a host registers it twice. The panic is the point. A pattern that did
+// not collide, "GET <path>" against this method-less one, would be accepted as
+// the more specific of the two and would leave the endpoint split between two
+// handlers, GET answered by the adapter's mount and every other method by this
+// one; that silent split is the failure this shape rules out.
 //
 // The JWKS document is served at basePath + JWKSPath(), the canonical location
 // the adapters mount and the one the discovery document points at.
@@ -520,25 +643,24 @@ func (idp *IDP) RegisterHandlers(mux *http.ServeMux, basePath string) {
 	}
 	jwks := idp.JWKSHandler()
 	canonical := basePath + strings.TrimPrefix(idp.JWKSPath(), "/")
-	mux.HandleFunc(basePath+".well-known/openid-configuration", idp.handleDiscovery)
 	mux.Handle("GET "+canonical, jwks)
 	// A JWKSPath of "/jwks" makes the alias the canonical path; registering it
 	// twice would panic in ServeMux.
 	if alias := basePath + "jwks"; alias != canonical {
 		mux.Handle("GET "+alias, jwks)
 	}
-	mux.HandleFunc(basePath+"authorize", idp.handleAuthorize)
-	mux.HandleFunc(basePath+"token", idp.handleToken)
-	mux.HandleFunc(basePath+"userinfo", idp.handleUserInfo)
+	for _, mount := range idp.OIDCMounts() {
+		mux.Handle(basePath+strings.TrimPrefix(mount.Path, "/"), mount.Handler)
+	}
 }
 
 func (idp *IDP) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	base := strings.TrimSuffix(idp.cfg.Issuer, "/")
 	doc := map[string]any{
 		"issuer":                                base,
-		"authorization_endpoint":                base + "/authorize",
-		"token_endpoint":                        base + "/token",
-		"userinfo_endpoint":                     base + "/userinfo",
+		"authorization_endpoint":                base + OIDCAuthorizePath,
+		"token_endpoint":                        base + OIDCTokenPath,
+		"userinfo_endpoint":                     base + OIDCUserInfoPath,
 		"jwks_uri":                              idp.jwksURI(),
 		"response_types_supported":              []string{"code"},
 		"subject_types_supported":               []string{"public"},

@@ -45,6 +45,24 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 		jwks := a.JWKSHandler()
 		r.Method(http.MethodGet, prefix+idp.JWKSPath(), jwks)
 		r.Method(http.MethodHead, prefix+idp.JWKSPath(), jwks)
+		// And the four OIDC endpoints beside it, from the same condition and on
+		// the same terms: public, ahead of every middleware. r.Handle, not
+		// r.Method, because these are mounted for every method — see
+		// auth.OIDCMounts. They are the endpoints (*auth.IDP).RegisterHandlers
+		// mounts, at the same paths, served by the same handlers.
+		//
+		// Two of them — /authorize, which takes a password, and /token, which
+		// mints this instance's session pair — carry ResourceServerGated and
+		// are skipped under HTTPConfig.ResourceServer, for the same reason
+		// mountCredentialRoutes is. The mount stays here rather than moving into
+		// that block so the two that are not gated keep their place ahead of
+		// every middleware.
+		for _, mount := range idp.OIDCMounts() {
+			if mount.ResourceServerGated && resolved.ResourceServer {
+				continue
+			}
+			r.Handle(prefix+mount.Path, mount.Handler)
+		}
 	}
 
 	if !resolved.ResourceServer {

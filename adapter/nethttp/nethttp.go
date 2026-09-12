@@ -91,6 +91,27 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 	// HEAD to the GET handler.
 	if idp := a.auth.IDP(); idp != nil {
 		mux.Handle("GET "+prefix+idp.JWKSPath(), a.auth.JWKSHandler())
+		// And the four OIDC endpoints beside it, from the same condition and on
+		// the same terms: public, ahead of the CSRF and auth middleware, for
+		// every method — auth.OIDCMounts says why that is the method set. These
+		// four have no counterpart in the reference; they are the endpoints
+		// (*auth.IDP).RegisterHandlers mounts, at the same paths, now inside the
+		// mount the conformance suite exercises. A host that also calls
+		// RegisterHandlers on this mux with this prefix registers the identical
+		// pattern twice and ServeMux panics; see that method.
+		//
+		// Two of them — /authorize, which takes a password, and /token, which
+		// mints this instance's session pair — carry ResourceServerGated and
+		// are skipped under HTTPConfig.ResourceServer, for the same reason the
+		// credential routes below are. The mount stays here rather than moving
+		// into that block so the two that are not gated keep their place ahead
+		// of every middleware.
+		for _, mount := range idp.OIDCMounts() {
+			if mount.ResourceServerGated && a.cfg.ResourceServer {
+				continue
+			}
+			mux.Handle(prefix+mount.Path, mount.Handler)
+		}
 	}
 
 	if !a.cfg.ResourceServer {

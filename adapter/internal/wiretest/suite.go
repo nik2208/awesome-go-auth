@@ -76,6 +76,7 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("PasswordAndEmail", func(t *testing.T) { testPasswordAndEmail(t, mount) })
 	t.Run("PasswordEmailDelivery", func(t *testing.T) { testPasswordEmailDelivery(t, mount) })
 	t.Run("JWKS", func(t *testing.T) { testJWKS(t, mount) })
+	t.Run("OIDC", func(t *testing.T) { testOIDC(t, mount) })
 	t.Run("ResourceServerGating", func(t *testing.T) { testResourceServerGating(t, mount) })
 	t.Run("OpenAPI", func(t *testing.T) { testOpenAPI(t, mount) })
 	t.Run("RateLimit", func(t *testing.T) { testRateLimit(t, mount) })
@@ -205,15 +206,16 @@ type conditionalRouteSet struct {
 // route of set.routes answers 404 or 405 there, so a route cannot quietly
 // become unconditional without moving to documentedRoutes.
 //
-// Two sets are registered, one of each direction. JWKS adds: it is switched on
-// by auth.WithIDP and documented by OpenAPIInfo.IDProvider; see jwks.go.
-// Resource-server mode subtracts: HTTPConfig.ResourceServer leaves the
-// credential routes unregistered and OpenAPIInfo.ResourceServer takes them out
-// of the spec; see resource_server.go. The docs, UI, admin and tools sets join
-// the additive half as those routers land. suite_test.go drives the mechanism
-// itself with fake sets it passes in, so it stays independent of what is
-// registered here.
-var conditionalRoutes = []conditionalRouteSet{jwksRouteSet(), resourceServerRouteSet()}
+// Sets are registered in both directions. JWKS adds: it is switched on by
+// auth.WithIDP and documented by OpenAPIInfo.IDProvider; see jwks.go. OIDC adds
+// the IdP's other four endpoints from the same switch, documented by
+// OpenAPIInfo.OIDC; see oidc.go. Resource-server mode subtracts:
+// HTTPConfig.ResourceServer leaves the credential routes unregistered and
+// OpenAPIInfo.ResourceServer takes them out of the spec; see resource_server.go.
+// The docs, UI, admin and tools sets join the additive half as those routers
+// land. suite_test.go drives the mechanism itself with fake sets it passes in,
+// so it stays independent of what is registered here.
+var conditionalRoutes = []conditionalRouteSet{jwksRouteSet(), oidcRouteSet(), resourceServerRouteSet()}
 
 // failureReporter is the slice of testing.T the OpenAPI checks report through.
 // It is an interface so suite_test.go can record failures instead of raising

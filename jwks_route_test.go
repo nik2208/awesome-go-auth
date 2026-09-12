@@ -41,13 +41,16 @@ func TestIDPJWKSPathDefaultsAndValidation(t *testing.T) {
 	// Everything the four adapters and RegisterHandlers cannot all route as the
 	// same literal path: a relative path, a trailing slash (a subtree pattern in
 	// net/http, a literal segment in chi), a router wildcard or URL delimiter,
-	// an empty segment, and the four suffixes RegisterHandlers already mounts —
-	// which would panic in ServeMux at mount time rather than fail here.
+	// an empty segment, and the four OIDC endpoints the adapters and
+	// RegisterHandlers both mount — which would panic in ServeMux at mount time
+	// rather than fail here. Those four are spelled as the constants
+	// jwksReservedPaths is built from, so renaming one cannot leave this
+	// asserting the old string.
 	for _, bad := range []string{
 		"jwks.json", ".well-known/jwks.json", "keys/",
 		"/keys/", "/.well-known/",
 		"/keys/{id}", "/keys}", "/keys?raw", "/keys#frag", "//keys.json", "/a//b",
-		"/authorize", "/token", "/userinfo", "/.well-known/openid-configuration",
+		OIDCAuthorizePath, OIDCTokenPath, OIDCUserInfoPath, OIDCDiscoveryPath,
 	} {
 		t.Run("refuses "+bad, func(t *testing.T) {
 			idp, err := NewIDP(IDPConfig{Issuer: idpTestIssuer, Signer: key, JWKSPath: bad}, nil)

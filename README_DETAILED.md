@@ -1824,6 +1824,10 @@ reference registers the same route from the same condition, an `idProvider`
 block carrying a key or `enabled` (`auth.router.ts:473-475`); without `WithIDP`
 the route is not mounted and the path answers 404 like any other.
 
+The same switch mounts the four OIDC endpoints beside it — discovery,
+`authorize`, `token` and `userinfo`. Those are this port's own, not the
+reference's; see "The OIDC endpoints" below.
+
 Because `NewIDP` wants a `*Service` and `New` is what produces one, build the
 IdP with a nil Service and let the `Auth` adopt it:
 
@@ -1831,7 +1835,9 @@ IdP with a nil Service and let the `Auth` adopt it:
 key, _ := auth.ParseRSAPrivateKeyPEM(os.Getenv("IDP_PRIVATE_KEY"))
 idp, _ := auth.NewIDP(auth.IDPConfig{Issuer: "https://api.example.com/auth", Signer: key}, nil)
 a, _ := auth.New(auth.WithUserStore(store), auth.WithIDP(idp))
-nethttp.Mount(mux, a) // GET /auth/.well-known/jwks.json is now served
+nethttp.Mount(mux, a) // GET /auth/.well-known/jwks.json is now served,
+                      // and so are /auth/authorize, /auth/token, /auth/userinfo
+                      // and /auth/.well-known/openid-configuration
 ```
 
 An `IDP` that already carries a different `Service` — one you constructed
@@ -1849,9 +1855,9 @@ that may already be serving requests is a data race besides. Build a second
 `/` — the value is concatenated onto the prefix, and a relative one would mount
 `<prefix>jwks.json` — and must not end with one (a subtree pattern in net/http,
 a literal segment in chi), must not contain `{`, `}`, `?`, `#` or `//`, and must
-not collide with a path `RegisterHandlers` already mounts (`/authorize`,
-`/token`, `/userinfo`, `/.well-known/openid-configuration`), which would panic
-in `http.ServeMux` at mount time.
+not collide with one of the four OIDC endpoints (`/authorize`, `/token`,
+`/userinfo`, `/.well-known/openid-configuration`), which would panic in
+`http.ServeMux` at mount time.
 
 **Cache.** Every answer carries `Cache-Control: public, max-age=3600`
 (`auth.router.ts:502`). A relying party fetches the document once per key
@@ -1987,18 +1993,114 @@ type IDPClient struct {
 }
 ```
 
-### `(*IDP).RegisterHandlers(mux *http.ServeMux, basePath string)`
+### The OIDC endpoints
 
-Mounts these endpoints under `basePath`:
+```go
+type OIDCMount struct {
+    Path    string       // below the mount prefix, leading "/" included
+    Handler http.Handler // serves it, for every method
+    // true for /authorize and /token: HTTPConfig.ResourceServer leaves those
+    // two unmounted, the way it leaves /login and /refresh unmounted.
+    ResourceServerGated bool
+}
+
+func (idp *IDP) OIDCMounts() []OIDCMount
+func (idp *IDP) RegisterHandlers(mux *http.ServeMux, basePath string)
+
+const (
+    OIDCDiscoveryPath = "/.well-known/openid-configuration"
+    OIDCAuthorizePath = "/authorize"
+    OIDCTokenPath     = "/token"
+    OIDCUserInfoPath  = "/userinfo"
+)
+```
+
+`auth.WithIDP(idp)` is the whole switch for these four as well as for the JWKS
+route: every adapter — net/http, chi, gin and echo — mounts them under the
+configured prefix, public and ahead of every middleware, and the wiretest
+conformance suite replays all four against all four adapters.
 
 | Path | Description |
 |------|-------------|
-| `.well-known/openid-configuration` | OIDC discovery document |
-| `<JWKSPath>` (default `.well-known/jwks.json`) | `JWKS()` with the cache and CORS headers — the same handler and the same path the adapters mount |
-| `jwks` | **Deprecated** alias of the above, byte-identical; kept through the 0.x line, removed in v1.0.0 |
-| `authorize` | Authorization endpoint (GET=login form, POST=credential check) |
-| `token` | Token exchange (authorization_code grant) |
-| `userinfo` | Bearer-token-protected user profile |
+| `<prefix>/.well-known/openid-configuration` | OIDC discovery document, derived from `Issuer` |
+| `<prefix>/authorize` | Authorization endpoint (GET = sign-in form, POST = credential check → 302 to the registered `redirect_uri` with `code` and `state`) |
+| `<prefix>/token` | Token exchange (`authorization_code` grant, `client_secret_post`) |
+| `<prefix>/userinfo` | `Authorization: Bearer` — `sub`, `email`, `name` |
+
+Unlike `IDPConfig.JWKSPath` these paths are not configurable. They have no
+counterpart in the reference — it ships no OIDC authorization server — so there
+is nothing to track, and the discovery document derives the last three from
+`Issuer` itself, so a second spelling would advertise one path and serve
+another.
+
+**Methods.** Every method reaches the handler, on all four adapters, because
+that is what `RegisterHandlers` has always done with its method-less
+`http.ServeMux` patterns and because the handlers discriminate themselves:
+`authorize` reads `r.Method` to tell its form from its credential post, `token`
+reads `grant_type` out of the form, `userinfo` reads the `Authorization`
+header. So `GET <prefix>/token` is `400 unsupported_grant_type` from the
+handler, not a 405 from the router. This is the one place the IdP surface
+differs from the JWKS route, which is `GET` (and `HEAD`) only because the
+reference registers it that way.
+
+**Refusals are plain text.** These endpoints answer with `http.Error` — a
+single-line `text/plain` body carrying the OAuth 2.0 error identifier
+(`invalid_grant`, `invalid_client`, `unsupported_grant_type`, `unknown
+client`, `redirect_uri not allowed`, `unauthorized`) — not the family's JSON
+`{"error":…,"code":…}` envelope every other route in this library returns. They
+are not routes a family client calls; a relying party is on the other end.
+
+**Resource-server mode gates two of them.** `HTTPConfig.ResourceServer`
+unmounts every route that creates or changes a credential, and
+`<prefix>/authorize` and `<prefix>/token` are two such routes: `POST` on the
+first reads an email, a password and a tenant off the form and hands them to
+`Service.Login`, and `POST` on the second spends the resulting code for this
+instance's own HS256 session pair. So the adapters skip them in that mode, the
+way they skip `/login` and `/refresh`, and a deployment that set the flag to
+unmount the credential routes cannot regain a password-accepting endpoint by
+also building `WithIDP`. The discovery document and `<prefix>/userinfo` stay:
+discovery is metadata like the JWKS document beside it, and `userinfo` reads a
+bearer token and returns a profile, which is `GET /me`'s shape and stays for
+`GET /me`'s reason (see [Resource server mode](#resource-server-mode)). The
+flag travels on the mount as `OIDCMount.ResourceServerGated`, which is also
+what `GenerateOpenAPISpec` reads when `OpenAPIInfo.OIDC` and
+`OpenAPIInfo.ResourceServer` are set together. `RegisterHandlers` mounts all
+four regardless: it is handed a mux with no `HTTPConfig` behind it, so the host
+is choosing the surface itself.
+
+**Documenting them.** `GenerateOpenAPISpec` adds the four paths when
+`OpenAPIInfo.OIDC` is set, and the JWKS path when `OpenAPIInfo.IDProvider` is —
+two flags, because a deployment may well want to publish its keys (the only
+route a verifier calls) without advertising an authorization server. Leave them
+false for a deployment with no IdP, or the document advertises endpoints that
+answer 404.
+
+#### `RegisterHandlers` — mounting them yourself
+
+`(*IDP).RegisterHandlers(mux, basePath)` mounts the same four handlers, plus
+the JWKS document at `basePath + JWKSPath()` and the deprecated `basePath/jwks`
+alias of it, on a mux you own. Since the adapters mount the four themselves it
+is no longer needed by a host that mounts an adapter; it stays for the host
+that wants the OIDC endpoints somewhere else — under a different base path,
+behind its own middleware — and for the one that uses the `IDP` without
+mounting an adapter at all. `examples/gin-mongodb` is that shape.
+
+**Do one or the other, not both.** Mounting an adapter *and* calling
+`RegisterHandlers` with the adapter's prefix puts the same endpoints at the
+same URLs twice, and what that costs depends on the router.
+
+On a single `http.ServeMux` it is a mount-time panic — both registrations use
+the same method-less pattern, so `ServeMux` reports the two as conflicting and
+names both registration sites — which is deliberate: a pattern that did *not*
+collide (`"GET <path>"` against the method-less one) would be accepted as the
+more specific of the two, and the endpoint would end up split, `GET` answered
+by one handler and every other method by the other. The JWKS route already
+behaved this way; the four OIDC endpoints now do too.
+
+On a chi, gin or echo host there is no such panic, because `RegisterHandlers`
+takes a `*http.ServeMux` and the adapter mounted on a router of a different
+kind: the two registries never meet, and the endpoints are simply served at two
+URLs, each by its own copy. Nothing tells you; the second URL is the symptom.
 
 The discovery document's `jwks_uri` points at the canonical path, not the alias.
 It is derived as `Issuer` + `JWKSPath`, the convention every other endpoint in
@@ -2262,7 +2364,12 @@ then agree. Set the two together.
 
 What stays mounted is `GET /me`, the session routes, `PATCH /profile`,
 `POST /add-phone`, `DELETE /account`, and the whole OAuth and account-linking
-group.
+group. On an `Auth` built `WithIDP`, the JWKS route, `<prefix>/userinfo` and
+`<prefix>/.well-known/openid-configuration` stay too — and `<prefix>/authorize`
+and `<prefix>/token` do not, because those two take a password and mint a
+session pair; see [The OIDC endpoints](#the-oidc-endpoints). They are not in
+`ResourceServerGatedRoutes()`, which is the base surface's list and does not
+know about an IdP; `OIDCMount.ResourceServerGated` names them instead.
 
 > **Those survivors still need a local user store.** `/me` reads it through
 > `Service.Authenticate` → `users.GetUserByID`; `/profile`, `/add-phone` and
@@ -2322,6 +2429,9 @@ type OpenAPIInfo struct {
     Title, Description, Version, ServerURL string
     APIPrefix string // must match the mount; empty means DefaultAPIPrefix ("/auth")
     ResourceServer bool // must match HTTPConfig.ResourceServer
+    IDProvider bool     // add the JWKS route     — set it when the Auth was built WithIDP
+    JWKSPath   string   // where it is served; must match IDPConfig.JWKSPath
+    OIDC       bool     // add the four OIDC ones — set it when the Auth was built WithIDP
 }
 ```
 
@@ -2341,7 +2451,12 @@ envelope, the per-route error catalog entries, the `X-Auth-Strategy` and
 `APIPrefix` to whatever you passed to `MountWithConfig`; a mismatch documents
 paths the server does not serve. Set `ResourceServer` to whatever you passed as
 `HTTPConfig.ResourceServer`: it drops the nineteen credential operations the adapters
-then leave unmounted (see [Resource server mode](#resource-server-mode)). The
+then leave unmounted (see [Resource server mode](#resource-server-mode)). Set
+`IDProvider` and `OIDC` when the `Auth` was built `WithIDP`: they add the JWKS
+route and the four OIDC endpoints the adapters then mount — `ResourceServer`
+alongside `OIDC` drops `/authorize` and `/token` again, because the adapters do
+not mount those two in that mode (see
+[The OIDC endpoints](#the-oidc-endpoints)). The
 wire conformance suite replays every documented operation against every adapter,
 so a route added without a spec entry (or a spec entry with no route) fails the
 build — and a route the configuration unmounts must vanish from both.
