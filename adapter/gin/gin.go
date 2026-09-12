@@ -125,11 +125,35 @@ func (ad *Adapter) Mount(group gin.IRoutes) {
 	h := nethttpadapter.NewWithConfig(ad.auth, ad.cfg)
 
 	// The built-in UI, mounted only when it is enabled — the reference gates its
-	// whole ui router on config.ui.enabled (auth.router.ts:1639-1648). Gin serves
-	// the shared net/http handler, which arrives already wrapped in the CSRF
+	// whole ui router on config.ui.enabled (auth.router.ts:1639-1648). Gin
+	// serves the shared net/http handler for the whole subtree, as the reference
+	// mounts one router there, and it arrives already wrapped in the CSRF
 	// middleware.
+	//
+	// This is the adapter that decided the shape. Gin's tree will not hold a
+	// catch-all beside a static sibling: registering "<prefix>/ui/*uipath" while
+	// "<prefix>/ui/config" exists panics at mount time with "catch-all wildcard
+	// conflicts with existing path segment 'config'", and registering them the
+	// other way round panics too. Narrowing the catch-all to ":uipage" would
+	// make it fit, at the price of a UI that serves one path segment and 404s on
+	// <prefix>/ui/assets/logo/x.png. So the config route is not registered here
+	// at all: h.UIHandler() answers it from inside the catch-all, with the same
+	// handler the other three adapters reach through the same call. The
+	// conformance suite replays the document against all four, which is what
+	// makes "the same handler" a checked claim rather than an intention.
+	//
+	// Two patterns because gin's catch-all does not match the bare mount path:
+	// with only the catch-all registered, "<prefix>/ui" is a 301 to the
+	// trailing-slash form where Express serves the login page. HEAD is
+	// registered next to GET because gin, unlike net/http and Express, does not
+	// fall back from one to the other, and the static half of this router
+	// answers HEAD.
 	if ad.cfg.UI.Enabled {
-		group.GET(prefix+auth.UIConfigRoute, serveHTTP(h.UIConfigHandler()))
+		ui := serveHTTP(h.UIHandler())
+		group.GET(prefix+auth.UIRoute, ui)
+		group.HEAD(prefix+auth.UIRoute, ui)
+		group.GET(prefix+auth.UIRoute+"/*uipath", ui)
+		group.HEAD(prefix+auth.UIRoute+"/*uipath", ui)
 	}
 
 	if !ad.cfg.ResourceServer {

@@ -8,6 +8,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The hosted UI is served** (`ui_pages.go`, `UIHandler`).
+  `HTTPConfig.UI.Enabled` now mounts the whole of the reference's
+  `ui.router.ts` at `<prefix>/ui` on all four adapters, not just its config
+  route: the nine vendored HTML pages with the server-side config injection
+  they expect, the static assets beside them, the uploaded logos, and headless
+  mode.
+  The four layers run in the reference's own order, which is behaviour rather
+  than style — `/config` answers before the headless short-circuit, the
+  short-circuit returns before the uploaded assets are mounted, and the SSR
+  catch-all runs before the static serve, which is the only reason
+  `<prefix>/ui/login` is a page and `<prefix>/ui/base.css` is a file. A `GET`
+  for a path with no extension renders `<page>.html`, or — when there is no
+  such file — the first of `login.html`, `index.html`, `index.csr.html` that
+  exists, so no extensionless path under the mount answers `404`. A path with
+  an extension is served as a file or not at all. Every other method falls
+  through.
+  The injection is the reference's, replacement by replacement: a `:root` block
+  carrying `--primary-color` and `--input-focus` (both from `primaryColor`),
+  `--secondary-color`, `--bg-color`, `--card-bg`, and `--bg-image` with `'`,
+  `"` and `\` percent-encoded; `customCss` in a second `<style>`; the
+  HTML-escaped `siteName` in `<title>` and in `<h1 class="site-name">`; the
+  logo tag rewritten without its `hidden` class; the readiness splash; and
+  `window.__AUTH_CONFIG__` before `</head>`. Pages go out as
+  `text/html; charset=utf-8` with
+  `Cache-Control: no-store, no-cache, must-revalidate, max-age=0`; static files
+  carry express-static's `public, max-age=0`. On an injection failure the page
+  is sent unmodified, as there.
+  `UIOptions.Assets` is the reference's `uiAssetsDir` and defaults to the
+  vendored set; `UIOptions.Uploads` is its `uploadDir`, served under both
+  `<prefix>/ui/assets/logo/` and `<prefix>/ui/assets/uploads/`, and unset — the
+  default — mounts neither path rather than failing on a store that is not
+  there. Both are `fs.FS`, which is the seam the `UploadStore` will supply when
+  it lands in U15.
+  One deviation is registered with it, `ui-ssr-config-json-is-html-escaped`.
+  The reference writes `JSON.stringify(config)` straight into a `<script>`
+  block, where a `</script>` inside `siteName`, `logoUrl` or `customCss` closes
+  the element and everything after it is parsed as markup and runs. This port
+  serialises with `encoding/json` at its defaults, which escape `<`, `>` and
+  `&`, so the sequence stays inside the string. The bytes on the wire differ
+  whenever the branding contains one of those three characters; the value
+  `JSON.parse` yields does not, so no client can see the difference. It is the
+  only entry in the register where this port is stricter than the reference.
+  `customCss` into `<style>` and `logoUrl` into `<img src>` are reproduced
+  unescaped, as there, and the entry records who can reach them.
+  The conformance suite gains a `UIPages` group, run against all four adapters,
+  asserting the classification rules on one representative per arm, the
+  branding in the rendered page, headless mode, the uploaded assets and the
+  CSRF cookie. It is deliberately not a `conditionalRouteSet`: a catch-all is
+  not a path list, and an HTML page is not an API operation, so these paths are
+  not in the generated document and the set that tracks `<prefix>/ui/config`
+  against it is unchanged.
 - **The reference's fourteen UI assets, vendored byte for byte**
   (`ui/upstream/assets/`, `ui_upstream.go`). The nine HTML pages, `auth.js`,
   `admin.js`, `admin.css`, `base.css` and `ui-i18n-keys.json` that
@@ -93,6 +144,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record joinable. `MemoryTelemetryStore` honours the new filter.
 
 ### Changed
+- **`GET <prefix>/ui/config` is mounted inside `UIHandler`** rather than as a
+  route of its own. The wire is unchanged — same handler, same document, same
+  `Cache-Control: no-store`, same CSRF cookie, and the conformance suite and
+  the generated OpenAPI document both still track it — but no adapter registers
+  the path any more; the subtree handler delegates it, which is where the
+  reference has it too (`ui.router.ts:165` is a route inside the router
+  `auth.router.ts:1640` mounts at `/ui`).
+  Gin is what decided the shape. Its router will not hold a catch-all beside a
+  static sibling: registering `<prefix>/ui/*uipath` while `<prefix>/ui/config`
+  exists panics at mount time, in either registration order. Delegating from
+  inside the catch-all is the one shape all four routers express, so all four
+  now use it and the suite proves the four answer alike.
 - **`ServeAuthJS()` now serves the reference's `auth.js`**, not this port's
   hand-written one. The 18 KB `ui/auth.js` is still in the tree and still
   embedded, because `ui_test.go`'s contract tests are written against it, but
@@ -137,10 +200,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deprecated
 - **`ServeAuthJS()`**, which is now a thin wrapper over the vendored asset kept
-  so that existing importers keep compiling. Use `UpstreamUIAssetFS()` or
-  `ReadUpstreamUIAsset("auth.js")`, or the UI handler the next change
-  introduces, which serves the whole vendored set with the config injection the
-  reference's pages expect. **It will be removed in v1.0.0.**
+  so that existing importers keep compiling. Set `HTTPConfig.UI.Enabled` and
+  let the adapter mount `<prefix>/ui`, which serves this file — and the rest of
+  the vendored set, with the config injection the reference's pages expect — at
+  the path those pages load it from; or read it directly with
+  `UpstreamUIAssetFS()` or `ReadUpstreamUIAsset("auth.js")`. **It will be
+  removed in v1.0.0.**
+- **`ServeAuthUI()` and `ServeAdminUI()`**, the two hand-written pages. Nothing
+  inside the module serves them any more, and `ServeAuthUI` serves its page raw
+  — no branding, no site name, no logo, no injected config — where
+  `HTTPConfig.UI.Enabled` serves the reference's own login page with all four.
+  `ServeAdminUI` has no replacement until the admin router lands in M8: the
+  reference's admin SPA is vendored and served under `<prefix>/ui`, but it
+  calls an admin API no adapter mounts yet. Both still work for a host that
+  mounted them on its own mux. **They will be removed in v1.0.0**, together
+  with `ui/admin.html`, `ui/auth.html`, `ui/auth.js`, the `uiFS` embed and the
+  `ui_test.go` contract tests written against those three files.
 
 ## [0.8.0] - 2026-09-12
 

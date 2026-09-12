@@ -117,8 +117,15 @@ func main() {
 	// what the reference resolves against NODE_ENV is this one line. Leave it
 	// off in production: the UI page loads swagger-ui-dist from the unpkg CDN
 	// onto the auth origin.
+	//
+	// UI.Enabled mounts the hosted UI at /auth/ui: the login, register,
+	// forgot-password and 2FA pages, the config document they boot from, and
+	// auth.js beside them. Branding is optional — with none, the pages render
+	// the library's defaults.
 	cfg := auth.DefaultHTTPConfig()
 	cfg.Docs.Enabled = getEnv("APP_ENV", "development") != "production"
+	cfg.UI.Enabled = true
+	cfg.UI.Branding = auth.UIBranding{SiteName: "Gin + MongoDB Example"}
 	ginAdapter.MountWithConfig(r, a, cfg)
 
 	// OIDC IDP endpoints, on a mux of this application's own, under /oidc.
@@ -134,9 +141,11 @@ func main() {
 	idp.RegisterHandlers(oidcMux, "/oidc/")
 	r.Any("/oidc/*path", gin.WrapH(oidcMux))
 
-	// Embedded UI
-	r.GET("/admin", gin.WrapH(auth.ServeAdminUI()))
-	r.GET("/auth.js", gin.WrapH(auth.ServeAuthJS()))
+	// The admin dashboard is still the hand-written page: the reference's admin
+	// SPA is vendored and served under /auth/ui, but the admin API it calls is
+	// not mounted yet, so this stays until that lands. auth.js no longer needs a
+	// route of its own — /auth/ui/auth.js is where the pages load it from.
+	r.GET("/admin", gin.WrapH(auth.ServeAdminUI())) //nolint:staticcheck // no replacement until the admin router lands
 
 	// A second copy of the document, at the root and under this app's own name.
 	// The mount already serves one at /auth/openapi.json (see Docs.Enabled

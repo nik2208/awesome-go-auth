@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	auth "github.com/nik2208/awesome-go-auth"
 )
@@ -490,4 +491,248 @@ func uiRouteSet() conditionalRouteSet {
 		routes:    map[string]string{auth.UIConfigRoute: http.MethodGet},
 		spec:      func() auth.OpenAPIInfo { return auth.OpenAPIInfo{UI: true} },
 	}
+}
+
+// The UI pages group: everything under <prefix>/ui that is not the config
+// document — the SSR-rendered HTML, the static assets, the uploaded ones and
+// headless mode (ui.router.ts:172-332).
+//
+// # What this group can assert, and what it cannot
+//
+// The other conditional groups in this suite are lists of paths, and testOpenAPI
+// holds each of them to the generated document in both directions. This one is
+// not, twice over.
+//
+// It is not a path list. The reference's last two layers are catch-alls: every
+// extensionless path under the mount renders *some* page, because a path with no
+// file of its own falls back to login.html. There is no finite set of paths to
+// enumerate and no extensionless path that can be asserted absent, so what is
+// pinned here is the *classification* — which arm of the router a representative
+// path reaches — on one representative per arm. A case that passes proves the
+// rule for its representative and for nothing else; the exhaustive half is in
+// the root package (ui_pages_test.go), which can call the classifier directly.
+//
+// And it is not in the OpenAPI document. GenerateOpenAPISpec describes the API
+// operations a client calls, and an HTML page is not one: it has no request
+// body, no response schema and no status code a generated client would branch
+// on. So these paths are deliberately absent from the spec, and this group is
+// deliberately not a conditionalRouteSet — registering one would require the
+// generator to grow paths for them, which would be describing the UI to the
+// wrong audience. uiRouteSet stays what it is: GET <prefix>/ui/config, the one
+// route under this mount that *is* an operation, tracked in both directions.
+//
+// What the four adapters can disagree about, and therefore what this group is
+// really for, is routing. A catch-all sibling of a fixed path is the one shape
+// the four Go routers do not agree on — gin refuses it outright — so the config
+// route reaches its handler through a different registration on gin than on the
+// other three. That is exactly the kind of difference this suite exists to
+// catch, and it is caught here by asserting the same responses on all four.
+func testUIPages(t *testing.T, mount Mounter) {
+	t.Run("an extensionless path is rendered as a page", func(t *testing.T) {
+		env := NewEnv(t, mount, uiHTTPConfig())
+		for _, page := range []string{"", "/", "/login", "/register", "/forgot-password"} {
+			t.Run(uiPageName(page), func(t *testing.T) {
+				rec := uiPageRequest(t, env, page)
+				AssertStatus(t, rec, http.StatusOK)
+				if got := rec.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+					t.Errorf("Content-Type = %q, want text/html; charset=utf-8", got)
+				}
+				// The injected object is what makes it a rendered page rather
+				// than a file that happens to be HTML (ui.router.ts:272).
+				if body := rec.Body.String(); !strings.Contains(body, "window.__AUTH_CONFIG__") {
+					t.Errorf("the page carries no injected config: %.200q", body)
+				}
+			})
+		}
+	})
+
+	t.Run("a rendered page is uncacheable", func(t *testing.T) {
+		// ui.router.ts:284. The page embeds a per-request config object and is
+		// served behind the CSRF middleware, so a shared cache holding one would
+		// hand one visitor's document to the next.
+		env := NewEnv(t, mount, uiHTTPConfig())
+		rec := uiPageRequest(t, env, "/login")
+		const want = "no-store, no-cache, must-revalidate, max-age=0"
+		if got := rec.Header().Get("Cache-Control"); got != want {
+			t.Errorf("Cache-Control = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("an unknown page falls back rather than 404ing", func(t *testing.T) {
+		// ui.router.ts:316-325. This is the half of the catch-all a path list
+		// could never express: there is no extensionless path under the mount
+		// that answers 404.
+		env := NewEnv(t, mount, uiHTTPConfig())
+		rec := uiPageRequest(t, env, "/no-such-page")
+		AssertStatus(t, rec, http.StatusOK)
+		if !strings.Contains(rec.Body.String(), `id="login-form"`) {
+			t.Error("the fallback did not render login.html")
+		}
+	})
+
+	t.Run("a path with an extension is served as a file", func(t *testing.T) {
+		// The classification that makes the two layers work at all
+		// (ui.router.ts:300-303): the same mount answers /login with a rendered
+		// page and /base.css with bytes.
+		env := NewEnv(t, mount, uiHTTPConfig())
+		rec := uiPageRequest(t, env, "/base.css")
+		AssertStatus(t, rec, http.StatusOK)
+		want, err := auth.ReadUpstreamUIAsset("base.css")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Body.String() != string(want) {
+			t.Error("the static asset was not served verbatim")
+		}
+		if strings.Contains(rec.Body.String(), "window.__AUTH_CONFIG__") {
+			t.Error("a static file was put through the SSR injection")
+		}
+	})
+
+	t.Run("a file that does not exist is a 404", func(t *testing.T) {
+		// It has an extension, so it never reaches the catch-all and is never
+		// answered with the login page — which is what keeps a missing
+		// stylesheet from arriving as HTML.
+		env := NewEnv(t, mount, uiHTTPConfig())
+		if rec := uiPageRequest(t, env, "/nothing.css"); rec.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404 (body %.120q)", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("the branding reaches the page", func(t *testing.T) {
+		// The SSR injection reads the same document GET /ui/config serves, so
+		// the branding a client fetches and the branding the page is painted
+		// with cannot disagree (ui.router.ts:201-229).
+		env := NewEnv(t, mount, uiBrandedConfig())
+		body := uiPageRequest(t, env, "/login").Body.String()
+		for _, want := range []string{
+			"--primary-color: " + testUIPrimaryColor + ";",
+			"--input-focus: " + testUIPrimaryColor + ";",
+			"--secondary-color: " + testUISecondaryColor + ";",
+			"<style>" + testUICustomCSS + "</style>",
+			"<title>" + testUISiteName + "</title>",
+			// customLogo wins over the legacy logoUrl, as it does in the
+			// document (ui.router.ts:128).
+			`<img src="` + testUICustomLogo + `" alt="Logo" class="logo">`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the rendered page does not carry %q", want)
+			}
+		}
+	})
+
+	t.Run("the config route is served under the same mount", func(t *testing.T) {
+		// The one assertion that is really about routing rather than about the
+		// UI: three adapters register <prefix>/ui/config as a route of its own
+		// and gin cannot, so gin answers it from inside the catch-all. Both have
+		// to produce the document.
+		env := NewEnv(t, mount, uiHTTPConfig())
+		uiDocument(t, env, "")
+	})
+
+	t.Run("headless mode serves assets and no pages", func(t *testing.T) {
+		// ui.router.ts:172-183. The early return is the behaviour: the hosting
+		// SPA provides its own login UI, and a headless deployment that still
+		// answered login.html would be a different product.
+		cfg := uiHTTPConfig()
+		cfg.UI.Headless = true
+		env := NewEnv(t, mount, cfg)
+
+		for _, page := range []string{"", "/", "/login", "/register"} {
+			if rec := uiPageRequest(t, env, page); rec.Code != http.StatusNotFound {
+				t.Errorf("GET %s = %d in headless mode, want 404 (body %.120q)",
+					uiPageName(page), rec.Code, rec.Body.String())
+			}
+		}
+		// auth.js is why the mode exists: the SPA loads it with a <script> tag.
+		if rec := uiPageRequest(t, env, "/auth.js"); rec.Code != http.StatusOK {
+			t.Errorf("GET /auth.js = %d in headless mode, want 200", rec.Code)
+		}
+		// And the document, which is how auth.js learns it is headless.
+		if body := uiDocument(t, env, ""); body["headless"] != true {
+			t.Errorf("headless = %#v, want true", body["headless"])
+		}
+	})
+
+	t.Run("uploaded assets are served under both paths", func(t *testing.T) {
+		// The legacy /assets/logo and the unified /assets/uploads, from one
+		// directory (ui.router.ts:185-191). The seam is an fs.FS until the
+		// UploadStore lands.
+		cfg := uiHTTPConfig()
+		cfg.UI.Uploads = fstest.MapFS{
+			"company.png": &fstest.MapFile{Data: []byte("PNGDATA")},
+		}
+		env := NewEnv(t, mount, cfg)
+		for _, page := range []string{"/assets/logo/company.png", "/assets/uploads/company.png"} {
+			rec := uiPageRequest(t, env, page)
+			AssertStatus(t, rec, http.StatusOK)
+			if rec.Body.String() != "PNGDATA" {
+				t.Errorf("GET %s served %q, want the uploaded bytes", page, rec.Body.String())
+			}
+		}
+	})
+
+	t.Run("without an upload directory neither path is served", func(t *testing.T) {
+		// The reference leaves both mounts unregistered under `if (uploadDir)`,
+		// so an unconfigured deployment 404s rather than failing on a store it
+		// does not have.
+		env := NewEnv(t, mount, uiHTTPConfig())
+		for _, page := range []string{"/assets/logo/company.png", "/assets/uploads/company.png"} {
+			if rec := uiPageRequest(t, env, page); rec.Code != http.StatusNotFound {
+				t.Errorf("GET %s = %d with no upload directory, want 404", page, rec.Code)
+			}
+		}
+	})
+
+	t.Run("a page request seeds the CSRF cookie", func(t *testing.T) {
+		// The login page is fetched before any session exists and then posts to
+		// /login with the double-submit pair, so it has to arrive with the
+		// cookie. The reference's CSRF auto-init is a router.use registered
+		// ahead of its UI router (auth.router.ts:529-538) and runs for every
+		// route mounted after it, pages included.
+		env := NewEnv(t, mount, uiHTTPConfig())
+		rec := uiPageRequest(t, env, "/login")
+		if cookie := Cookie(t, rec, hostCSRF); cookie.Value == "" {
+			t.Error("the CSRF cookie was seeded with an empty value")
+		}
+	})
+
+	t.Run("a mutating method is unrouted", func(t *testing.T) {
+		// req.method !== 'GET' → next(), and express.static does not answer a
+		// POST either (ui.router.ts:296-298).
+		env := NewEnv(t, mount, uiHTTPConfig())
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+			t.Run(method, func(t *testing.T) {
+				target := env.Config.Prefix() + auth.UIRoute + "/login"
+				assertUIUnrouted(t, env.Do(httptest.NewRequest(method, target, nil)))
+			})
+		}
+	})
+
+	t.Run("without UI.Enabled nothing under the mount is served", func(t *testing.T) {
+		// The reference mounts its whole ui router only under config.ui.enabled
+		// (auth.router.ts:1639-1648), and "whole" now means the pages and the
+		// assets as well as the document.
+		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+		for _, page := range []string{"", "/", "/login", "/base.css"} {
+			t.Run(uiPageName(page), func(t *testing.T) {
+				assertUIUnrouted(t, uiPageRequest(t, env, page))
+			})
+		}
+	})
+}
+
+// uiPageRequest issues a GET for one path below the UI mount. An empty page is
+// the bare mount, which Express serves as the login page.
+func uiPageRequest(t *testing.T, env *Env, page string) *httptest.ResponseRecorder {
+	t.Helper()
+	return env.Do(httptest.NewRequest(http.MethodGet, env.Config.Prefix()+auth.UIRoute+page, nil))
+}
+
+// uiPageName labels a subtest for a path that may be empty.
+func uiPageName(page string) string {
+	if page == "" {
+		return "(mount root)"
+	}
+	return page
 }

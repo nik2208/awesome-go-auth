@@ -135,14 +135,21 @@ func main() {
 	// what the reference resolves against NODE_ENV is this one line. Leave it
 	// off in production: the UI page loads swagger-ui-dist from the unpkg CDN
 	// onto the auth origin.
+	//
+	// UI.Enabled mounts the hosted UI at /auth/ui: the login, register,
+	// forgot-password and 2FA pages, the config document they boot from, and
+	// auth.js beside them. Branding is optional — with none, the pages render
+	// the library's defaults.
 	cfg := auth.DefaultHTTPConfig()
 	cfg.Docs.Enabled = getEnv("APP_ENV", "development") != "production"
+	cfg.UI.Enabled = true
+	cfg.UI.Branding = auth.UIBranding{SiteName: "Chi + Postgres Example"}
 	chiAdapter.MountWithConfig(r, a, cfg)
 
-	// Embedded UI
-	r.Get("/admin", auth.ServeAdminUI().ServeHTTP)
-	r.Get("/auth-ui", auth.ServeAuthUI().ServeHTTP)
-	r.Get("/auth.js", auth.ServeAuthJS().ServeHTTP)
+	// The admin dashboard is still the hand-written page: the reference's admin
+	// SPA is vendored and served under /auth/ui, but the admin API it calls is
+	// not mounted yet, so this stays until that lands.
+	r.Get("/admin", auth.ServeAdminUI().ServeHTTP) //nolint:staticcheck // no replacement until the admin router lands
 
 	// SSE endpoint, behind the same access-token middleware the auth routes use.
 	r.With(chiAdapter.Middleware(a)).Get("/events/{userID}", func(w http.ResponseWriter, r *http.Request) {

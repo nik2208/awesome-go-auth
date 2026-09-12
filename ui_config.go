@@ -42,10 +42,18 @@ const (
 // reference mounts its whole ui router at <prefix>/ui (auth.router.ts:1640) and
 // the config endpoint at /config within it (ui.router.ts:165).
 //
-// It is exported because the four adapters mount the route and openapi.go
-// describes it, and one constant is what keeps the mount and the spec from
-// parting company — the way ResourceServerGatedRoutes is shared already.
-const UIConfigRoute = "/ui/config"
+// It is exported because openapi.go describes the route and the conformance
+// suite replays it, and one constant is what keeps the description and the
+// mount from parting company — the way ResourceServerGatedRoutes is shared
+// already.
+//
+// Since v0.9.0 no adapter registers this path on its own router. UIHandler
+// serves the whole of <prefix>/ui, this route included, and delegates it to the
+// same handler the adapters used to mount here — which is where the reference
+// has it too (ui.router.ts:165 is a route inside the router auth.router.ts:1640
+// mounts at /ui). The constant is built from UIRoute so that the two cannot
+// drift.
+const UIConfigRoute = UIRoute + "/config"
 
 // uiConfigPage is the template store page the translations are read from.
 //
@@ -73,10 +81,12 @@ type UIOptions struct {
 	Enabled bool
 	// Headless is the reference's config.ui.headless (auth-config.model.ts:343):
 	// the SPA case, in which the hosting application provides its own pages and
-	// the router serves only this document and the static assets. This port
-	// serves no pages yet, so the flag decides nothing here and is echoed in the
-	// document, which is where auth.js reads it from to stop redirecting on an
-	// expired session (:334-336, ui.router.ts:168).
+	// the router serves only this document and the static assets.
+	//
+	// It decides two things. UIHandler short-circuits on it and serves no HTML
+	// page at all (ui.router.ts:172-183), and it is echoed in this document,
+	// which is where auth.js reads it from to stop redirecting on an expired
+	// session (:334-336, ui.router.ts:168).
 	Headless bool
 	// Branding is the static half of the served ui object: the deployment's
 	// colours, logo and site name, each of which a settings store may override
@@ -93,13 +103,29 @@ type UIOptions struct {
 	// mailer block on Config — MailerConfig belongs to the transport a host
 	// builds — so the UI's own default lives here. Empty means UIDefaultLang.
 	DefaultLang string
-	// Assets and Uploads are the two directories the reference's ui router
-	// serves: the built-in pages and scripts (ui.router.ts:72-93, :177-180) and
-	// the logos and backgrounds an administrator uploaded (:184-190). Nothing
-	// reads them yet — this change mounts the config route and nothing else —
-	// and they are declared now so that a host configures the UI in one place
-	// once the pages land.
-	Assets  fs.FS
+	// Assets is the reference's uiAssetsDir (ui.router.ts:11-14): the built-in
+	// pages and scripts UIHandler serves and renders. nil — the default — is the
+	// vendored copy of the reference's own assets, UpstreamUIAssetFS(), which is
+	// that option's "if not provided, the internal Vanilla JS UI will be
+	// served". A host supplying its own set is taken at its word: the pages are
+	// looked up in it and nothing falls back to the vendored ones, because a
+	// half-replaced UI is worse than a missing one.
+	//
+	// It is an fs.FS rather than a directory path so that a host can serve a
+	// built SPA from its own embed.FS without unpacking it, and os.DirFS is the
+	// one-line spelling of the reference's directory.
+	Assets fs.FS
+	// Uploads is the reference's uploadDir (:16-20): the logos and backgrounds
+	// an administrator uploaded, served under both <prefix>/ui/assets/logo/ and
+	// <prefix>/ui/assets/uploads/ (ui.router.ts:185-191). nil — the default —
+	// mounts neither path, exactly as the reference's `if (uploadDir)` leaves
+	// them unmounted, so an unconfigured deployment answers 404 there rather
+	// than failing on a store it does not have.
+	//
+	// It is read-only on purpose. The reference's upload *writer* is an admin
+	// route, and this port has no UploadStore to write through until U15; making
+	// the read side an fs.FS now means the store, when it lands, has to supply
+	// one rather than this seam having to change shape.
 	Uploads fs.FS
 }
 
