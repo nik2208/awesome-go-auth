@@ -79,6 +79,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   U19 drew this line first and said why. `Bridge` runs the same fan-out minus
   the bus step, so a bridged event gets the same id, frame and envelope a
   tracked one does.
+- **The read half of the admin API** (`admin_read.go`): the fourteen `GET`s of
+  `admin.router.ts`'s read surface, every one of them behind
+  `AdminGuard.Protect` and none behind `ProtectShell` —
+  `/api/users`, `/api/users/{id}` and its four sub-resources (`metadata`,
+  `linked-accounts`, `roles`, `tenants`), `/api/actions`, `/api/settings`,
+  `/api/sessions`, `/api/roles`, `/api/tenants`, `/api/tenants/{id}/users`,
+  `/api/templates/mail` and `/api/templates/ui`. Each body is the reference
+  handler's field for field, including the parts that are quirks:
+  `GET /api/users` clamps `limit` to 100 and defaults it to 20, fetches a
+  500-row batch at offset 0 when a `filter` is given and filters it in memory on
+  an email-or-id substring, and reports `total` as
+  `len(page) + offset + (len(page) == limit ? 1 : 0)` — a best-effort number
+  whose only job is the table's "next" button and which is off by one whenever
+  the last page is exactly full (`admin.router.ts:782`). Its projection is the
+  reference's hand-picked eight (`id`, `email`, `role`, `isEmailVerified`,
+  `isTotpEnabled`, `require2FA`, `phoneNumber`, `createdAt`); `isAdmin` is in it
+  nowhere, because the reference serialises that field nowhere. The three
+  answers the reference gives to one missing capability are kept distinct: `501`
+  with an empty page here, the guard's `500` sentence for `'first-user'`, and
+  the bare `501` of the 2FA-policy walk. `GET /api/roles` keeps the two absences
+  apart the same way the reference does — `404` when no RBAC store is
+  configured, `501` when one is and cannot enumerate — by asking whether it was
+  given a store rather than by reading an error. `GET /api/actions` answers the
+  empty registry: this port has the settings half of the inbound-webhook action
+  feature and not the registry, and inventing a registration seam is the tools
+  router's work. The two template listings are registered only where a
+  `TemplateStore` is, as there.
+  One entry joins the deviation register with these routes:
+  `admin-listings-are-ordered-by-id`. v0.8.0 declared **ID ascending** as the
+  normative order of the three admin listers, and that order only became
+  client-visible now that something serves it — the reference's own stores page
+  these routes with no `ORDER BY` at all, which makes `offset` paging
+  non-deterministic and makes its `'first-user'` access policy read whichever
+  row a query planner returned first. The templates and linked-accounts
+  listings are *not* covered: those stay in insertion order, matching the
+  reference.
 - The admin console's skeleton: the access guard, its own login and logout, the
   two static asset routes and the HTML shell, mounted at `HTTPConfig.Admin.Path`
   — `/admin` by default, and a sibling of `APIPrefix` rather than a child of it,

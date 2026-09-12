@@ -1293,6 +1293,64 @@ func CompatibilityNotes() APICompatibilityNotes {
 					},
 				},
 			},
+			{
+				ID:      "admin-listings-are-ordered-by-id",
+				Title:   "The admin listings answer in a defined order, where the reference's own stores impose none",
+				Surface: "`HTTPConfig.Admin`: the paged and listing reads — `GET <admin>/api/users`, `/api/sessions`, `/api/roles`, `/api/tenants`, `/api/users/{id}/roles`, `/api/users/{id}/tenants` and `/api/tenants/{id}/users`",
+				Behaviour: "Answers in a total order, and states it as part of the store contract " +
+					"rather than as an implementation detail: **ID ascending, by Go string " +
+					"comparison**. `AdminUserStore.ListUsers` orders by `User.ID`, " +
+					"`SessionLister.GetAllSessions` by `Session.ID`, `RoleLister.GetAllRoles` " +
+					"and `RolesPermissionsStore.GetRolesForUser` by the role name, and the " +
+					"tenant listings by the tenant or user id — which is what every other list " +
+					"method in this package already did. A store that cannot answer in that " +
+					"order may answer in its own, but owes its callers the same kind of entry " +
+					"this one is. The two listings that are *not* covered stay as the " +
+					"reference has them: `GET <admin>/api/templates/mail` and " +
+					"`/api/templates/ui` come back in first-insertion order, matching its " +
+					"`Map` iteration, and a user's linked accounts in the order they were " +
+					"linked.",
+				Reference: "Declares no order anywhere, and none of its shipped stores supplies one. " +
+					"`listUsers` is `SELECT * FROM users LIMIT ? OFFSET ?` with no `ORDER BY` " +
+					"in the SQLite and MySQL examples, `find({}).skip().limit()` in natural " +
+					"order in the MongoDB one, and a `Map`'s insertion order in the in-memory " +
+					"one. So the console's own paging is undefined against its own examples: " +
+					"a row can appear on two consecutive pages or on neither, and nothing in " +
+					"the router notices, because `total` is the best-effort expression at " +
+					"`:782` rather than a count. Its `'first-user'` access policy reads " +
+					"`listUsers(1, 0)[0]` and calls that user \"the first registered user\" " +
+					"(`:25-27`), which under a `SELECT` with no `ORDER BY` is whichever row " +
+					"the engine happened to return.",
+				Citations: []string{
+					"admin.router.ts:748",
+					"admin.router.ts:782",
+					"admin.router.ts:1086",
+					"admin.router.ts:1129",
+					"sqlite-user-store.example.ts:305",
+					"mysql-user-store.example.ts:356",
+					"mongodb-user-store.example.ts:327",
+					"in-memory-user-store.ts:175",
+				},
+				Why: "`offset` without an order is not paging. The reference's route signature is " +
+					"positional — limit and offset, page after page — and a positional cursor " +
+					"over an unordered set is a different set each time it is asked, so an " +
+					"operator walking the users table can be shown one account twice and " +
+					"another not at all, with nothing on the wire to say so. Reproducing the " +
+					"absence would mean reproducing a defect that only manifests as missing " +
+					"rows, which is the one class of wire difference a client cannot detect " +
+					"and a reviewer cannot see. " +
+					"The second reason is that the guard already depends on the order: " +
+					"`AdminPolicyFirstUser` grants the console to `ListUsers(ctx, \"\", 1, 0)[0]`, " +
+					"so under an unordered store the answer to \"who may administer this " +
+					"deployment\" is whatever the query planner felt like — and it can differ " +
+					"between two requests. An access decision cannot rest on that. " +
+					"Nothing is given up by fixing it. No shipped client reads these routes — " +
+					"they are the admin SPA's, and the SPA renders whatever order it is sent — " +
+					"and an order is strictly more information than no order, so a consumer " +
+					"written against the reference cannot break on receiving one. The cost " +
+					"falls entirely on a store implementor, which is why it is stated on the " +
+					"three interfaces rather than only here.",
+			},
 		},
 	}
 }
