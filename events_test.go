@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -205,5 +206,214 @@ func TestEventBus_ConcurrentPublish(t *testing.T) {
 	defer mu.Unlock()
 	if count != 10 {
 		t.Fatalf("expected 10 events, got %d", count)
+	}
+}
+
+// ── the payload, the carrier and the bus semantics ───────────────────────────
+//
+// The cases above predate the vocabulary and pin the bus as it was. These pin
+// what U17 added: the four fields Event gained, the two projections that keep
+// it from being reassembled by hand downstream, and the delivery semantics that
+// were compared against the reference's EventEmitter rather than assumed.
+
+func TestEventWithRequestContextFillsTheThreeFields(t *testing.T) {
+	ctx := ContextWithEventContext(context.Background(), EventContext{
+		CorrelationID: "corr-1", IP: "192.0.2.5", UserAgent: "ua",
+	})
+	got := Event{Name: EventAuthLoginSuccess, UserID: "u1"}.WithRequestContext(ctx)
+
+	if got.CorrelationID != "corr-1" || got.IP != "192.0.2.5" || got.UserAgent != "ua" {
+		t.Errorf("provenance = %q/%q/%q, want the carrier's values",
+			got.CorrelationID, got.IP, got.UserAgent)
+	}
+	if got.Name != EventAuthLoginSuccess || got.UserID != "u1" {
+		t.Error("WithRequestContext changed a field that is not request provenance")
+	}
+}
+
+// The reference spreads the request context first and the payload over it
+// (node-auth auth.router.ts:430-433), so the caller wins a collision. Its
+// payload type has no key that can collide, so the observable rule is "fill
+// what the caller left empty" — which is also the rule that survives a caller
+// who sets one of the three on purpose.
+func TestEventWithRequestContextDoesNotOverwriteAnExplicitValue(t *testing.T) {
+	ctx := ContextWithEventContext(context.Background(), EventContext{
+		CorrelationID: "from-header", IP: "192.0.2.5", UserAgent: "from-header",
+	})
+	got := Event{Name: EventAuthLogout, CorrelationID: "explicit", IP: "203.0.113.1"}.WithRequestContext(ctx)
+
+	if got.CorrelationID != "explicit" {
+		t.Errorf("CorrelationID = %q, want the caller's %q", got.CorrelationID, "explicit")
+	}
+	if got.IP != "203.0.113.1" {
+		t.Errorf("IP = %q, want the caller's %q", got.IP, "203.0.113.1")
+	}
+	if got.UserAgent != "from-header" {
+		t.Errorf("UserAgent = %q, want the carrier's value for the field the caller left empty", got.UserAgent)
+	}
+}
+
+// A publish from outside any request — a background sweep, a host calling a
+// Service method from a cron job — is not an error and leaves the three empty.
+func TestEventWithRequestContextWithoutACarrier(t *testing.T) {
+	ev := Event{Name: EventSessionExpired, UserID: "u1"}
+	if got := ev.WithRequestContext(context.Background()); got.CorrelationID != "" || got.IP != "" || got.UserAgent != "" {
+		t.Errorf("event = %+v, want the provenance left empty when the context carries no EventContext", got)
+	}
+}
+
+// The webhook envelope's metadata is derived from the event rather than
+// assembled beside it, in the reference's four keys and its camelCase spelling
+// (auth-tools.ts:257-262). IP and UserAgent are deliberately absent: a webhook
+// leaves the deployment.
+func TestEventWebhookMetadata(t *testing.T) {
+	full := Event{
+		Name: EventRoleAssigned, UserID: "u1", TenantID: "t1",
+		SessionID: "s1", CorrelationID: "c1",
+		IP: "192.0.2.5", UserAgent: "ua",
+	}.WebhookMetadata()
+
+	want := map[string]any{"userId": "u1", "tenantId": "t1", "sessionId": "s1", "correlationId": "c1"}
+	if len(full) != len(want) {
+		t.Fatalf("metadata = %v, want exactly %v — extra keys are fields leaving the deployment", full, want)
+	}
+	for k, v := range want {
+		if full[k] != v {
+			t.Errorf("metadata[%q] = %v, want %v", k, full[k], v)
+		}
+	}
+	for _, absent := range []string{"ip", "userAgent", "IP", "UserAgent"} {
+		if _, ok := full[absent]; ok {
+			t.Errorf("metadata carries %q: the reference's metadata is four identifiers and not "+
+				"the client address or the browser string", absent)
+		}
+	}
+
+	// An absent identifier is omitted rather than written empty, because the
+	// reference lets JSON.stringify drop its undefined members.
+	partial := Event{Name: EventAuthLoginFailed, CorrelationID: "c1"}.WebhookMetadata()
+	if len(partial) != 1 || partial["correlationId"] != "c1" {
+		t.Errorf("metadata = %v, want only the correlationId key", partial)
+	}
+
+	if none := (Event{Name: EventAuthOAuthConflict}).WebhookMetadata(); none != nil {
+		t.Errorf("metadata = %v, want nil so OutgoingWebhookEvent.Metadata's omitempty drops the key", none)
+	}
+}
+
+func TestEventBusPublishContextFillsFromTheCarrier(t *testing.T) {
+	bus := NewEventBus()
+	var got Event
+	bus.Subscribe(EventUserCreated, func(e Event) { got = e })
+
+	ctx := ContextWithEventContext(context.Background(), EventContext{
+		CorrelationID: "corr-pub", IP: "192.0.2.5", UserAgent: "ua-pub",
+	})
+	bus.PublishContext(ctx, Event{Name: EventUserCreated, UserID: "u1", SessionID: "s1"})
+
+	if got.CorrelationID != "corr-pub" || got.IP != "192.0.2.5" || got.UserAgent != "ua-pub" {
+		t.Errorf("subscriber saw %q/%q/%q, want the carrier's values",
+			got.CorrelationID, got.IP, got.UserAgent)
+	}
+	if got.SessionID != "s1" {
+		t.Errorf("SessionID = %q, want the publisher's", got.SessionID)
+	}
+	if got.Timestamp.IsZero() {
+		t.Error("PublishContext did not go through Publish: the timestamp was not filled")
+	}
+}
+
+func TestEventBusPublishContextWithoutACarrier(t *testing.T) {
+	bus := NewEventBus()
+	var got Event
+	bus.Subscribe(EventUserDeleted, func(e Event) { got = e })
+	bus.PublishContext(context.Background(), Event{Name: EventUserDeleted, UserID: "u1"})
+
+	if got.UserID != "u1" {
+		t.Fatalf("the event was not delivered: %+v", got)
+	}
+	if got.CorrelationID != "" || got.IP != "" || got.UserAgent != "" {
+		t.Errorf("provenance = %q/%q/%q, want empty: a publish outside any request invents nothing",
+			got.CorrelationID, got.IP, got.UserAgent)
+	}
+}
+
+// Publish is synchronous, as EventEmitter.emit is: every handler has run by the
+// time it returns. The older cases in this file sleep before asserting, which
+// would pass an asynchronous bus too; this one does not.
+func TestEventBusPublishIsSynchronous(t *testing.T) {
+	bus := NewEventBus()
+	done := false
+	bus.Subscribe(EventAuthLogout, func(Event) { done = true })
+	bus.Publish(Event{Name: EventAuthLogout})
+	if !done {
+		t.Error("Publish returned before its handler ran: the reference's emit does not")
+	}
+}
+
+// Named handlers run in registration order and before the wildcard ones, which
+// is the order the reference's two emit calls produce (auth-event-bus.ts:61-63).
+func TestEventBusDeliveryOrder(t *testing.T) {
+	bus := NewEventBus()
+	var order []string
+	bus.Subscribe(EventUserCreated, func(Event) { order = append(order, "named-1") })
+	bus.Subscribe(EventBusWildcard, func(Event) { order = append(order, "wildcard-1") })
+	bus.Subscribe(EventUserCreated, func(Event) { order = append(order, "named-2") })
+	bus.Subscribe(EventBusWildcard, func(Event) { order = append(order, "wildcard-2") })
+	bus.Publish(Event{Name: EventUserCreated})
+
+	want := []string{"named-1", "named-2", "wildcard-1", "wildcard-2"}
+	if len(order) != len(want) {
+		t.Fatalf("delivery = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("delivery = %v, want %v", order, want)
+		}
+	}
+}
+
+// Both buses dispatch against a snapshot: EventEmitter clones its listener
+// array, Publish copies under the read lock. So a handler that subscribes
+// during a dispatch is not called for the event being dispatched — and, here,
+// cannot deadlock against the lock it is dispatching under.
+func TestEventBusSubscribeDuringDispatch(t *testing.T) {
+	bus := NewEventBus()
+	late := 0
+	bus.Subscribe(EventSessionRotated, func(Event) {
+		bus.Subscribe(EventSessionRotated, func(Event) { late++ })
+	})
+	bus.Publish(Event{Name: EventSessionRotated})
+	if late != 0 {
+		t.Errorf("a handler subscribed during dispatch was called %d times for that same event", late)
+	}
+	bus.Publish(Event{Name: EventSessionRotated})
+	if late != 1 {
+		t.Errorf("the late handler was called %d times on the next publish, want 1", late)
+	}
+}
+
+// The registered deviation event-handler-panic-does-not-fail-the-publisher, in
+// both of its halves: the later handlers still run, and the publisher returns
+// normally. The reference does neither — a listener that throws propagates out
+// of emit, skipping the rest and failing the request that published.
+func TestEventBusPanicIsContainedToOneHandler(t *testing.T) {
+	bus := NewEventBus()
+	var ran []string
+	bus.Subscribe(EventUserPasswordChanged, func(Event) { ran = append(ran, "before") })
+	bus.Subscribe(EventUserPasswordChanged, func(Event) { panic("subscriber bug") })
+	bus.Subscribe(EventUserPasswordChanged, func(Event) { ran = append(ran, "after") })
+	bus.Subscribe(EventBusWildcard, func(Event) { ran = append(ran, "wildcard") })
+
+	bus.Publish(Event{Name: EventUserPasswordChanged, UserID: "u1"})
+
+	want := []string{"before", "after", "wildcard"}
+	if len(ran) != len(want) {
+		t.Fatalf("handlers run = %v, want %v: a panicking subscriber must not silence the others", ran, want)
+	}
+	for i := range want {
+		if ran[i] != want[i] {
+			t.Fatalf("handlers run = %v, want %v", ran, want)
+		}
 	}
 }

@@ -31,8 +31,17 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 	// so a refused request never reaches the double-submit comparison or the
 	// auth middleware (auth.router.ts:468, :656). With no limiter configured it
 	// is the CSRF middleware alone. See auth.HTTPConfig.RateLimiter.
+	//
+	// Ahead of both sits auth.EventContextMiddleware, which installs the
+	// correlation id, client address and User-Agent on the request context so
+	// that anything publishing an event downstream can reach them. It is
+	// outermost because it cannot refuse a request and the two below it can;
+	// see that function. Every adapter installs it, because a carrier present on
+	// three routers out of four would make an event's provenance depend on which
+	// router the host chose.
+	evctx := auth.EventContextMiddleware(resolved)
 	limit, csrf := auth.RateLimitMiddleware(resolved), auth.CSRFMiddleware(resolved)
-	guard := func(next http.Handler) http.Handler { return limit(csrf(next)) }
+	guard := func(next http.Handler) http.Handler { return evctx(limit(csrf(next))) }
 
 	// IdP mode: the JWKS document, mounted first and bare — no limiter, no CSRF,
 	// no auth — because the reference registers it ahead of every middleware
