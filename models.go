@@ -12,6 +12,38 @@ type User struct {
 	FirstName    string
 	LastName     string
 	Role         string
+	// IsAdmin is the reference's BaseUser.isAdmin (user.model.ts:81-90): the
+	// stored flag the admin router's 'is-admin-flag' access policy reads, as
+	// `granted = user.isAdmin === true` (admin.router.ts:370).
+	//
+	// It is a persisted field and not a projection of Role, and that is the
+	// reference's own arrangement rather than a choice made here. The obvious
+	// reading — that an admin is a user whose role says so — is the one the
+	// reference explicitly declines: its doc on the field routes anyone wanting
+	// role-shaped admin-ness away from it and to RBAC instead ("For more
+	// granular RBAC control use IRolesPermissionsStore and a custom accessPolicy
+	// function"), and buildPolicyGuard reads no role anywhere. The four access
+	// policies it does offer are 'open', 'first-user', this flag, and a
+	// host-supplied predicate that is handed the user and the RBAC store
+	// (admin.router.ts:25-30, :366-382) — so a deployment that wants
+	// `Role == "admin"` writes six lines of predicate, and the flag stays what it
+	// is: a switch a host sets on a record, with no derivation behind it.
+	//
+	// Deriving it here anyway, in the shape of models.go's own
+	// loginProviderOrLocal, would therefore not be reproducing the reference but
+	// inventing a rule it does not have — and inventing it in the one place where
+	// guessing wrong grants the admin console to the wrong person. A store that
+	// never persisted the column keeps working: absent is false in TypeScript
+	// (the field is `isAdmin?: boolean`, and the guard compares `=== true`) and
+	// false is the zero value here, so the two agree without a migration.
+	//
+	// It is deliberately not projected onto PublicUser. The reference serialises
+	// isAdmin nowhere — not on /me, not on the admin users table, which picks its
+	// keys one by one and does not pick this one (admin.router.ts:764-773) — so no
+	// shipped client knows the field exists, and adding it to the wire would be an
+	// unrequested widening of the contract that also tells every caller which
+	// accounts are worth attacking.
+	IsAdmin bool
 	// LoginProvider names the identity provider that created the account: an
 	// OAuth provider's name for a user OAuthService.HandleCallback created,
 	// empty for one registered with a password. Empty is read as

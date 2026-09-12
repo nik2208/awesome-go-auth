@@ -360,3 +360,22 @@ func (s *MemoryTenantStore) GetUsersForTenant(_ context.Context, tenantID string
 	sort.Strings(out)
 	return out, nil
 }
+
+// GetAllRoles makes MemoryRolesPermissionsStore satisfy RoleLister: every role
+// CreateRole has defined, name-ascending, matching GetPermissionsForRole and
+// GetRolesForUser above.
+//
+// The set is rolePermissions, not the roles users happen to hold. A role created
+// and assigned to nobody is still a role — GET /admin/api/roles exists to show
+// exactly that — and a role with no permissions is too, since CreateRole with an
+// empty list creates one.
+func (s *MemoryRolesPermissionsStore) GetAllRoles(_ context.Context) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	roles := make([]string, 0, len(s.rolePermissions))
+	for role := range s.rolePermissions {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	return roles, nil
+}

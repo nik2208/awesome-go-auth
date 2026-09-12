@@ -774,6 +774,51 @@ func (s *Service) CleanupExpiredSessions(ctx context.Context) (int, error) {
 	return store.DeleteExpiredSessions(ctx, s.now())
 }
 
+// ListUsers, ListAllSessions and ListAllRoles resolve the three admin listers.
+// They are the capability half of AdminUserStore, SessionLister and RoleLister:
+// the assertion that fails here is what M8's `GET /admin/api/users`,
+// `/admin/api/sessions` and `/admin/api/roles` turn into the reference's 501
+// (admin.router.ts:754, :1093, :1133), so ErrFeatureNotSupported on these three
+// means "the configured store cannot enumerate", never "there is nothing there".
+// An empty page and this error are different answers and the router must keep
+// them apart.
+//
+// Nothing is filtered, clamped or defaulted on the way through. `limit` clamped
+// to 100 and defaulting to 20, `offset` defaulting to 0, the in-memory `filter`
+// over a 500-row batch at offset 0, and the best-effort `total` are all query
+// semantics of the route rather than of the store (admin.router.ts:750-782), and
+// they belong to M8; passing them through untouched is what leaves M8 free to
+// implement them without reopening this seam.
+func (s *Service) ListUsers(ctx context.Context, tenantID string, limit, offset int) ([]User, error) {
+	store, ok := s.users.(AdminUserStore)
+	if !ok {
+		return nil, ErrFeatureNotSupported
+	}
+	return store.ListUsers(ctx, tenantID, limit, offset)
+}
+
+func (s *Service) ListAllSessions(ctx context.Context, limit, offset int) ([]Session, error) {
+	store, ok := s.sessions.(SessionLister)
+	if !ok {
+		return nil, ErrFeatureNotSupported
+	}
+	return store.GetAllSessions(ctx, limit, offset)
+}
+
+// ListAllRoles asserts on s.rbac, which — unlike s.users and s.sessions — is
+// optional and may be nil. A type assertion on a nil interface value fails
+// rather than panicking, so the one check covers both "no RBAC store configured"
+// and "the configured one cannot enumerate"; the route answers 404 for the first
+// and 501 for the second (admin.router.ts:1130, :1133), and tells them apart by
+// asking whether it was given a store, not by reading this error.
+func (s *Service) ListAllRoles(ctx context.Context) ([]string, error) {
+	store, ok := s.rbac.(RoleLister)
+	if !ok {
+		return nil, ErrFeatureNotSupported
+	}
+	return store.GetAllRoles(ctx)
+}
+
 // UpdateProfile applies a partial profile update: a nil field in the input is
 // one the caller did not submit and must be left as it is stored (§3.5).
 //
