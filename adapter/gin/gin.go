@@ -169,6 +169,24 @@ func (ad *Adapter) Mount(group gin.IRoutes) {
 	group.DELETE(prefix+"/linked-accounts/:provider/*providerAccountId", serveHTTP(h.UnlinkAccountHandler()))
 	group.POST(prefix+"/link-request", serveHTTP(h.LinkRequestHandler()))
 	group.POST(prefix+"/link-verify", serveHTTP(h.LinkVerifyHandler()))
+
+	// Documentation, last: the reference registers both at the end of the
+	// router (auth.router.ts:1656-1677) and only under its swagger option,
+	// which is HTTPConfig.Docs.Enabled here. Neither route carries a guard of
+	// its own there, but both sit after the router-level CSRF auto-init
+	// (:529-538), so both go through the CSRF middleware here — the shared
+	// net/http handlers (adapter/nethttp/docs.go) wrap themselves in it, as the
+	// OAuth ones above do — and they come off the very same adapter h, which is
+	// already resolved and in scope. HEAD is registered next to GET because
+	// gin, unlike net/http and Express, does not fall back from one to the
+	// other.
+	if ad.cfg.Docs.Enabled {
+		spec, ui := serveHTTP(h.OpenAPIHandler()), serveHTTP(h.SwaggerUIHandler())
+		group.GET(prefix+auth.DocsSpecPath, spec)
+		group.HEAD(prefix+auth.DocsSpecPath, spec)
+		group.GET(prefix+auth.DocsUIPath, ui)
+		group.HEAD(prefix+auth.DocsUIPath, ui)
+	}
 }
 
 // mountCredentialRoutes registers the nineteen routes that create, prove,

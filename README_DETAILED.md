@@ -2432,6 +2432,7 @@ type OpenAPIInfo struct {
     IDProvider bool     // add the JWKS route     — set it when the Auth was built WithIDP
     JWKSPath   string   // where it is served; must match IDPConfig.JWKSPath
     OIDC       bool     // add the four OIDC ones — set it when the Auth was built WithIDP
+    Docs bool // must match HTTPConfig.Docs.Enabled
 }
 ```
 
@@ -2460,6 +2461,86 @@ not mount those two in that mode (see
 wire conformance suite replays every documented operation against every adapter,
 so a route added without a spec entry (or a spec entry with no route) fails the
 build — and a route the configuration unmounts must vanish from both.
+
+### Serving it — `HTTPConfig.Docs`
+
+The reference's auth router mounts two documentation routes of its own
+(`auth.router.ts:1652-1677`), and so do all four adapters, under one flag:
+
+```go
+type DocsOptions struct {
+    Enabled  bool   // mount GET <prefix>/openapi.json and GET <prefix>/docs
+    BasePath string // where the document says they are; empty = the mount prefix
+}
+
+cfg := auth.DefaultHTTPConfig()
+cfg.Docs.Enabled = os.Getenv("APP_ENV") != "production"
+nethttpadapter.MountWithConfig(mux, a, cfg)
+```
+
+| Route | Answers |
+| --- | --- |
+| `GET <prefix>/openapi.json` | `GenerateOpenAPISpec` for this mount, as `application/json` |
+| `GET <prefix>/docs` | the reference's Swagger UI page, as `text/html; charset=utf-8` |
+
+Neither has an auth gate — the reference registers both with no guard of their
+own — so a reader fetches either with no credential of any kind. Both do sit
+behind the CSRF middleware, because in the reference they are registered after
+the router-level CSRF auto-init (`auth.router.ts:529-538`) and Express applies
+every earlier `router.use` layer to a route registered later. On a `GET` that
+middleware rejects nothing: all it does is hand a reader arriving without a
+`csrf-token` cookie a fresh one, exactly as the reference does. Both routes are
+absent with `Docs.Enabled` unset: a request for either answers `404`.
+
+Enabling `GET <prefix>/docs` is a security decision, not just a convenience: the
+page is the reference's, so it loads `swagger-ui-dist@5` from the unpkg CDN with
+no subresource integrity, and that script then runs on the auth origin, where
+the CSRF cookie is readable from JavaScript by design. Keep the route off in
+production, or serve it behind a `Content-Security-Policy` that pins the CDN.
+
+`Docs.Enabled` is a `bool` where the reference's option is `boolean | 'auto'`
+and defaults to `'auto'`, meaning enabled unless `NODE_ENV` is `production`.
+Resolving an ambient environment is the host's job here — the one line above is
+the whole of it — and the resulting difference in default is registered as
+`docs-routes-are-opt-in`.
+
+`Docs.BasePath` is the reference's `swaggerBasePath`: it moves the description,
+never the mount. The routes are always served at `HTTPConfig.Prefix()`, because
+that is where the adapter is; the base path is the prefix the served document
+writes its paths under, and the base of the URL the Swagger UI page fetches.
+Empty means the mount prefix, which is what you want unless a proxy makes the
+API reachable from outside under some other path.
+
+The document a mount serves describes its own two paths, which is
+`OpenAPIInfo.Docs` — set for you by the adapter. The wire conformance suite
+compares the document to the mounted routes in both directions on all four
+adapters, so neither of these can quietly drop out of it.
+
+### `OpenAPIHandler(info OpenAPIInfo) http.Handler`
+
+Serves `GenerateOpenAPISpec(info)` as `application/json`. The document is built
+once, at construction: it is a pure function of `info`, and `encoding/json`
+writes map keys in sorted order, so every response is the same bytes.
+
+### `SwaggerUIHandler(specURL string) http.Handler`
+
+Serves the reference's Swagger UI page for the document at `specURL`, as
+`text/html; charset=utf-8`. The page is `buildSwaggerUiHtml`
+(`openapi.ts:1646-1669`) byte for byte: the same markup, and the same
+`swagger-ui-dist@5` bundles from the unpkg CDN. That CDN is the reference's
+choice, and reproducing it rather than improving on it is the point — a
+deployment that cleared the reference's page with its own content policy gets
+the same page here. An empty `specURL` means the reference's own default,
+`./openapi.json`.
+
+Mounting with `Docs.Enabled` wires both of these for you; call them directly
+only when you serve the document from a route of your own.
+`(*nethttp.Adapter).OpenAPIHandler` and `.SwaggerUIHandler` build them from the
+mount, and `(*nethttp.Adapter).OpenAPIInfo()` returns the `OpenAPIInfo` that
+describes it — the value to start from in that case. Its `IDProvider`,
+`JWKSPath` and `ResourceServer` are read off the mount and cannot disagree with
+it; its `APIPrefix` is the documented base path, which is the mount prefix
+unless `Docs.BasePath` moved the description.
 
 ---
 

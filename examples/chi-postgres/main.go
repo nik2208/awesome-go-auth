@@ -12,7 +12,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -127,9 +126,18 @@ func main() {
 
 	// One call mounts every auth route under the configured prefix (/auth by
 	// default) with the cookie, CSRF and envelope conventions already applied.
-	// Use chiAdapter.MountWithConfig(r, a, cfg) to change the prefix or the
-	// cookie policy.
-	chiAdapter.Mount(r, a)
+	// The config is where the prefix and the cookie policy are changed too;
+	// chiAdapter.Mount(r, a) takes the defaults instead.
+	//
+	// Docs.Enabled adds GET /auth/openapi.json (the generated document for this
+	// mount) and GET /auth/docs (the Swagger UI page reading it). The library
+	// takes a plain bool and never reads the environment itself, so resolving
+	// what the reference resolves against NODE_ENV is this one line. Leave it
+	// off in production: the UI page loads swagger-ui-dist from the unpkg CDN
+	// onto the auth origin.
+	cfg := auth.DefaultHTTPConfig()
+	cfg.Docs.Enabled = getEnv("APP_ENV", "development") != "production"
+	chiAdapter.MountWithConfig(r, a, cfg)
 
 	// Embedded UI
 	r.Get("/admin", auth.ServeAdminUI().ServeHTTP)
@@ -145,17 +153,18 @@ func main() {
 	mcpSrv := auth.NewMCPServer(svc)
 	r.Post("/mcp", mcpSrv.ServeHTTP)
 
-	// OpenAPI spec. APIPrefix must match the mount, or the spec documents paths
-	// this server does not serve.
-	r.Get("/openapi.json", func(w http.ResponseWriter, _ *http.Request) {
-		spec := auth.GenerateOpenAPISpec(auth.OpenAPIInfo{
-			Title:     "My App API",
-			ServerURL: "https://api.example.com",
-			APIPrefix: auth.DefaultAPIPrefix,
-		})
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(spec)
-	})
+	// A second copy of the document, at the root and under this app's own name.
+	// The mount already serves one at /auth/openapi.json (see Docs.Enabled
+	// above); this is the exported handler, for a host that wants the document
+	// somewhere else or wants to fill in the fields that name its API rather
+	// than the library's. APIPrefix must match the mount, or the spec documents
+	// paths this server does not serve.
+	r.Method(http.MethodGet, "/openapi.json", auth.OpenAPIHandler(auth.OpenAPIInfo{
+		Title:     "My App API",
+		ServerURL: "https://api.example.com",
+		APIPrefix: cfg.Prefix(),
+		Docs:      cfg.Docs.Enabled,
+	}))
 
 	// API key protected route
 	apiKeySvc := auth.NewAPIKeyService(bcryptCost)

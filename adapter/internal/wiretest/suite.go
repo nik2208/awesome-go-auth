@@ -81,6 +81,7 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("ResourceServerGating", func(t *testing.T) { testResourceServerGating(t, mount) })
 	t.Run("OpenAPI", func(t *testing.T) { testOpenAPI(t, mount) })
 	t.Run("RateLimit", func(t *testing.T) { testRateLimit(t, mount) })
+	t.Run("Docs", func(t *testing.T) { testDocs(t, mount) })
 }
 
 // documentedRoutes is the operation set GenerateOpenAPISpec must describe,
@@ -211,12 +212,15 @@ type conditionalRouteSet struct {
 // auth.WithIDP and documented by OpenAPIInfo.IDProvider; see jwks.go. OIDC adds
 // the IdP's other four endpoints from the same switch, documented by
 // OpenAPIInfo.OIDC; see oidc.go. UI adds the config route
-// HTTPConfig.UI.Enabled mounts, documented by OpenAPIInfo.UI; see ui.go. Resource-server mode subtracts:
+// HTTPConfig.UI.Enabled mounts, documented by OpenAPIInfo.UI; see ui.go. Docs
+// adds the two documentation routes HTTPConfig.Docs.Enabled mounts, documented
+// by OpenAPIInfo.Docs; see docs.go. Resource-server mode subtracts:
 // HTTPConfig.ResourceServer leaves the credential routes unregistered and
 // OpenAPIInfo.ResourceServer takes them out of the spec; see resource_server.go.
-// The docs, admin and tools sets join the additive half as those routers land. suite_test.go drives the mechanism itself with fake sets it passes in,
-// so it stays independent of what is registered here.
-var conditionalRoutes = []conditionalRouteSet{jwksRouteSet(), oidcRouteSet(), uiRouteSet(), resourceServerRouteSet()}
+// The admin and tools sets join the additive half as those routers land.
+// suite_test.go drives the mechanism itself with fake sets it passes in, so it
+// stays independent of what is registered here.
+var conditionalRoutes = []conditionalRouteSet{jwksRouteSet(), oidcRouteSet(), uiRouteSet(), docsRouteSet(), resourceServerRouteSet()}
 
 // failureReporter is the slice of testing.T the OpenAPI checks report through.
 // It is an interface so suite_test.go can record failures instead of raising

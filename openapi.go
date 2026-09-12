@@ -71,6 +71,20 @@ type OpenAPIInfo struct {
 	// OIDCTokenPath again, because the adapters do not mount those two in that
 	// mode; the discovery document and userinfo stay. See OIDCMount.
 	OIDC bool
+
+	// Docs mirrors HTTPConfig.Docs.Enabled: the two documentation routes the
+	// adapters then mount, GET <prefix>/openapi.json and GET <prefix>/docs, are
+	// described by the document too. Set the two together, or the spec omits
+	// two routes the server serves — or documents two it does not.
+	//
+	// The reference's generator describes neither, under any option: it emits
+	// the auth routes and stops (openapi.ts:68 onwards), so a document with
+	// this flag carries two path items the reference's never has. That half of
+	// the docs-routes-are-opt-in deviation is registered in compatibility.go.
+	// A document that hid the endpoint it is served from would be a document
+	// the conformance suite could not hold to the mount in both directions,
+	// which is the check that keeps the rest of it honest.
+	Docs bool
 	// ResourceServer mirrors HTTPConfig.ResourceServer: the credential routes
 	// the adapters then leave unmounted are left out of the spec too. Set the
 	// two together, or the spec documents routes that answer 404.
@@ -239,11 +253,12 @@ func openAPIJWKSPath() map[string]any {
 }
 
 // openAPIPathsFor is openAPIPaths plus and minus what the configuration
-// changes. Four things do so far: resource-server mode drops the credential
+// changes. Five things do so far: resource-server mode drops the credential
 // routes, which is the same list the adapters skip registering
 // (ResourceServerGatedRoutes), an IdP adds the JWKS route and the four OIDC
-// endpoints — both mounted by the adapters from auth.WithIDP — and an enabled
-// UI adds the config route they mount from HTTPConfig.UI.Enabled, so the spec
+// endpoints — both mounted by the adapters from auth.WithIDP — an enabled UI
+// adds the config route they mount from HTTPConfig.UI.Enabled, and the two
+// documentation routes join them under HTTPConfig.Docs.Enabled, so the spec
 // and the mount stay in step under any of them, or all of them.
 //
 // The subtraction runs first, in the order the adapters mount in: they
@@ -289,6 +304,23 @@ func openAPIPathsFor(info OpenAPIInfo) map[string]any {
 	// uses, so there is nothing for it to collide with.
 	if info.UI {
 		paths[prefix+UIConfigRoute] = openAPIUIConfigPath()
+	}
+	// The two documentation routes, mounted last and added last, guarded the
+	// same way and for the same reason. Their own paths are constants, but the
+	// JWKSPath above is not: a host that points it at "/openapi.json" or
+	// "/docs" collides with them, and the JWKS item — written first, as the
+	// adapters mount that route first — must survive, exactly as a credential
+	// route does. The collision is a misconfiguration the host has to see
+	// rather than one this document papers over: on the mount side the same
+	// pair of values is fatal, because net/http and chi both panic on a
+	// duplicate pattern, so Mount crashes at startup.
+	if info.Docs {
+		if key := prefix + DocsSpecPath; !openAPIHasPath(paths, key) {
+			paths[key] = openAPIDocsSpecPath()
+		}
+		if key := prefix + DocsUIPath; !openAPIHasPath(paths, key) {
+			paths[key] = openAPIDocsUIPath()
+		}
 	}
 	return paths
 }
@@ -1316,6 +1348,61 @@ func openAPIUIConfigPath() map[string]any {
 									},
 								},
 							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// openAPIDocsSpecPath describes GET <prefix>/openapi.json: this document,
+// serving itself. It is a path item on its own because it is added
+// conditionally.
+func openAPIDocsSpecPath() map[string]any {
+	return map[string]any{
+		"get": map[string]any{
+			"summary": "This OpenAPI document",
+			"description": "Public: no credential, no CSRF token, no session — a `GET` is never " +
+				"CSRF-checked, though a reader arriving without the `csrf-token` cookie is " +
+				"given one. Mounted only when `HTTPConfig.Docs.Enabled` is set, and described " +
+				"here only when `OpenAPIInfo.Docs` is.",
+			"operationId": "openapiDocument",
+			"tags":        []string{"Docs"},
+			"responses": map[string]any{
+				"200": map[string]any{
+					"description": "The generated OpenAPI 3.0.3 document",
+					"content": map[string]any{
+						"application/json": map[string]any{
+							"schema": map[string]any{"type": "object", "additionalProperties": true},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// openAPIDocsUIPath describes GET <prefix>/docs, the Swagger UI page that reads
+// the document next door.
+func openAPIDocsUIPath() map[string]any {
+	return map[string]any{
+		"get": map[string]any{
+			"summary": "Swagger UI for this document",
+			"description": "Public: no credential, no CSRF token, no session — a `GET` is never " +
+				"CSRF-checked, though a reader arriving without the `csrf-token` cookie is " +
+				"given one. Serves the reference's " +
+				"Swagger UI page, which loads `swagger-ui-dist@5` from the unpkg CDN and " +
+				"fetches the document from `" + DocsSpecPath + "` below `DocsOptions.BasePath`. " +
+				"Mounted only when `HTTPConfig.Docs.Enabled` is set.",
+			"operationId": "swaggerUI",
+			"tags":        []string{"Docs"},
+			"responses": map[string]any{
+				"200": map[string]any{
+					"description": "The Swagger UI page",
+					"content": map[string]any{
+						"text/html": map[string]any{
+							"schema": map[string]any{"type": "string"},
 						},
 					},
 				},
