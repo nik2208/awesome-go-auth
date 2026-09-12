@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`GET <tools>/stream`, the tools router's SSE endpoint** (`tools_stream.go`).
+  The port of `tools.router.ts:184-221`: `503 {"error": "SSE not enabled"}`
+  when the facade was built without a manager (`:193-196`), the authorised
+  topics built from the authenticated principal with the client's `?topics=`
+  accepted only as a subset (`:203-216`, which is `auth.StreamTopics` — this
+  route parses the parameter and calls it), and the response handed to
+  `SseManager.Serve` for the life of the connection. **A credential may be
+  given in the query string**: `auth.ToolsSseTokenMiddleware` is the port of
+  `extractSseToken` (`:185-190`), which copies `?token=` into an
+  `Authorization: Bearer` header before the guard runs, because a browser
+  `EventSource` cannot set headers. It is reproduced because the family's
+  clients depend on it, and it is not a deviation — it is the reference's own
+  behaviour — but it is a cost to know: a token in a URL is a token in access
+  logs, in `Referer` headers, in browser history and in every proxy that logs
+  paths. The copy **overwrites** an Authorization header that was already
+  there and takes precedence over the access-token cookie, so a request
+  carrying both is authenticated as the query token. A host that will not pay
+  that either sets `ToolsOptions.DisableStream` or serves `SseManager.Serve`
+  from its own route. There is still **no resume**: `Last-Event-ID` is not
+  read, nothing is retained, and a reconnection resumes from *now*.
 - **The tools router's skeleton and its authentication posture** (`tools.go`,
   `HTTPConfig.Tools`). The port of `createToolsRouter`'s front half
   (`tools.router.ts:117-135`) and of its two documentation routes (`:332-352`).

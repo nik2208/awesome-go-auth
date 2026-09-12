@@ -354,19 +354,14 @@ func ToolsProtectMiddleware(cfg HTTPConfig) func(http.Handler) http.Handler {
 // four adapters mount this at <ToolsPath> and <ToolsPath>/, and U23 through U25
 // add their routes to the switch below rather than to four mount functions.
 //
-// The shape a later route takes is:
-//
-//	case rel == ToolsStreamPath && isToolsRead(r):
-//	    if !features.Stream { break }          // the reference's `if (stream)`
-//	    stream.ServeHTTP(w, r)                 // built above, once, and
-//	                                           // wrapped in protect where the
-//	                                           // reference spreads ...protect
-//
-// with the handler built once outside the closure — the guard chain and
-// anything it captures must not be rebuilt per request — and the flag read from
-// features, which is ToolsOptions.Features() resolved once here. Anything the
-// switch does not recognise is a 404, which is what an Express router with no
-// matching layer ends at.
+// The shape a later route takes is the one GET <tools>/stream took below: the
+// handler built once outside the closure — the guard chain and anything it
+// captures must not be rebuilt per request — behind ToolsProtectMiddleware
+// where the reference spreads ...protect, left nil when its feature flag is
+// off, and matched on the nil in the case itself, so that the flag is read once
+// and the switch carries no second copy of it. Anything the switch does not
+// recognise is a 404, which is what an Express router with no matching layer
+// ends at.
 //
 // The receiver is unused today and is not decoration: U25's inbound webhook
 // resolves the enabled action set through Config.Settings, which this Auth
@@ -394,12 +389,26 @@ func (a *Auth) ToolsHandler(cfg HTTPConfig) http.Handler {
 		page = SwaggerUIHandler(cfg.ToolsDocsBasePath() + DocsSpecPath)
 	}
 
+	// GET <tools>/stream (tools.router.ts:192-220), built once and wrapped in
+	// the reference's two middlewares in the reference's order: extractSseToken
+	// (:185-190), which is the posture and is documented in tools_stream.go,
+	// then the guard it spreads ...protect onto. Nil when the stream flag is
+	// off, which is the `if (stream)` at :184 — the nil-handler shape the two
+	// documentation routes above already use for their own flag, so the switch
+	// reads one flag per route in one place.
+	var stream http.Handler
+	if cfg.Tools.Features().Stream {
+		stream = ToolsSseTokenMiddleware(ToolsProtectMiddleware(cfg)(a.toolsStreamHandler(cfg)))
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch rel := toolsRouterPath(r, cfg); {
 		// U23 adds POST <tools>/track/:eventName and POST <tools>/notify/:target
-		// here, U24 GET <tools>/stream, U25 GET <tools>/telemetry and
-		// POST <tools>/webhook/:provider. The documentation routes stay last,
-		// as the reference registers them last.
+		// here, U25 GET <tools>/telemetry and POST <tools>/webhook/:provider.
+		// The documentation routes stay last, as the reference registers them
+		// last.
+		case stream != nil && rel == ToolsStreamPath && isToolsRead(r):
+			stream.ServeHTTP(w, r)
 		case spec != nil && rel == DocsSpecPath && isToolsRead(r):
 			spec.ServeHTTP(w, r)
 		case page != nil && rel == DocsUIPath && isToolsRead(r):
