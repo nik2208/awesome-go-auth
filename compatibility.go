@@ -1025,6 +1025,210 @@ func CompatibilityNotes() APICompatibilityNotes {
 					},
 				},
 			},
+			{
+				ID:      "admin-console-requires-an-explicit-policy",
+				Title:   "An admin console with no access policy is not served at all",
+				Surface: "`HTTPConfig.Admin`: the whole admin surface under `Admin.Path`, `/admin` by default",
+				Behaviour: "Mounts nothing unless `HTTPConfig.AdminMounted()` — `Admin.Enabled` set " +
+					"*and* one of `Admin.AccessPolicy` or `Admin.Secret` configured. With the " +
+					"flag on and neither of those, no route under `Admin.Path` is registered and " +
+					"the console answers `404` everywhere, on all four adapters. The " +
+					"reference's own default is one call away and keeps its own name: " +
+					"`AccessPolicy: auth.AdminOpen()` serves every route to every caller, " +
+					"which is what `'open'` means there.",
+				Reference: "Builds the router regardless. The selection is `accessPolicy`, then " +
+					"`adminSecret`, then neither — and the third arm writes the line " +
+					"\"[awesome-node-auth] WARNING: createAdminRouter called without " +
+					"`accessPolicy` or `adminSecret`. Admin routes are unprotected. Set " +
+					"accessPolicy in production.\" to `process.stderr`, and installs a guard " +
+					"that calls `next()` for every request. The console, including every route " +
+					"that reads or writes the user table, is then served to anyone who can " +
+					"reach the port.",
+				Citations: []string{
+					"admin.router.ts:511-537",
+					"admin.router.ts:531-536",
+				},
+				Why: "Reproducing the reference including its quirks is the standing rule, and it " +
+					"is set aside here because the quirk is an open administrative console and " +
+					"because — uniquely in this register — reproducing it costs a deployment " +
+					"nothing to move away from. `HTTPConfig.Admin` is new in this release, so " +
+					"there is no existing Go deployment whose configuration this can break: no " +
+					"host has ever set these fields, and the first host to set them reads the " +
+					"field doc while doing it. That is not true of the reference, whose " +
+					"`createAdminRouter` has shipped with this default since 1.8.0 and cannot " +
+					"withdraw it without breaking callers. " +
+					"The second half of the reasoning is that `process.stderr` has no " +
+					"counterpart here. This package writes diagnostics through " +
+					"`Config.Logger`, which defaults to nil and discards them, so a faithful " +
+					"port of the warning would be a line nobody sees in front of a door " +
+					"nobody closed. Refusing to mount is the same statement made where it " +
+					"cannot be missed, and `AdminMounted()` is exported so a host can turn " +
+					"the refusal into its own startup error in one line: " +
+					"`if cfg.Admin.Enabled && !cfg.AdminMounted() { log.Fatal(\"admin: no access policy\") }`. " +
+					"Choosing `AdminOpen()` explicitly also puts the decision in the " +
+					"deployment's own configuration, where a reviewer reading the host's " +
+					"source can see it, instead of in the absence of a field.",
+			},
+			{
+				ID:      "admin-unauthenticated-get-serves-only-the-login-form",
+				Title:   "The unauthenticated browser branch of the admin guard reaches the shell and nothing else",
+				Surface: "`HTTPConfig.Admin`: every route behind `AdminGuard.Protect`, and `GET <admin>/`",
+				Behaviour: "Honours the `adminNeedsAuth` marker on exactly one route: the HTML shell, " +
+					"which is the only thing that can render the built-in login form. Every " +
+					"other guarded route answers `401 {\"error\":\"Unauthorized\"}` to an " +
+					"unauthenticated request whatever its `Accept` header says. The shell " +
+					"rendered through that branch additionally carries no feature flags: " +
+					"`window.__ADMIN_CONFIG__` reports every `feat*` member as `false` and an " +
+					"empty `uploadBaseUrl`, so the page discloses the mount path and the login " +
+					"form and nothing about the deployment. The vendored `admin.js` reloads the " +
+					"page after a successful login, so it has the real flags before it draws a " +
+					"tab.",
+				Reference: "Sets `(req as any).adminNeedsAuth = true` and calls `next()` for **any** " +
+					"guarded `GET` whose `Accept` contains `text/html`, when no `loginPath` is " +
+					"configured. The marker is advisory: no handler behind the guard reads it " +
+					"except the shell, so `GET /admin/api/ping` and — as the rest of the admin " +
+					"API lands behind the same guard — `GET /admin/api/users` answer normally " +
+					"to a request carrying no credential at all. `curl -H 'Accept: text/html' " +
+					"…/admin/api/users` is the whole exploit. The shell it serves through the " +
+					"same branch carries the full feature object regardless.",
+				Citations: []string{
+					"admin.router.ts:309-325",
+					"admin.router.ts:709",
+					"admin.router.ts:741-743",
+					"admin.router.ts:748",
+				},
+				Why: "The branch exists so a browser arriving without a session sees a login form " +
+					"rather than a JSON `401`, and that purpose is served entirely by the one " +
+					"route that renders the form. Extending it to every `GET` is not a decision " +
+					"the reference makes anywhere in prose — the comment at the marker says " +
+					"\"so the UI router can show the built-in login form\" — it is the " +
+					"consequence of putting the marker on the request instead of on the route. " +
+					"Reproducing it would mean shipping a library whose admin API is readable " +
+					"by anyone who sets a request header, which is not a quirk a client can " +
+					"depend on but a hole a deployment can be breached through, and M8's " +
+					"remaining PRs all mount behind this same guard. " +
+					"Emptying the feature flags on that render is the same argument applied to " +
+					"the one thing the shell would otherwise disclose: the flag object is the " +
+					"body of `GET <admin>/api/ping`, a route that requires a session, so " +
+					"serving it beside the login form would hand out through the door what the " +
+					"lock next to it refuses. No client notices, because the SPA reloads after " +
+					"login. Under `Admin.Secret` the shell is unguarded by design and still " +
+					"carries the full object, exactly as there — this narrowing is the marker " +
+					"branch only.",
+			},
+			{
+				ID:      "admin-guard-accepts-only-typed-session-tokens",
+				Title:   "The admin guard accepts an admin token or an access token, and `isRoot` only on the first",
+				Surface: "`HTTPConfig.Admin`: the `Authorization: Bearer` and cookie credential every guarded admin route reads",
+				Behaviour: "Verifies HS256 over `Admin.JWTSecret` and then checks three claims the " +
+					"reference does not: `typ`, `iss` and — for the store lookup — `tid`. Two " +
+					"types are accepted. `typ: \"admin\"` is the token `POST <admin>/login` " +
+					"mints and the only one on which the `isRoot` claim is honoured; " +
+					"`typ: \"access\"` is an ordinary session token, which is the integration " +
+					"the reference documents when it says `jwtSecret` must match " +
+					"`AuthConfig.accessTokenSecret`, and on which `isRoot` is ignored outright. " +
+					"Everything else is not a credential: a refresh token, and the typed " +
+					"step-up token a user holds after a password and before a second factor, " +
+					"are both `401`.",
+				Reference: "Signs `{sub, email, isRoot}` with `expiresIn: '24h'` and verifies with a " +
+					"bare `jwt.verify(rawToken, jwtSecret)`. Nothing distinguishes one token " +
+					"from another, so every token that secret signs is an admin credential. " +
+					"The 2FA step-up token always is: it is `generateTokenPair(...).accessToken` " +
+					"with a five-minute expiry and no marking claim (auth.router.ts:563-566, " +
+					":572-575), signed with `config.accessTokenSecret`, which is the secret " +
+					"`jwtSecret` is documented as having to match. So a user who has proved a " +
+					"password and not the second factor the deployment requires can present " +
+					"that token to the console and be judged by the access policy as though the " +
+					"second factor had been given. The refresh token is signed with " +
+					"`config.refreshTokenSecret` there (token.service.ts:25-29) and is therefore " +
+					"a second admin credential only in a deployment that sets both secrets to " +
+					"one value — where it is one for seven days rather than five minutes. This " +
+					"port has a single Config.Secret, so refusing it here is not hypothetical. " +
+					"A payload carrying `isRoot: true` short-circuits the user-store lookup and " +
+					"the policy together, whatever minted it.",
+				Citations: []string{
+					"admin.router.ts:76-79",
+					"admin.router.ts:300",
+					"admin.router.ts:343-352",
+					"admin.router.ts:585",
+				},
+				Why: "This port already types its tokens and already refuses an untyped one: " +
+					"`typ` is a reserved claim `issueToken` writes after the " +
+					"`Config.BuildTokenClaims` merge precisely so that a hook cannot turn a " +
+					"step-up token into a session, which is the " +
+					"`temp-token-is-typed-not-an-access-token` deviation. A guard that verified " +
+					"a signature and stopped would be the one door in the building that " +
+					"reopened it, and it would reopen it on the console. The `iss` check is the " +
+					"same argument: `parseToken` refuses a token from another issuer on every " +
+					"other route, and the admin surface is not the place to start accepting " +
+					"one. " +
+					"Confining `isRoot` to the admin token is what makes the reference's " +
+					"bootstrap override safe to reproduce at all. A claim that bypasses the " +
+					"user store must have exactly one minter, and `POST <admin>/login` is it; " +
+					"without the type check the claim could also arrive on an access token, " +
+					"where `Config.BuildTokenClaims` is a host hook free to return any name " +
+					"the reserved set does not cover — so a mapping written for some unrelated " +
+					"purpose could grant the console. " +
+					"What it costs: a host that mints admin tokens with some third-party " +
+					"signer has to add `typ`, `iss` and an `exp`. The documented integration " +
+					"— the auth router's own login — is unaffected, because its tokens already " +
+					"carry all three.",
+			},
+			{
+				ID:      "admin-cookie-secure-flag-is-configured-not-forwarded",
+				Title:   "The admin session cookie's `Secure` flag and name come from the configuration, never from a request header",
+				Surface: "`POST <admin>/login` and `POST <admin>/logout`: the `Set-Cookie` they write",
+				Behaviour: "Derives both the `Secure` attribute and the `__Host-` / `__Secure-` prefix " +
+					"from `CookieOptions.Secure`, `CookieOptions.Path` and " +
+					"`CookieOptions.Domain` — `CookieOptions.CookieName`, the same function the " +
+					"auth routes name their own cookies with, whose `Secure` defaults to `true` " +
+					"here. `X-Forwarded-Proto` is read nowhere and changes nothing. " +
+					"`AdminOptions.CookiePrefix` still overrides the prefix outright, as there, " +
+					"and the `__Host-` requirements (`Secure`, `Path=/`, no `Domain`) are " +
+					"reapplied after it. The guard's read order is unchanged: " +
+					"`__Host-accessToken`, `__Secure-accessToken`, `accessToken`.",
+				Reference: "Computes `isSecure` per request as `req.secure || req.headers['x-forwarded-proto'] " +
+					"=== 'https'` and feeds it to `resolveAdminCookieName`, so a request header " +
+					"decides both whether the cookie carrying a 24-hour admin session is marked " +
+					"`Secure` and which of the three names it is written under. The failure is " +
+					"bidirectional: a spoofed `https` over plaintext writes a `Secure`, " +
+					"possibly `__Host-` cookie the browser then drops, and a genuine TLS " +
+					"deployment whose proxy does not set the header writes a bare, non-`Secure` " +
+					"`accessToken` holding that same session.",
+				Citations: []string{
+					"admin.router.ts:218-231",
+					"admin.router.ts:243-252",
+					"admin.router.ts:591",
+					"admin.router.ts:601-611",
+					"admin.router.ts:619",
+				},
+				Why: "`HTTPConfig.ClientIP` settled this class of question a release ago and in this " +
+					"direction: a forwarded header is only as trustworthy as the trust " +
+					"configuration behind it, that configuration is the host's knowledge, and " +
+					"this package ships no parser that would pretend otherwise. Here the seam " +
+					"the host needs already exists and is already being read three cookies " +
+					"over — `CookieOptions.Secure` is the operator's statement about the " +
+					"deployment — so honouring the header would mean letting a caller " +
+					"contradict the operator about one cookie and not the other three. " +
+					"It also removes a way for the login route and the guard to disagree: the " +
+					"reference's own `resolveAdminCookieName` comment says it exists so that " +
+					"\"the guard reads exactly the cookie that was written by the admin login " +
+					"handler\", which holds only while every request agrees about `isSecure`, " +
+					"and a proxy that sets the header on some paths and not others breaks it. " +
+					"The direction of the difference is the safe one in the case that matters: " +
+					"where the reference would emit a non-`Secure` admin session cookie, this " +
+					"port emits a `Secure` one.",
+				Notes: []DeviationNote{
+					{
+						Label: "Matching the reference exactly",
+						Text: "Not available from configuration, deliberately. A deployment " +
+							"terminating TLS at a proxy sets `Cookies.Secure` — its default — " +
+							"and gets the right answer on every request without a header; one " +
+							"genuinely serving plain HTTP sets it to false and says so once, " +
+							"in its own source, instead of per request from outside.",
+					},
+				},
+			},
 		},
 	}
 }
