@@ -78,6 +78,7 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("JWKS", func(t *testing.T) { testJWKS(t, mount) })
 	t.Run("OIDC", func(t *testing.T) { testOIDC(t, mount) })
 	t.Run("UIConfig", func(t *testing.T) { testUIConfig(t, mount) })
+	t.Run("UIPages", func(t *testing.T) { testUIPages(t, mount) })
 	t.Run("ResourceServerGating", func(t *testing.T) { testResourceServerGating(t, mount) })
 	t.Run("OpenAPI", func(t *testing.T) { testOpenAPI(t, mount) })
 	t.Run("RateLimit", func(t *testing.T) { testRateLimit(t, mount) })

@@ -126,10 +126,20 @@ func (ad *Adapter) Mount(group *echo.Group) {
 
 	// The built-in UI, mounted only when it is enabled — the reference gates its
 	// whole ui router on config.ui.enabled (auth.router.ts:1639-1648). Echo
-	// serves the shared net/http handler, which arrives already wrapped in the
-	// CSRF middleware.
+	// serves the shared net/http handler for the whole subtree, as the reference
+	// mounts one router there, and it arrives already wrapped in the CSRF
+	// middleware.
+	//
+	// Two patterns because echo's wildcard does not match the bare mount path,
+	// where Express serves the login page. HEAD is registered next to GET
+	// because echo, unlike net/http and Express, does not fall back from one to
+	// the other, and the static half of this router answers HEAD.
 	if ad.cfg.UI.Enabled {
-		group.GET(prefix+auth.UIConfigRoute, serveHTTP(h.UIConfigHandler()))
+		ui := serveHTTP(h.UIHandler())
+		group.GET(prefix+auth.UIRoute, ui)
+		group.HEAD(prefix+auth.UIRoute, ui)
+		group.GET(prefix+auth.UIRoute+"/*", ui)
+		group.HEAD(prefix+auth.UIRoute+"/*", ui)
 	}
 
 	if !ad.cfg.ResourceServer {

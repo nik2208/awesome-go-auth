@@ -806,6 +806,60 @@ revision the whole contract was extracted from.
   rather than panicking. There is no knob that restores the reference's
   propagation, because a bus whose delivery semantics depend on configuration is
   a bus no downstream consumer can reason about.
+
+### The SSR-injected `__AUTH_CONFIG__` is HTML-escaped JSON, and cannot be broken out of
+
+`ui-ssr-config-json-is-html-escaped`
+
+- **Surface**: `GET <prefix>/ui/<page>`, the
+  `<script>window.__AUTH_CONFIG__ = …</script>` block.
+- **This port**: Serialises the config object with `encoding/json` at its
+  default settings, which escape `<`, `>` and `&` as `\u003c`, `\u003e` and
+  `\u0026`. Any `</script>` inside `siteName`, `logoUrl` or `customCss`
+  therefore reaches the browser as `\u003c/script\u003e`: it stays inside the
+  string, the script block ends where the server put its `</script>`, and the
+  value `JSON.parse` yields is character for character the one that was
+  configured. The bytes on the wire differ from the reference's whenever any
+  string in the document contains one of those three characters — a `customCss`
+  with a child selector is enough.
+- **The reference**: Writes `JSON.stringify(config)` straight into the
+  `<script>` block. `JSON.stringify` escapes nothing for HTML, and a `<script>`
+  element is terminated by the byte sequence `</script>` wherever it appears,
+  quoted or not — so a `siteName` of `x</script><img src=x onerror=…>` closes
+  the block and the rest is parsed as markup and runs. The same page
+  HTML-escapes that identical `siteName` five characters at a time before
+  putting it in `<title>` and `<h1 class="site-name">`, so the omission is in
+  one sink rather than a decision about the value (`ui.router.ts:272`,
+  `ui.router.ts:217-226`).
+- **Why**: Reproducing the reference including its quirks is the standing rule
+  here, and this is the register that exists for the cases where it is set
+  aside. It is set aside because the cost and the benefit are as lopsided as
+  they get. What reproducing it buys is byte-identical output for configurations
+  containing `<`, `>` or `&`; what it costs is an HTML injection into every page
+  this port serves, reachable by whoever can set the branding. No client can
+  observe the difference: `\u003c` and `<` are the same character to
+  `JSON.parse`, so `window.__AUTH_CONFIG__` is the identical object either way,
+  and the escaping is visible only to something reading the raw bytes of the
+  HTML — which is not what the family's clients do with this block. Turning the
+  escaping off would have taken an explicit `Encoder.SetEscapeHTML(false)`, so
+  keeping it is also the reading where the unsafe behaviour is the one that has
+  to be asked for. The direction of the difference matters too: this is the only
+  entry in this register where the port is *stricter* than the reference, and a
+  deployment cannot be broken by a hole being closed.
+- **Matching the reference exactly**: Not available from configuration, and
+  deliberately so. A host that needs the exact bytes serves its own page:
+  `UIOptions.Assets` takes any `fs.FS`, and `(*Auth).UIConfig` returns the same
+  document to marshal however it likes.
+- **The two sinks this does not close**: `customCss` is written into a second
+  `<style>` element unescaped and `logoUrl` into an `<img src="…">` attribute
+  unescaped, both exactly as the reference writes them, because there escaping
+  would change what renders rather than only how it is encoded.
+  `UIOptions.CustomCSS` is read from the static configuration alone and is
+  therefore the host's own code; `logoUrl` can also come from a `SettingsStore`,
+  whose only writer in this release is the host's own code, since the admin
+  panel that would let an operator write one arrives in M8. A deployment that
+  lets a lower-privileged actor write either value is trusting that actor with
+  the auth origin.
 <!-- END GENERATED: deviations -->
 
 ## Parity Snapshot vs `awesome-node-auth`

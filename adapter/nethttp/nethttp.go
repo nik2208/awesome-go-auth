@@ -115,10 +115,19 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 	}
 
 	// The built-in UI, mounted only when it is enabled — the reference gates its
-	// whole ui router on config.ui.enabled (auth.router.ts:1639-1648). The config
-	// document is the only part of it this port serves; handler in ui.go.
+	// whole ui router on config.ui.enabled (auth.router.ts:1639-1648). One
+	// handler for the whole subtree, as there; handler in ui.go.
+	//
+	// Two patterns because net/http's subtree pattern does not cover its own
+	// root: with only "<prefix>/ui/" registered, a request for "<prefix>/ui"
+	// gets a 301 to the trailing-slash form, where Express serves the login page
+	// at both. GET only, as the reference's router serves nothing else — its
+	// catch-all next()s every non-GET and its static layer handles GET and HEAD
+	// — and net/http routes HEAD to a GET pattern itself.
 	if a.cfg.UI.Enabled {
-		mux.Handle("GET "+prefix+auth.UIConfigRoute, a.UIConfigHandler())
+		ui := a.UIHandler()
+		mux.Handle("GET "+prefix+auth.UIRoute, ui)
+		mux.Handle("GET "+prefix+auth.UIRoute+"/", ui)
 	}
 
 	if !a.cfg.ResourceServer {

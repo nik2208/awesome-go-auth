@@ -104,8 +104,15 @@ func main() {
 
 	// One call mounts every auth route under the configured prefix (/auth by
 	// default); echoAdapter.MountWithConfig takes an *echo.Group for a different
-	// prefix or cookie policy.
-	echoAdapter.Mount(e.Group(""), a)
+	// prefix or cookie policy — and, here, for the hosted UI.
+	//
+	// UI.Enabled mounts it at /auth/ui: the login, register, forgot-password and
+	// 2FA pages, the config document they boot from, and auth.js beside them.
+	// Branding is optional — with none, the pages render the library's defaults.
+	uiCfg := auth.DefaultHTTPConfig()
+	uiCfg.UI.Enabled = true
+	uiCfg.UI.Branding = auth.UIBranding{SiteName: "Echo + SQLite Example"}
+	echoAdapter.MountWithConfig(e.Group(""), a, uiCfg)
 
 	// ── 4. OAuth login ────────────────────────────────────────────────────
 	e.GET("/oauth/:provider/authorize", func(c echo.Context) error {
@@ -143,8 +150,12 @@ func main() {
 	})
 
 	// ── 5. Embedded UI ────────────────────────────────────────────────────
-	e.GET("/admin", echo.WrapHandler(auth.ServeAdminUI()))
-	e.GET("/auth.js", echo.WrapHandler(auth.ServeAuthJS()))
+	// The hosted pages are at /auth/ui (mounted above), and auth.js with them at
+	// /auth/ui/auth.js, which is where those pages load it from. What is left
+	// here is the admin dashboard: the reference's admin SPA is vendored and
+	// served under /auth/ui, but the admin API it calls is not mounted yet, so
+	// the hand-written page stays until that lands.
+	e.GET("/admin", echo.WrapHandler(auth.ServeAdminUI())) //nolint:staticcheck // no replacement until the admin router lands
 
 	addr := getEnv("ADDR", ":8080")
 	log.Printf("listening on %s", addr)

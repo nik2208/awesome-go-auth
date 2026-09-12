@@ -74,6 +74,7 @@ var wantDeviationIDs = []string{
 	"totp-issuer-defaults-to-config-issuer",
 	"totp-setup-omits-qrcode",
 	"ui-config-verify-email-follows-the-effective-mode",
+	"ui-ssr-config-json-is-html-escaped",
 }
 
 // wantClaims are the facts each entry has to keep stating. They are wire facts
@@ -146,6 +147,17 @@ var wantClaims = map[string][]string{
 	"event-handler-panic-does-not-fail-the-publisher": {
 		"EventEmitter", "recover", "500", "EventBus.Publish",
 		"remaining handlers", "goroutine",
+	},
+	// Both behaviours, the escape sequence itself, the sink, and — the part a
+	// reword must not lose — that the difference is invisible to JSON.parse and
+	// that turning the escaping off is what would have taken a deliberate call.
+	// An entry keeping only "the bytes differ" reads as an incompatibility to
+	// fix rather than a hole deliberately left closed. The last claim keeps the
+	// two sinks that are *not* closed on the record, so that the M8 admin panel
+	// has to decide about them rather than inherit them.
+	"ui-ssr-config-json-is-html-escaped": {
+		"window.__AUTH_CONFIG__", "JSON.stringify", `<`, "</script>",
+		"JSON.parse", "SetEscapeHTML(false)", "siteName", "customCss", "logoUrl",
 	},
 }
 

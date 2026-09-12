@@ -2570,9 +2570,15 @@ cfg.UI = auth.UIOptions{
 nethttpadapter.MountWithConfig(mux, a, cfg)
 ```
 
-Nothing else is mounted yet: the HTML pages, the static assets and the uploaded
-logos the reference's UI router also serves are a later change, and
-`UIOptions.Assets` and `UIOptions.Uploads` are where they will read from.
+That one flag mounts the whole of the reference's UI router at `<prefix>/ui`,
+not just this route — the HTML pages with the SSR config injection, the static
+assets and the uploaded logos come with it. See
+[The hosted UI](#the-hosted-ui-prefixui) below; `UIOptions.Assets` and
+`UIOptions.Uploads` are where the last two read from.
+
+The route itself is served by the same handler it has been since v0.7.0, reached
+through that mount rather than registered separately, which is where the
+reference has it too.
 
 The route is public — the login page fetches it before any session exists — and
 answers `200` with these six keys, in this order:
@@ -2655,6 +2661,68 @@ the family's clients are written against the document as it is
 (reference-issues N32). The error is logged through `Config.Logger` on the way
 past, since the client is told nothing.
 
+### The hosted UI (`<prefix>/ui`)
+
+`HTTPConfig.UI.Enabled` mounts the reference's whole `ui.router.ts` — one
+handler, `UIHandler`, registered by each adapter on the `<prefix>/ui` subtree.
+It answers `GET` (and `HEAD`, for files) and nothing else; every other method
+falls through to whatever the router does with an unknown route.
+
+Four layers, in the reference's order, which is behaviour rather than style:
+
+1. **`GET <prefix>/ui/config`** — the document above, served by the handler it
+   has always had.
+2. **Headless.** With `UIOptions.Headless` set, the handler serves the config
+   route and the static assets and stops: no HTML page is served at all, because
+   the hosting SPA provides its own login UI. A headless deployment that still
+   answered `login.html` would be a different product, so the early return is
+   reproduced exactly — and the uploaded assets below are on the far side of it,
+   so they are not served either.
+3. **Uploaded assets**, when `UIOptions.Uploads` is set: the same `fs.FS` under
+   both `<prefix>/ui/assets/logo/` and `<prefix>/ui/assets/uploads/`, the legacy
+   path and the unified one. Unset — the default — serves neither rather than
+   failing; a file the directory does not hold falls through to the same `404`.
+4. **The SSR catch-all, then static serving.** A `GET` for a path with no file
+   extension is a page: `<page>.html` if it exists, otherwise the first of
+   `login.html`, `index.html`, `index.csr.html` that does, so no extensionless
+   path under the mount answers `404`. Anything else is looked up as a file in
+   `UIOptions.Assets` and served verbatim, or `404`s.
+
+**The SSR injection** is what makes a vendored page usable before `auth.js` has
+fetched anything. Into each page it writes: a `<style>:root{…}</style>` block
+carrying `--primary-color` and `--input-focus` (both from `primaryColor`),
+`--secondary-color`, `--bg-color`, `--card-bg` and `--bg-image` as `url("…")`
+with `'`, `"` and `\` percent-encoded; `customCss` in a second `<style>`; the
+HTML-escaped `siteName` into `<title>` and into `<h1 class="site-name">`;
+`logoUrl` into the logo tag, which the pages ship hidden and which the
+substitution reveals; a readiness splash; and
+`window.__AUTH_CONFIG__ = <the same document>` before `</head>`. Pages are sent
+as `text/html; charset=utf-8` with
+`Cache-Control: no-store, no-cache, must-revalidate, max-age=0`; static files
+carry express-static's `public, max-age=0`. If the injection fails the page is
+sent unmodified, as there.
+
+The config object is serialised with `encoding/json` at its defaults, which
+escape `<`, `>` and `&` — a deliberate deviation from the reference's bare
+`JSON.stringify`, registered as `ui-ssr-config-json-is-html-escaped`. See the
+deviations section of the main README.
+
+#### `(*Auth).UIHandler(cfg HTTPConfig, configRoute http.Handler) http.Handler`
+
+The router as a value, for a host mounting the UI somewhere of its own.
+`configRoute` serves the router-relative `/config`; the adapters pass their own
+config handler, and passing `nil` leaves that path to the catch-all, which would
+render `login.html` at it.
+
+#### `UIOptions.Assets` and `UIOptions.Uploads`
+
+Both are `fs.FS`. `Assets` is the reference's `uiAssetsDir` and defaults to
+`UpstreamUIAssetFS()`; a host that supplies its own set replaces the built-in
+one outright, with no per-file fallback. `Uploads` is its `uploadDir` and is
+read-only: the `UploadStore` that writes into it lands in U15, and making the
+read side an `fs.FS` now means that store has to supply one rather than this
+seam having to change shape.
+
 ### `(*Auth).UIConfig(ctx, r *http.Request, cfg HTTPConfig) UIConfig`
 
 The document as a value, for a host serving its own UI route. `r` supplies the
@@ -2709,11 +2777,24 @@ freshly built on every call.
 
 ### `ServeAdminUI() http.Handler`
 
-Serves `ui/admin.html` — a single-page admin dashboard with sections for Users, Sessions, Tenants, Roles, API Keys, Telemetry, and OpenAPI reference.
+**Deprecated — removed in v1.0.0.** No replacement until the admin router lands
+in M8: the reference's admin SPA is vendored and served under `<prefix>/ui`, but
+it calls an admin API no adapter mounts yet.
+
+Serves `ui/admin.html` — this port's own single-page admin dashboard, with
+sections for Users, Sessions, Tenants, Roles, API Keys, Telemetry, and OpenAPI
+reference. Nothing inside the module serves it.
 
 ### `ServeAuthUI() http.Handler`
 
-Serves `ui/auth.html` — a complete auth UI with Login, Register, Magic Link, Forgot Password, and TOTP forms. Integrates with `auth.js`.
+**Deprecated — removed in v1.0.0.** Set `HTTPConfig.UI.Enabled` instead and the
+adapter mounts `<prefix>/ui`, which serves the reference's own login page with
+the branding, the site name, the logo and the config already in the document.
+
+Serves `ui/auth.html` — this port's hand-written auth UI, with Login, Register,
+Magic Link, Forgot Password and TOTP forms — raw, with no injection of any kind.
+The page fetches `<prefix>/ui/config` for itself, so it works, but it flashes
+unstyled and it is not the page the family's deployments show.
 
 ### `ServeAuthJS() http.Handler`
 

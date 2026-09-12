@@ -75,11 +75,21 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 	}
 
 	// The built-in UI, mounted only when it is enabled — the reference gates its
-	// whole ui router on config.ui.enabled (auth.router.ts:1639-1648). The
-	// handler arrives already wrapped in the CSRF middleware, so it mounts with
-	// r.Method rather than r.With(csrf).MethodFunc.
+	// whole ui router on config.ui.enabled (auth.router.ts:1639-1648). One
+	// handler for the whole subtree, as there, and it arrives already wrapped in
+	// the CSRF middleware, so it mounts with r.Method rather than
+	// r.With(csrf).MethodFunc.
+	//
+	// Two patterns because chi's wildcard does not match the bare mount path,
+	// where Express serves the login page. HEAD is registered next to GET
+	// because chi, unlike net/http and Express, does not fall back from one to
+	// the other, and the static half of this router answers HEAD.
 	if resolved.UI.Enabled {
-		r.Method(http.MethodGet, prefix+auth.UIConfigRoute, h.UIConfigHandler())
+		ui := h.UIHandler()
+		r.Method(http.MethodGet, prefix+auth.UIRoute, ui)
+		r.Method(http.MethodHead, prefix+auth.UIRoute, ui)
+		r.Method(http.MethodGet, prefix+auth.UIRoute+"/*", ui)
+		r.Method(http.MethodHead, prefix+auth.UIRoute+"/*", ui)
 	}
 
 	if !resolved.ResourceServer {

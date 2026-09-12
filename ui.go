@@ -8,7 +8,33 @@ import (
 //go:embed ui/admin.html ui/auth.html ui/auth.js
 var uiFS embed.FS
 
+// This file is the port's own hand-written UI, which nothing in this module
+// serves any more.
+//
+// Until v0.9.0 these three handlers were the whole of it: two pages someone
+// wrote by reading the reference rather than copying it, and an SDK written
+// against this port's routes. U10 vendored the reference's own fourteen assets
+// (ui_upstream.go) and pointed ServeAuthJS at them; U11 mounted the reference's
+// whole ui router at <prefix>/ui (ui_pages.go), which serves the vendored pages
+// with the config injection those pages expect. The two page handlers below
+// have no caller left inside the module and are kept only so that a host which
+// mounted them on its own mux keeps compiling.
+//
+// All three go in v1.0.0 (U26), together with ui/admin.html, ui/auth.html,
+// ui/auth.js, the uiFS embed and the contract tests in ui_test.go that are
+// written against those three files.
+
 // ServeAdminUI returns an http.Handler serving the embedded admin dashboard HTML.
+//
+// The page is this port's own, not the reference's. The reference's admin SPA
+// is vendored as admin.js and admin.css and is served by UIHandler along with
+// everything else under <prefix>/ui — but it calls an admin API that no adapter
+// mounts until M8, so it is bytes on disk rather than a working dashboard, and
+// this hand-written page is neither replaced nor removed in this release.
+//
+// Deprecated: this page is not maintained and nothing in this module serves it.
+// It will be removed in v1.0.0; there is no drop-in replacement until the admin
+// router lands in M8.
 func ServeAdminUI() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, err := uiFS.ReadFile("ui/admin.html")
@@ -21,7 +47,17 @@ func ServeAdminUI() http.Handler {
 	})
 }
 
-// ServeAuthUI returns an http.Handler serving the embedded auth UI HTML (login/register).
+// ServeAuthUI returns an http.Handler serving the embedded auth UI HTML
+// (login/register).
+//
+// It serves this port's hand-written page, and it serves it raw: no branding,
+// no site name, no logo, no injected config. The page fetches
+// <prefix>/ui/config for itself, so it works, but it flashes unstyled and it is
+// not the page the family's deployments show.
+//
+// Deprecated: mount the UI instead — set HTTPConfig.UI.Enabled and the adapter
+// registers <prefix>/ui, where UIHandler serves the reference's own login page
+// with the SSR config injection. This function will be removed in v1.0.0.
 func ServeAuthUI() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, err := uiFS.ReadFile("ui/auth.html")
@@ -51,11 +87,12 @@ func ServeAuthUI() http.Handler {
 // wants bearer delivery can still ask for it — but it can no longer ask for it
 // through this SDK. See the v0.9.0 CHANGELOG entry.
 //
-// Deprecated: use the vendored asset directly — UpstreamUIAssetFS(), or
-// ReadUpstreamUIAsset("auth.js") — or the UI handler U11 introduces, which
-// serves the whole vendored set with the SSR config injection the reference's
-// pages expect. This function is a thin wrapper kept so that existing importers
-// keep compiling, and it will be removed in v1.0.0.
+// Deprecated: set HTTPConfig.UI.Enabled and let the adapter mount <prefix>/ui,
+// where UIHandler serves this same file — and the rest of the vendored set,
+// with the SSR config injection the reference's pages expect — at the path
+// those pages actually load it from. Or read it directly: UpstreamUIAssetFS(),
+// or ReadUpstreamUIAsset("auth.js"). This function is a thin wrapper kept so
+// that existing importers keep compiling, and it will be removed in v1.0.0.
 func ServeAuthJS() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, err := ReadUpstreamUIAsset("auth.js")
