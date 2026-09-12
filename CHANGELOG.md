@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`WebhookStore`, `WebhookConfig` and `MemoryWebhookStore` — the webhook
+  subscription seam.** The reference's `IWebhookStore`, `WebhookConfig` and
+  `OutgoingWebhookEvent` (`webhook-store.interface.ts:4-150`) as a store seam:
+  where webhook subscriptions are held, so that they stop being a list a host
+  hard-codes at construction time. `WebhookStore.FindByEvent` is the one
+  required method, and it is the only filter in the chain — the reference's emit
+  path hands every configuration it returns straight to the sender, which
+  re-checks neither `isActive` nor `events` (`auth-tools.ts:250-267`,
+  `webhook-sender.ts:17-46`) — so its three rules are stated on the interface
+  and implemented once, in the exported `WebhookConfig.Matches`: active
+  configurations only; a non-empty `tenantID` returns both the tenant's and the
+  global webhooks, an empty one the global webhooks alone; and an `events` entry
+  matches literally or is `*`, an empty list matching nothing. `MemoryWebhookStore`
+  returns configurations in the order they were added, and that is the normative
+  order for this package — a store that cannot reproduce it says so.
+  `listAll?`, `add?`, `remove?` and `update?` are `WebhookAdminStore`, and
+  `findByProvider?` is `InboundWebhookStore`: narrow interfaces a caller
+  type-asserts the configured store to, the way `SessionAdminStore` already
+  works. `isActive`, `maxRetries` and `retryDelayMs` are pointers, because the
+  reference resolves all three with `??` and a stored `0` means "deliver once,
+  never retry" rather than "unset"; `Active`, `Retries` and `RetryDelay` apply
+  the documented defaults in one place.
+  Three things this deliberately does not do. It does not touch
+  `WebhookDispatcher`: that type keeps its `X-Signature-SHA256` header and its
+  own envelope until U19 (M9) replaces both, as a BREAKING change, with the
+  reference's `X-Webhook-Signature` — so the two shapes coexist for now and
+  nothing is wired into `Dispatch`. It mounts no route: the admin Webhooks
+  screens are U14 (M8) and the tools router is M9, and no adapter changed. And
+  it runs no script: `WebhookConfig` carries `provider`, `allowedActions` and
+  `jsScript`, which in the reference feed a `vm` sandbox, as plain data that a
+  store must round-trip and never interpret — execution lives out of process
+  behind an `InboundScriptRunner` seam (U25), with an IAM role as the real
+  sandbox, because a JavaScript engine in this address space would sit beside
+  the signing keys. Carrying them now is the bargain `AuthCode.CodeChallenge`
+  already strikes: a store written today needs no schema change when M9 arrives.
+  Nothing in the library reads a `WebhookStore` yet, no wire surface changed,
+  and no entry was added to the deviation register.
+
 ## [0.7.0] - 2026-09-12
 
 The seams a host needs and the surfaces a browser needs. The generated OpenAPI
