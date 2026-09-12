@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-12
+
+The hosted UI, and it is the reference's own rather than this port's imitation
+of it. All fourteen assets are vendored byte for byte — the git object names are
+identical to upstream's, so the identity is by construction and not by a hash
+comparison — and a drift check fails on a changed file, an added one, a removed
+one, a wrong count, and on CRLF re-mangling, which gets its own message because
+its fix is the `.gitattributes` entry rather than a re-vendor.
+
+`UIHandler` serves them the way `ui.router.ts` does: the config document, the
+headless short-circuit that serves assets and no HTML at all, the uploaded
+assets, the SSR catch-all with its page mapping and its three fallbacks, and
+static serving underneath. The injection is reproduced replacement by
+replacement, including the CSS variables, the escaped site name, the logo swap
+and the readiness splash.
+
+One place this port is deliberately stricter than the reference, and it is in
+the register as `ui-ssr-config-json-is-html-escaped`: the injected
+`__AUTH_CONFIG__` is serialised with `encoding/json` at its defaults, so a
+`</script>` inside a branding string cannot end the block. The two sinks the
+reference also has and this release does not close — `customCss` and `logoUrl`,
+both unescaped because escaping them changes what renders — are named in that
+entry rather than left to be discovered.
+
+The event plane is laid but not yet speaking: the `identity.*` vocabulary, the
+payload fields the reference's bus carries, and a request-context carrier the
+four adapters install outermost, so that a correlation id, a client address and
+a user agent survive from the request to whatever publishes. Nothing publishes
+yet — that is the next milestone, and it is the milestone that finally gives
+`EventBus.Publish` a caller.
+
+One note for operators reading the gin adapter: `<prefix>/ui/config` is no
+longer registered as a route of its own by any adapter. It is served by
+`UIHandler`, which is where the reference puts it. The document, its headers and
+its CSRF behaviour are unchanged, and the conformance suite holds all four
+adapters to the same answer.
+
 ### Added
 - **The hosted UI is served** (`ui_pages.go`, `UIHandler`).
   `HTTPConfig.UI.Enabled` now mounts the whole of the reference's
