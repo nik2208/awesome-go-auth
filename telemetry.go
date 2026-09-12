@@ -44,8 +44,15 @@ type TelemetryStore interface {
 // (telemetry-store.interface.ts:30-39).
 //
 // SessionID is the reference's `sessionId` (:34), added with the field it
-// filters on. The reference's `offset` still has no counterpart here, which
-// predates this change and is a gap rather than a decision.
+// filters on.
+//
+// Offset is the reference's `offset` (:38), and it arrived with the route that
+// sends it: GET <tools>/telemetry reads `limit` and `offset` from the query
+// string and passes both to the store (tools.router.ts:240-241), so a filter
+// that could not carry the second would answer page one to every request.
+// Implementing it is part of the TelemetryStore contract rather than an
+// optimisation — a store that ignores it does not paginate, and its caller has
+// no way to find out.
 type TelemetryFilter struct {
 	UserID    string
 	TenantID  string
@@ -54,6 +61,12 @@ type TelemetryFilter struct {
 	Since     time.Time
 	Until     time.Time
 	Limit     int
+	// Offset is the number of matching events to skip before the page begins.
+	// Zero is the first page. It is applied after every other member has
+	// filtered and before Limit counts, which is the order the reference's own
+	// example query implies and the only order under which the two compose into
+	// pages.
+	Offset int
 }
 
 // MemoryTelemetryStore is an in-memory implementation of TelemetryStore.
@@ -78,6 +91,10 @@ func (m *MemoryTelemetryStore) Query(_ context.Context, f TelemetryFilter) ([]Te
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var out []TelemetryEvent
+	// skipped counts the matches Offset drops. A negative offset skips nothing,
+	// which is what an out-of-range offset does to a SQL OFFSET and what the
+	// route's unclamped parseInt can produce.
+	skipped := 0
 	for _, e := range m.events {
 		if f.UserID != "" && e.UserID != f.UserID {
 			continue
@@ -95,6 +112,10 @@ func (m *MemoryTelemetryStore) Query(_ context.Context, f TelemetryFilter) ([]Te
 			continue
 		}
 		if !f.Until.IsZero() && e.Timestamp.After(f.Until) {
+			continue
+		}
+		if skipped < f.Offset {
+			skipped++
 			continue
 		}
 		out = append(out, e)

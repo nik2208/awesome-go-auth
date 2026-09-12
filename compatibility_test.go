@@ -70,6 +70,7 @@ var wantDeviationIDs = []string{
 	"event-handler-panic-does-not-fail-the-publisher",
 	"forgot-password-succeeds-on-delivery-failure",
 	"identity-events-are-raised-from-the-development-line",
+	"inbound-webhook-script-runs-out-of-process",
 	"jwks-cors-wildcard-string-form",
 	"jwks-unknown-kid-refetch-is-rate-limited",
 	"link-request-exempts-bearer-from-csrf",
@@ -326,6 +327,17 @@ var wantClaims = map[string][]string{
 	"tools-request-bodies-are-typed": {
 		"400", "202", "map[string]any", "Record<string, unknown>",
 		"express.json", "<tools>/track", "<tools>/notify",
+	},
+	// The seam, the thing it replaces, and the three answers that are the whole
+	// of its contract. The claims keep: that no JavaScript runs here and what
+	// does instead; that the intersection of the two allowlists is resolved in
+	// the core; that a missing runner refuses rather than acknowledges, with the
+	// status a provider sees; and the split an implementation must not get
+	// backwards, between a script that threw and a runner that could not run one.
+	"inbound-webhook-script-runs-out-of-process": {
+		"InboundScriptRunner", "node:vm", "ScriptRunner",
+		"EnabledWebhookActions", "AllowedActions", "400", "onWebhook",
+		"no result", "redeliver", "timeout",
 	},
 	// Both directions of the reference's failure, the seam this port reads
 	// instead, and the precedent — ClientIP — that decided it.

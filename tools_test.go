@@ -337,18 +337,22 @@ func TestGenerateToolsOpenAPISpec(t *testing.T) {
 	})
 
 	t.Run("the mounted feature routes follow their own flags", func(t *testing.T) {
-		// Three path items so far: track and notify under their flags
-		// (openapi.ts:1385, :1456) and the stream under its own (:1493). The two
-		// U25 routes are described by nothing because they are mounted by
-		// nothing — a path item written ahead of its route would document an
-		// endpoint that answers 404, which is what the conformance suite exists
-		// to catch.
-		document := GenerateToolsOpenAPISpec(ToolsOpenAPIInfo{Telemetry: true, Notify: true, Stream: true, Webhook: true})
+		// All five path items now: track and notify under their flags
+		// (openapi.ts:1385, :1456), the stream under its own (:1493), the
+		// telemetry query under hasTelemetryQuery (:1418) and the inbound webhook
+		// under the webhook flag (:1525). Each arrived with the PR that mounted
+		// its route — a path item written ahead of one would document an endpoint
+		// that answers 404, which is what the conformance suite exists to catch.
+		document := GenerateToolsOpenAPISpec(ToolsOpenAPIInfo{
+			Telemetry: true, TelemetryQuery: true, Notify: true, Stream: true, Webhook: true,
+		})
 		paths := document["paths"].(map[string]any)
 		for path, method := range map[string]string{
-			DefaultToolsPath + ToolsTrackPath + "/{eventName}": "post",
-			DefaultToolsPath + ToolsNotifyPath + "/{target}":   "post",
-			DefaultToolsPath + ToolsStreamPath:                 "get",
+			DefaultToolsPath + ToolsTrackPath + "/{eventName}":  "post",
+			DefaultToolsPath + ToolsNotifyPath + "/{target}":    "post",
+			DefaultToolsPath + ToolsStreamPath:                  "get",
+			DefaultToolsPath + ToolsTelemetryPath:               "get",
+			DefaultToolsPath + ToolsWebhookPath + "/{provider}": "post",
 		} {
 			item, ok := paths[path].(map[string]any)
 			if !ok {
@@ -358,14 +362,70 @@ func TestGenerateToolsOpenAPISpec(t *testing.T) {
 				t.Errorf("%q is described without %s", path, strings.ToUpper(method))
 			}
 		}
-		if len(paths) != 3 {
-			t.Errorf("paths = %v, want exactly track, notify and the stream until U25 mounts its two", paths)
+		if len(paths) != 5 {
+			t.Errorf("paths = %v, want exactly the five feature routes", paths)
 		}
 
-		if off := GenerateToolsOpenAPISpec(ToolsOpenAPIInfo{Webhook: true}); len(off["paths"].(map[string]any)) != 0 {
-			t.Errorf("paths = %v, want none: all three flags are off", off["paths"])
+		if off := GenerateToolsOpenAPISpec(ToolsOpenAPIInfo{}); len(off["paths"].(map[string]any)) != 0 {
+			t.Errorf("paths = %v, want none: every flag is off", off["paths"])
 		}
 	})
+
+	t.Run("the telemetry query is described only with a store", func(t *testing.T) {
+		// hasTelemetryQuery is `telemetry && !!options.telemetryStore?.query`
+		// (openapi.ts:1378), which is the route's own mount condition
+		// (tools.router.ts:226): the telemetry flag alone documents track, not
+		// the query.
+		paths := GenerateToolsOpenAPISpec(ToolsOpenAPIInfo{Telemetry: true})["paths"].(map[string]any)
+		if _, ok := paths[DefaultToolsPath+ToolsTelemetryPath]; ok {
+			t.Errorf("the document describes the telemetry query with no store")
+		}
+		if _, ok := paths[DefaultToolsPath+ToolsTrackPath+"/{eventName}"]; !ok {
+			t.Errorf("the document does not describe track under the same flag")
+		}
+	})
+
+	t.Run("the inbound webhook carries no security", func(t *testing.T) {
+		// The one operation of this document with no bearer entry
+		// (openapi.ts:1526-1563), because the caller is a third-party provider
+		// with no credential to present. It is what the route's missing guard
+		// looks like in the document.
+		paths := GenerateToolsOpenAPISpec(ToolsOpenAPIInfo{Webhook: true})["paths"].(map[string]any)
+		item, ok := paths[DefaultToolsPath+ToolsWebhookPath+"/{provider}"].(map[string]any)
+		if !ok {
+			t.Fatalf("the document does not describe the inbound webhook")
+		}
+		if _, ok := item["post"].(map[string]any)["security"]; ok {
+			t.Errorf("the inbound webhook operation declares security, which the reference's does not")
+		}
+	})
+}
+
+func TestResolveInboundActions(t *testing.T) {
+	// ActionRegistry.buildContext's set arithmetic (webhook-action.ts:105):
+	// `new Set(allowedIds.filter(id => enabledIds.includes(id)))` — the
+	// intersection, in the allowed list's order, deduplicated. It is resolved in
+	// the core because it is the administrator's policy, and it is the only
+	// thing about the actions that crosses the seam.
+	for _, c := range []struct {
+		name             string
+		enabled, allowed []string
+		want             string
+	}{
+		{"neither list", nil, nil, ""},
+		{"nothing enabled globally", nil, []string{"a"}, ""},
+		{"nothing allowed for this webhook", []string{"a"}, nil, ""},
+		{"the intersection", []string{"a", "b", "c"}, []string{"b", "c", "d"}, "b,c"},
+		{"the allowed order wins", []string{"a", "b"}, []string{"b", "a"}, "b,a"},
+		{"duplicates collapse", []string{"a"}, []string{"a", "a"}, "a"},
+		{"disjoint", []string{"a"}, []string{"b"}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := strings.Join(resolveInboundActions(c.enabled, c.allowed), ","); got != c.want {
+				t.Errorf("resolveInboundActions(%v, %v) = %q, want %q", c.enabled, c.allowed, got, c.want)
+			}
+		})
+	}
 }
 
 // TestToolsPathParam pins the rule the two parameterised routes match on:
