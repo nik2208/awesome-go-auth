@@ -53,6 +53,10 @@ var updateREADME = flag.Bool("update", false,
 // deviation is added or retired, and it must be changed together with
 // CompatibilityNotes — after which README.md is regenerated, not edited.
 var wantDeviationIDs = []string{
+	"admin-console-requires-an-explicit-policy",
+	"admin-cookie-secure-flag-is-configured-not-forwarded",
+	"admin-guard-accepts-only-typed-session-tokens",
+	"admin-unauthenticated-get-serves-only-the-login-form",
 	"advertised-2fa-methods-require-store-support",
 	"config-require2fa-is-a-system-policy-term",
 	"cookie-max-age-follows-configured-ttl",
@@ -182,6 +186,41 @@ var wantClaims = map[string][]string{
 	"session-rotated-reports-one-session-id": {
 		"previousSessionId", "sessionId", "issueTokens", "revoke",
 		"single-use", "identity.session.rotated",
+	},
+	// M8's guard. These four are the security entries of the milestone and the
+	// claims are chosen so that a reword survives and a hollowing-out does not:
+	// each keeps the reference behaviour being declined, the mechanism that
+	// causes it, and the way back where there is one.
+	//
+	// The no-policy entry must keep both the refusal and the one-call escape,
+	// because an entry that dropped AdminOpen() would read as a capability this
+	// port removed rather than one it made explicit — and it must keep the
+	// reason the reference's own warning could not be ported, which is that
+	// Config.Logger discards by default.
+	"admin-console-requires-an-explicit-policy": {
+		"AdminMounted", "Admin.Enabled", "AccessPolicy", "adminSecret",
+		"404", "AdminOpen()", "process.stderr", "Config.Logger",
+	},
+	// Both halves of the branch — which route still reaches a handler and what
+	// every other route answers — plus the exploit shape, because an entry that
+	// kept only "the marker is narrowed" would not tell a reader what it is
+	// narrowed away from.
+	"admin-unauthenticated-get-serves-only-the-login-form": {
+		"adminNeedsAuth", "401", "text/html", "GET", "login form",
+		"/admin/api/users", "__ADMIN_CONFIG__", "Admin.Secret",
+	},
+	// The accepted set, the refused set, and the reason isRoot is confined —
+	// the last is what makes the reference's bootstrap override reproducible at
+	// all, so an entry that lost it would read as gratuitous strictness.
+	"admin-guard-accepts-only-typed-session-tokens": {
+		"typ", "iss", "jwt.verify", "isRoot", "refresh token", "second factor",
+		"BuildTokenClaims", "temp-token-is-typed-not-an-access-token",
+	},
+	// Both directions of the reference's failure, the seam this port reads
+	// instead, and the precedent — ClientIP — that decided it.
+	"admin-cookie-secure-flag-is-configured-not-forwarded": {
+		"X-Forwarded-Proto", "CookieOptions.Secure", "__Host-", "__Secure-",
+		"HTTPConfig.ClientIP", "resolveAdminCookieName", "CookiePrefix",
 	},
 }
 

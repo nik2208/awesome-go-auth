@@ -84,6 +84,7 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("RateLimit", func(t *testing.T) { testRateLimit(t, mount) })
 	t.Run("EventContext", func(t *testing.T) { testEventContext(t, mount) })
 	t.Run("Docs", func(t *testing.T) { testDocs(t, mount) })
+	t.Run("Admin", func(t *testing.T) { testAdmin(t, mount) })
 }
 
 // documentedRoutes is the operation set GenerateOpenAPISpec must describe,

@@ -161,6 +161,22 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 		mux.Handle("GET "+prefix+auth.DocsSpecPath, a.OpenAPIHandler())
 		mux.Handle("GET "+prefix+auth.DocsUIPath, a.SwaggerUIHandler())
 	}
+
+	// The admin console, mounted only when it is configured — Admin.Enabled and
+	// an access decision, which is what HTTPConfig.AdminMounted reports. It
+	// mounts at Admin.Path and not under prefix: the reference's admin router
+	// is a sibling of the auth router, not a child (admin.go).
+	//
+	// Two patterns, as for the UI, because net/http's subtree pattern does not
+	// cover its own root. Every method, unlike the UI: this router answers POST
+	// on /login and /logout as well as GET on the four read routes, and the
+	// handler itself is what 404s a method it does not serve.
+	if a.cfg.AdminMounted() {
+		admin := a.AdminHandler()
+		adminPath := a.cfg.AdminPath()
+		mux.Handle(adminPath, admin)
+		mux.Handle(adminPath+"/", admin)
+	}
 }
 
 // mountCredentialRoutes registers the nineteen routes that create, prove,

@@ -559,6 +559,19 @@ type HTTPConfig struct {
 	// set; see DocsOptions in docs.go for that field and for why it is a bool
 	// where the reference's option is also the string "auto".
 	Docs DocsOptions
+
+	// Admin mounts the admin console: the reference's createAdminRouter, which
+	// a host mounts beside the auth router rather than under it
+	// (admin.router.ts:496 onwards), so these routes sit at Admin.Path and not
+	// below APIPrefix. Nothing is registered unless HTTPConfig.AdminMounted()
+	// — Admin.Enabled *and* an access decision — and every admin path answers
+	// 404 otherwise.
+	//
+	// See AdminOptions in admin.go for the four access policies, for why the
+	// mount is a sibling of the API prefix, for why the surface carries none of
+	// the auth router's middleware, and for the one configuration this port
+	// refuses to serve.
+	Admin AdminOptions
 }
 
 // RateLimitMiddleware returns the configured rate limiter, or a pass-through
@@ -600,6 +613,10 @@ func (c HTTPConfig) Prefix() string {
 // that a cookie never outlives, or expires before, the token it carries.
 func (c HTTPConfig) resolve(accessTTL, refreshTTL time.Duration) HTTPConfig {
 	c.APIPrefix = c.Prefix()
+	// The admin mount is normalised the same way and at the same time, so that
+	// the four adapters and the handler behind them agree on one spelling of it
+	// — adminRouterPath strips exactly this string.
+	c.Admin.Path = c.AdminPath()
 	if strings.TrimSpace(c.Cookies.RefreshTokenPath) == "" {
 		c.Cookies.RefreshTokenPath = c.APIPrefix + "/refresh"
 	}

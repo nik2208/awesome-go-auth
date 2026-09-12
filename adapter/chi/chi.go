@@ -131,6 +131,23 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 		r.Method(http.MethodGet, prefix+auth.DocsUIPath, ui)
 		r.Method(http.MethodHead, prefix+auth.DocsUIPath, ui)
 	}
+
+	// The admin console, mounted only when it is configured — Admin.Enabled and
+	// an access decision, which is what HTTPConfig.AdminMounted reports. It
+	// mounts at Admin.Path and not under prefix: the reference's admin router
+	// is a sibling of the auth router, not a child (auth.AdminOptions).
+	//
+	// One shared net/http handler for the whole subtree, as for the UI, and two
+	// patterns because chi's wildcard does not match the bare mount path.
+	// r.Handle rather than r.Method: this router answers POST as well as GET,
+	// and the handler itself 404s a method it does not serve. It carries none
+	// of the auth router's middleware; adapter/nethttp/admin.go says why.
+	if resolved.AdminMounted() {
+		admin := h.AdminHandler()
+		adminPath := resolved.AdminPath()
+		r.Handle(adminPath, admin)
+		r.Handle(adminPath+"/*", admin)
+	}
 }
 
 // mountCredentialRoutes registers the nineteen routes that create, prove,

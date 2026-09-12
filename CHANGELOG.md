@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The admin console's skeleton: the access guard, its own login and logout, the
+  two static asset routes and the HTML shell, mounted at `HTTPConfig.Admin.Path`
+  — `/admin` by default, and a sibling of `APIPrefix` rather than a child of it,
+  because the reference's admin router is a second router the host mounts on its
+  own. `AdminGuard` ports `buildPolicyGuard` branch for branch: the four access
+  policies (`open`, `first-user`, `is-admin-flag`, and a host predicate handed
+  the user and the RBAC store), the `Authorization`-then-cookie extraction with
+  the `__Host-` / `__Secure-` / bare read order, the three-way unauthenticated
+  branch, the `isRoot` bootstrap override, and `first-user`'s `500` for a store
+  that cannot enumerate. `POST <admin>/login` accepts a configured root user, the
+  legacy `adminSecret` and the ordinary user store, in that order, and sets a
+  24-hour session cookie; `POST <admin>/logout` clears it. Everything M8 mounts
+  from here sits behind `AdminGuard.Protect`.
+
+  Four deliberate differences, all in the register and all in the same direction.
+  An admin block with no `AccessPolicy` and no `Secret` is **not mounted**, where
+  the reference serves the console unguarded after a warning on stderr — ask for
+  that by name with `AccessPolicy: auth.AdminOpen()`. The unauthenticated
+  browser branch reaches the login shell and nothing else, where the reference
+  lets *any* `Accept: text/html` GET through to *any* guarded route. The guard
+  accepts only a typed admin token or an access token, so a refresh token and the
+  pre-second-factor step-up token are not admin credentials, and `isRoot` is
+  honoured only on the token `<admin>/login` mints. And the session cookie's
+  `Secure` flag and prefix come from `CookieOptions`, never from
+  `X-Forwarded-Proto`.
+
 ## [0.9.0] - 2026-09-12
 
 The hosted UI, and it is the reference's own rather than this port's imitation

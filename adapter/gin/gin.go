@@ -211,6 +211,23 @@ func (ad *Adapter) Mount(group gin.IRoutes) {
 		group.GET(prefix+auth.DocsUIPath, ui)
 		group.HEAD(prefix+auth.DocsUIPath, ui)
 	}
+
+	// The admin console, mounted only when it is configured — Admin.Enabled and
+	// an access decision, which is what HTTPConfig.AdminMounted reports. It
+	// mounts at Admin.Path and not under prefix: the reference's admin router
+	// is a sibling of the auth router, not a child (auth.AdminOptions).
+	//
+	// One shared net/http handler for the whole subtree, as for the UI, and two
+	// patterns because gin's catch-all does not match the bare mount path.
+	// group.Any rather than a method list: this router answers POST as well as
+	// GET, and the handler itself 404s a method it does not serve. It carries
+	// none of the auth router's middleware; adapter/nethttp/admin.go says why.
+	if ad.cfg.AdminMounted() {
+		admin := serveHTTP(h.AdminHandler())
+		adminPath := ad.cfg.AdminPath()
+		group.Any(adminPath, admin)
+		group.Any(adminPath+"/*adminpath", admin)
+	}
 }
 
 // mountCredentialRoutes registers the nineteen routes that create, prove,
