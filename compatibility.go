@@ -1352,6 +1352,68 @@ func CompatibilityNotes() APICompatibilityNotes {
 					"three interfaces rather than only here.",
 			},
 			{
+				ID:      "admin-credential-listings-are-ordered",
+				Title:   "The two credential listings answer in a defined order, where the reference ships no implementation to have one",
+				Surface: "`HTTPConfig.Admin`: the credential reads — `GET <admin>/api/api-keys` and `GET <admin>/api/webhooks`",
+				Behaviour: "Answers in a total order, stated on the store interface rather than in the " +
+					"route, and the two orders differ because the two tables do. API keys come " +
+					"back **newest first: `CreatedAt` descending, ties broken by `ID` ascending** " +
+					"(`APIKeyAdminStore.ListAll`), because a key carries the `createdAt` the " +
+					"console shows and the key just minted is the one an operator came to look " +
+					"at; a record with a zero `CreatedAt` sorts last. Webhooks come back in " +
+					"**first-insertion order** (`WebhookAdminStore.ListWebhooks`), which is the " +
+					"order `MemoryWebhookStore` keeps and the one `WebhookStore.FindByEvent` " +
+					"already fans out in, because `WebhookConfig` carries no timestamp at all " +
+					"and inventing a column to sort on would be a different store contract. The " +
+					"`ID` tiebreak is the load-bearing half of the first: `CreatedAt` alone is " +
+					"not a total order — two keys can share an instant, and a column with second " +
+					"resolution will make them share it often — and `limit`/`offset` paging over " +
+					"a partial order repeats some rows and drops others. A store that cannot " +
+					"hold to either order may answer in its own, and owes its callers an entry " +
+					"like this one.",
+				Reference: "Declares no order for either, and ships no implementation of either method " +
+					"that could have one. `listAll?` is optional on `IApiKeyStore` and on " +
+					"`IWebhookStore` alike, described as needed \"only for admin management " +
+					"screens\", and nothing in the tree implements it — the example stores in " +
+					"those interfaces' own doc comments cover `findByEvent` and the mandatory " +
+					"finders and stop there. So the console's paging over these two tables is " +
+					"undefined against its own examples, exactly as `listUsers` is: the routes " +
+					"page positionally with `limit` and `offset` (`:1263-1265`, `:1372`) and " +
+					"report `total` as the best-effort expression at `:1288` and `:1383` rather " +
+					"than as a count, so a row can appear on two consecutive pages or on neither " +
+					"and nothing on the wire says so.",
+				Citations: []string{
+					"admin.router.ts:1265",
+					"admin.router.ts:1288",
+					"admin.router.ts:1372",
+					"admin.router.ts:1383",
+					"api-key-store.interface.ts:74-78",
+					"webhook-store.interface.ts:119-123",
+				},
+				Why: "This is `admin-listings-are-ordered-by-id`'s argument applied to the two " +
+					"listings that entry deliberately left out. It left them out because the " +
+					"orders are not that entry's — neither of these is ID ascending — and " +
+					"because neither was client-visible until a route served it, which is this " +
+					"release. " +
+					"The argument itself is unchanged: `offset` without an order is not paging, " +
+					"a positional cursor over an unordered set is a different set each time it " +
+					"is asked, and the resulting defect only manifests as missing rows, which is " +
+					"the one class of wire difference a client cannot detect and a reviewer " +
+					"cannot see. " +
+					"What is new is what the missing row *is* here. On the users table a row " +
+					"paged past is an account an operator did not see; on the key table it is a " +
+					"credential nobody revokes, and on the webhook table it is an endpoint still " +
+					"receiving identity events that nobody knows is subscribed. A console whose " +
+					"whole purpose on these two screens is to let an operator find and revoke " +
+					"cannot page over a set that reshuffles between pages. " +
+					"Nothing is given up by fixing it. No shipped client reads these routes — " +
+					"they are the admin SPA's, and the SPA renders whatever order it is sent — " +
+					"and an order is strictly more information than no order, so a consumer " +
+					"written against the reference cannot break on receiving one. The cost falls " +
+					"on a store implementor, which is why both orders are stated on the " +
+					"interfaces and not only here.",
+			},
+			{
 				ID:      "tools-router-requires-an-explicit-guard-decision",
 				Title:   "A tools router with no stated access posture is not served at all",
 				Surface: "`HTTPConfig.Tools`: the whole tools surface under `Tools.Path`, `/tools` by default",

@@ -19,6 +19,15 @@ type Auth struct {
 	// mount the JWKS route and the four OIDC endpoints; see JWKSHandler and
 	// (*IDP).OIDCMounts.
 	idp *IDP
+	// apiKeys and webhooks are nil unless WithAPIKeyStore and WithWebhookStore
+	// were supplied. Nothing in the Service reads either — an API key
+	// authenticates through APIKeyMiddleware, which is handed its store
+	// directly, and outgoing webhooks are the AuthTools facade's — so they sit
+	// here beside oauth rather than on Config: they are wiring the routers read,
+	// and the routers that read them are the admin console's credential half
+	// (admin_credentials.go) and the feature flags in front of it.
+	apiKeys  APIKeyStore
+	webhooks WebhookStore
 }
 
 // Option configures Auth initialization.
@@ -31,6 +40,8 @@ type authBuilder struct {
 	svcOpts  []ServiceOption
 	oauth    *OAuthWiring
 	idp      *IDP
+	apiKeys  APIKeyStore
+	webhooks WebhookStore
 }
 
 // New creates a configured Auth instance from the package defaults.
@@ -82,7 +93,13 @@ func NewWithConfig(cfg Config, opts ...Option) (*Auth, error) {
 		}
 		b.idp.authSvc = svc
 	}
-	return &Auth{service: svc, oauth: b.oauth, idp: b.idp}, nil
+	return &Auth{
+		service:  svc,
+		oauth:    b.oauth,
+		idp:      b.idp,
+		apiKeys:  b.apiKeys,
+		webhooks: b.webhooks,
+	}, nil
 }
 
 // Service exposes the configured core service.
@@ -486,6 +503,52 @@ func WithIDP(idp *IDP) Option {
 			return errors.New("auth: WithIDP: nil IDP")
 		}
 		b.idp = idp
+		return nil
+	}
+}
+
+// WithAPIKeyStore registers the API-key store the admin console's 🔑 tab is
+// served from: the reference's AdminOptions.apiKeyStore (admin.router.ts:121-124).
+//
+// It turns the apiKeys feature flag on — `!!options.apiKeyStore` (:653) — and it
+// is what the four routes under <admin>/api/api-keys answer 404 for when it is
+// absent. What the store can *do* is a second question those routes ask by type
+// assertion: without APIKeyAdminStore the listing is a 501 naming listAll, and
+// without APIKeyDeleteStore the hard delete revokes instead and says so.
+//
+// It is not read anywhere else. APIKeyMiddleware takes its store directly, which
+// is how a host protects its own routes with a key, and registering one here
+// does not put a key anywhere near the auth router's own credentials.
+func WithAPIKeyStore(store APIKeyStore) Option {
+	return func(b *authBuilder) error {
+		if store == nil {
+			return errors.New("auth: api key store is required")
+		}
+		b.apiKeys = store
+		return nil
+	}
+}
+
+// WithWebhookStore registers the outgoing-webhook store the admin console's 🔗
+// tab is served from: the reference's AdminOptions.webhookStore
+// (admin.router.ts:127-131).
+//
+// It turns the webhooks feature flag on — `!!options.webhookStore` (:654) — and
+// the four routes under <admin>/api/webhooks answer 404 without it. A store that
+// does not implement WebhookAdminStore serves events and answers 501 to each of
+// the four, naming the single method the reference names.
+//
+// It is the same store AuthToolsOptions.Webhooks takes, and a deployment that
+// has both passes it to both: this one is the console's management screen and
+// that one is the delivery path. Neither writes what the other reads behind its
+// back — the screen's PATCH changes a row the emitter will read next time it
+// fans out, which is the point of the screen.
+func WithWebhookStore(store WebhookStore) Option {
+	return func(b *authBuilder) error {
+		if store == nil {
+			return errors.New("auth: webhook store is required")
+		}
+		b.webhooks = store
 		return nil
 	}
 }

@@ -191,6 +191,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   U19 drew this line first and said why. `Bridge` runs the same fan-out minus
   the bus step, so a bridged event gets the same id, frame and envelope a
   tracked one does.
+- **The credential half of the admin API** (`admin_credentials.go`): the eight
+  routes of `admin.router.ts` that hold, mint or mask a secret, behind the same
+  `AdminGuard.Protect` as the reads and the writes — `GET` and `POST
+  /api/api-keys`, `DELETE /api/api-keys/{id}/revoke` and `DELETE
+  /api/api-keys/{id}`, `GET` and `POST /api/webhooks`, `PATCH` and `DELETE
+  /api/webhooks/{id}`. They are their own PR because their invariant is **secret
+  redaction**, and reviewing a mask apart from the write that fills the field it
+  hides is how a mask gets missed.
+  **What reaches the wire.** The key listing is a hand-picked projection of ten
+  fields — `id`, `name`, `keyPrefix`, `serviceId`, `scopes`, `allowedIps`,
+  `isActive`, `expiresAt`, `createdAt`, `lastUsedAt` — on a **type that does not
+  carry `keyHash` at all**, so the bcrypt hash cannot reach a response through a
+  tag someone deletes or a second serialiser; the reference maps the same ten out
+  of an object that does carry it (`:1266-1277`), which is the weaker form of the
+  same rule. `POST /api/api-keys` answers `{rawKey, record}` and is the **only
+  place the raw key exists**: the store holds its bcrypt hash, the nine-field
+  `record` beside it does not repeat it, and no later route can produce it. The
+  webhook listing masks the signing secret to `***` (`:1381`) where the store
+  holds it in the clear, because an HMAC has to be reproducible; `POST
+  /api/webhooks` masks the row it echoes the same way (`:1406`), and `PATCH`
+  echoes nothing at all — a patch that does not name `secret` leaves the stored
+  one untouched, and one that does writes it in the clear. Each of those is
+  pinned by a conformance case asserting the secret's **bytes are absent from the
+  serialised response**, not that a field is empty.
+  **Two absences, two statuses**, which is what v0.8.0 split the optional API-key
+  methods one-to-an-interface for: `404 {"error": "API key store not
+  configured"}` when no store is configured (`:1254`) against `501 {"error":
+  "IApiKeyStore.listAll is not implemented", "keys": [], "total": 0}` when one is
+  and cannot enumerate (`:1259-1262`), and the same split on the webhook side per
+  method (`listAll`, `add`, `update`, `remove`). `DELETE /api/api-keys/{id}` is
+  the other direction of it: with no `APIKeyDeleteStore` it revokes instead and
+  says so — `200 {"success": true, "note": "IApiKeyStore.delete not implemented;
+  key was revoked instead"}` (`:1348-1354`) — which is only expressible because
+  the absence of that one method is observable on a store whose others are
+  present.
+  The reference's own defaulting stays in the route, as there: `events ?? ['*']`
+  and `isActive ?? true` (`:1403-1404`) — nullish and not falsy, so an explicit
+  `[]` is stored as a subscription to nothing — `url` required (`:1397`), and
+  `limit` clamped to 100 and defaulted to 20 on both listings with the same
+  off-by-one `total` the users table has. An unparseable `expiresAt` is a key
+  that does not expire rather than a refusal, because `new Date('tomorrow')` is
+  an Invalid Date that compares false against every instant (`:1312`).
+  Two stores reach the `Auth` for the first time: **`WithAPIKeyStore`** and
+  **`WithWebhookStore`**, which are the reference's `AdminOptions.apiKeyStore`
+  and `webhookStore` (`:120-131`) and which turn the console's **`apiKeys` and
+  `webhooks` feature flags** on — `!!store` there (`:653-654`), so a store that
+  cannot enumerate still draws its tab and answers `501` to the listing behind
+  it.
+  One entry joins the deviation register with these routes:
+  `admin-credential-listings-are-ordered`. The reference declares no order for
+  either listing and ships no implementation of either `listAll?` to have one;
+  this port answers API keys **`CreatedAt` descending, `ID` ascending** and
+  webhooks in **first-insertion order**, both stated on the store interfaces
+  since v0.8.0 and both client-visible for the first time now. It is
+  `admin-listings-are-ordered-by-id`'s argument for the two listings that entry
+  deliberately left out, with one addition: a row paged past on these screens is
+  a credential nobody revokes.
 - **The mutating half of the admin API** (`admin_write.go`): the sixteen routes
   of `admin.router.ts` that change state, behind the same `AdminGuard.Protect`
   as the reads — `DELETE /api/users/{id}`, `POST /api/2fa-policy`,

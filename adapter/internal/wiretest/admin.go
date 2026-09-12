@@ -209,6 +209,7 @@ func testAdmin(t *testing.T, mount Mounter) {
 	t.Run("Assets", func(t *testing.T) { testAdminAssets(t, mount) })
 	t.Run("Reads", func(t *testing.T) { testAdminReads(t, mount) })
 	t.Run("Writes", func(t *testing.T) { testAdminWrites(t, mount) })
+	t.Run("Credentials", func(t *testing.T) { testAdminCredentials(t, mount) })
 }
 
 // adminRoute is one method-and-path pair. The reads could be a bare path list
@@ -265,14 +266,16 @@ var adminWritePaths = []adminRoute{
 // 404 on all of it, and a route added to a later PR's table joins that sweep
 // without anyone remembering to.
 func adminAllRoutes() []adminRoute {
-	routes := make([]adminRoute, 0, len(adminPaths)+len(adminReadPaths)+len(adminWritePaths))
+	routes := make([]adminRoute, 0,
+		len(adminPaths)+len(adminReadPaths)+len(adminWritePaths)+len(adminCredentialPaths))
 	for path, method := range adminPaths {
 		routes = append(routes, adminRoute{method, path})
 	}
 	for _, path := range adminReadPaths {
 		routes = append(routes, adminRoute{http.MethodGet, path})
 	}
-	return append(routes, adminWritePaths...)
+	routes = append(routes, adminWritePaths...)
+	return append(routes, adminCredentialPaths...)
 }
 
 // testAdminNotMounted is the negative direction of the conditional set, and it
@@ -771,6 +774,8 @@ func adminAllStores() []auth.Option {
 		auth.WithSettingsStore(auth.NewMemorySettingsStore()),
 		auth.WithTemplateStore(auth.NewMemoryTemplateStore()),
 		auth.WithOAuth(auth.OAuthWiring{LinkedAccounts: auth.NewMemoryLinkedAccounts()}),
+		auth.WithAPIKeyStore(auth.NewMemoryAPIKeyStore()),
+		auth.WithWebhookStore(auth.NewMemoryWebhookStore()),
 	}
 }
 
