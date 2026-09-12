@@ -103,10 +103,17 @@ type LoginResult struct {
 // error) would get a generic 500 out of the compatibility wrapper where it used
 // to get 403 2FA_REQUIRED — the one thing this PR promised not to change.
 func (s *Service) loginPassword(ctx context.Context, in LoginInput) (User, bool, error) {
+	// The address as the caller sent it, kept before normalisation because the
+	// failure event carries the submitted value rather than the looked-up one:
+	// the dev line puts `req.body.email` on the payload untouched (node-auth
+	// auth.router.ts:657). A client that sent "  Ada@Example.COM " is reported
+	// as having sent that, which is what makes the event useful for spotting a
+	// client that is mangling addresses.
+	submitted := in.Email
 	in.Email = normalizeEmail(in.Email)
 	user, err := s.users.GetUserByEmail(ctx, in.Email, in.TenantID)
 	if err != nil {
-		return User{}, false, ErrInvalidCredentials
+		return User{}, false, s.loginFailed(ctx, submitted, ErrInvalidCredentials)
 	}
 	// Config.PasswordVerifier, the migration seam, is consulted here and nowhere
 	// else: only after the stored hash has failed to verify what the request
@@ -131,13 +138,53 @@ func (s *Service) loginPassword(ctx context.Context, in LoginInput) (User, bool,
 	if !verifyPassword(in.Password, user.PasswordHash) {
 		user, err = s.verifyThroughPasswordVerifier(ctx, user, in.Password)
 		if err != nil {
-			return User{}, false, err
+			return User{}, false, s.loginFailed(ctx, submitted, err)
 		}
 	}
 	if !user.IsEmailVerified && s.emailVerificationMode() != EmailVerificationModeLazy {
-		return User{}, false, ErrEmailNotVerified
+		return User{}, false, s.loginFailed(ctx, submitted, ErrEmailNotVerified)
 	}
 	return user, s.requiresTwoFactor(user), nil
+}
+
+// loginFailed raises identity.auth.login.failed for a refused password login
+// and returns err unchanged, so that each refusal above stays one line and none
+// of them can be added later without it.
+//
+// It is the dev line's only publication inside a catch, and the only one with a
+// condition attached: `if (err instanceof AuthError && err.statusCode === 401)`
+// (node-auth auth.router.ts:655). What throws a 401 there is
+// LocalStrategy.authenticate, for an unknown address, an account with no stored
+// password, and a password that does not verify (node-auth
+// local.strategy.ts:20-29). What does not is its unverified-address refusal,
+// which is a 403 (node-auth local.strategy.ts:40) — and neither is a store that
+// is simply broken, which reaches handleError as a 500. A publication that
+// fired for those would be saying something else entirely: an infrastructure
+// outage would read as a wave of credential-stuffing.
+//
+// The gate is asked of HTTPErrorFor rather than written out as a list of
+// sentinels, because HTTPErrorFor is already this port's answer to "what status
+// is this error" and a list here could disagree with it. ErrInvalidCredentials
+// is the 401; ErrEmailNotVerified maps to 403; a Config.PasswordVerifier that
+// failed is an ordinary error and falls through to HTTPErrInternal. Each of
+// those is then exactly the dev line's treatment of the same case.
+//
+// No user id, even where one is in hand — the lookup may well have succeeded
+// and only the password failed. The dev line passes none (node-auth
+// auth.router.ts:657-659), and the reason survives the port: the event reports
+// that an address was refused, and naming the account behind it would turn any
+// subscriber's log into an oracle for which addresses are registered.
+func (s *Service) loginFailed(ctx context.Context, submittedEmail string, err error) error {
+	if HTTPErrorFor(err).Status != http.StatusUnauthorized {
+		return err
+	}
+	s.publish(ctx, func() Event {
+		return Event{
+			Name: EventAuthLoginFailed,
+			Data: map[string]any{"method": loginMethodLocal, "email": submittedEmail},
+		}
+	})
+	return err
 }
 
 // LoginWithChallenge is the full POST /login path: it verifies the password and
@@ -172,7 +219,7 @@ func (s *Service) LoginWithChallenge(ctx context.Context, in LoginInput) (LoginR
 		}
 		return LoginResult{User: user, Challenge: challenge}, nil
 	}
-	tokens, err := s.newSessionTokens(ctx, user)
+	tokens, err := s.completeLocalLogin(ctx, user)
 	if err != nil {
 		return zero, err
 	}

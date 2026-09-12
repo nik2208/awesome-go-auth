@@ -132,6 +132,20 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (User, AuthTok
 	if err != nil {
 		return User{}, zeroTokens, err
 	}
+	// node-auth auth.router.ts:813, the last thing POST /register does before it
+	// answers 201. Publishing here rather than straight after CreateUser keeps
+	// the dev line's rule that only the success path raises: there, anything
+	// that throws between the register handler and the publish leaves the
+	// account created and the event unraised — the welcome mail is the one
+	// candidate — and here the extra session this port opens is (see the
+	// register-issues-a-session deviation).
+	s.publish(ctx, func() Event {
+		return Event{
+			Name:   EventUserCreated,
+			UserID: created.ID,
+			Data:   map[string]any{"email": created.Email, "method": registerMethodDefault},
+		}
+	})
 	return created, tokens, nil
 }
 
@@ -159,7 +173,7 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (User, AuthTokens, e
 	if secondFactor {
 		return User{}, zeroTokens, ErrTwoFactorRequired
 	}
-	tokens, err := s.newSessionTokens(ctx, user)
+	tokens, err := s.completeLocalLogin(ctx, user)
 	if err != nil {
 		return User{}, zeroTokens, err
 	}
@@ -206,6 +220,24 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthTokens,
 	if err := s.sessions.UpdateSession(ctx, session); err != nil {
 		return AuthTokens{}, err
 	}
+	// node-auth auth.router.ts:733, the only session.* name either tree raises.
+	//
+	// previousSessionId is the dev line's `payload.sid` — the session the
+	// presented refresh token named — and SessionID is the session that now
+	// holds the rotated token. In this port those are the same string, because
+	// rotation here rewrites the refresh-token hash of the existing session
+	// while the reference opens a new session and revokes the old one. That is
+	// registered as session-rotated-reports-one-session-id; a subscriber
+	// tracking session lineage has to read it there before it treats the two
+	// keys as a pair.
+	s.publish(ctx, func() Event {
+		return Event{
+			Name:      EventSessionRotated,
+			UserID:    user.ID,
+			SessionID: session.ID,
+			Data:      map[string]any{"previousSessionId": claims.Sid},
+		}
+	})
 	return AuthTokens{AccessToken: newAccess, RefreshToken: newRefresh, ExpiresIn: s.cfg.AccessTokenTTL}, nil
 }
 
@@ -224,7 +256,26 @@ func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 	}
 	now := s.now()
 	session.RevokedAt = &now
-	return s.sessions.UpdateSession(ctx, session)
+	if err := s.sessions.UpdateSession(ctx, session); err != nil {
+		return err
+	}
+	// node-auth auth.router.ts:692, after the cookies are cleared and on the
+	// success path only: the route's catch clears them a second time and
+	// publishes nothing (node-auth auth.router.ts:697-701). The payload is the
+	// two identifiers and no data key at all — the one reachable site in the
+	// vocabulary that carries neither.
+	//
+	// The dev line reads both off the access-token cookie it decoded into
+	// req.user; this port reads them off the refresh token the caller
+	// presented, because that is the credential Logout takes. They name the same
+	// session either way, and the point both trees share is the one that
+	// matters: neither reads the authenticated principal from the context, so a
+	// logout answers for the session whose token was spent rather than for
+	// whoever the request happened to be authenticated as.
+	s.publish(ctx, func() Event {
+		return Event{Name: EventAuthLogout, UserID: claims.Sub, SessionID: claims.Sid}
+	})
+	return nil
 }
 
 // Authenticate verifies an access token and returns the user it names. The
@@ -280,18 +331,92 @@ func (s *Service) Me(ctx context.Context, accessToken string) (User, error) {
 	return s.enrichCustomClaims(ctx, user), nil
 }
 
-func (s *Service) newSessionTokens(ctx context.Context, user User) (AuthTokens, error) {
+// The `data.method` values the dev line writes on identity.auth.login.success
+// and identity.user.created. They are wire — a subscriber switches on them —
+// so they are spelled once here rather than at each of the six sites that use
+// them.
+//
+// Three of the four login values are spelled exactly like the
+// available2faMethods entries in login_2fa.go, and are deliberately not shared
+// with them. That list answers "which second factors can this user present";
+// this one answers "which credential completed this login", and they coincide
+// only because three credentials happen to be usable as either. A shared
+// constant would make the wrong site compile on the day one list grows a value
+// the other does not have.
+//
+// There is no fifth login value. AUTH_LOGIN_SUCCESS covers five publication
+// points in the dev line and four methods, because the two magic-link sites —
+// the direct login and the step-up branch of the same route — both write
+// 'magic-link' (node-auth auth.router.ts:1269, :1284).
+const (
+	loginMethodLocal     = "local"      // node-auth auth.router.ts:651
+	loginMethodTOTP      = "totp"       // node-auth auth.router.ts:970
+	loginMethodMagicLink = "magic-link" // node-auth auth.router.ts:1269, :1284
+	loginMethodSMS       = "sms"        // node-auth auth.router.ts:1410
+	// registerMethodDefault is the 'default' half of
+	// `options.onRegister ? 'custom' : 'default'` (node-auth
+	// auth.router.ts:815). This port has no onRegister hook — see the
+	// register-route-is-always-mounted deviation — so it is the only half
+	// reachable here, and 'custom' is never written.
+	registerMethodDefault = "default"
+)
+
+// publish raises the event build returns on Config.Events, carrying the request
+// provenance from ctx, and does nothing whatever when no bus is configured.
+//
+// This is the port of publishRouterEvent's first line — `if (!eventBus)
+// return;` (node-auth auth.router.ts:430) — and of the `?.` in the
+// configurator's `this.options.eventBus?.publish(...)` (node-auth
+// auth-configurator.ts:92). Most deployments subscribe to nothing, so the nil
+// path is the hot one and it has to be free.
+//
+// That is why the parameter is a builder and not an Event. Every payload in
+// this file is an Event with a map[string]any literal inside it, and a value
+// parameter would build and allocate that map at all nineteen sites on every
+// request whether or not anybody is listening. Passing a closure that is only
+// ever called moves the whole construction behind the nil check; the closure
+// itself does not escape — publish neither stores it nor lets it outlive the
+// call — so escape analysis keeps it on the stack and the nil case allocates
+// nothing at all. TestPublishWithoutBusAllocatesNothing pins that, because it
+// is a property of the compiler's analysis rather than of the source, and a
+// later edit that let build escape would quietly cost every deployment.
+//
+// PublishContext and never Publish. Publish alone would drop CorrelationID, IP
+// and UserAgent — the three fields no Service method can see, because they live
+// on the request and reach here only through the carrier an adapter installed
+// (event_context.go). Losing them is invisible to a test that does not assert
+// them and is exactly what the carrier was built to prevent, so there is one
+// call to PublishContext in the package and it is this one.
+func (s *Service) publish(ctx context.Context, build func() Event) {
+	bus := s.cfg.Events
+	if bus == nil {
+		return
+	}
+	bus.PublishContext(ctx, build())
+}
+
+// issueSession opens a session for user and returns the tokens together with
+// the id of the session now holding them: the reference's
+// `const { sessionId } = await issueTokens(…)` (node-auth auth.router.ts:648,
+// :732, :967, :1266, :1281, :1407, :1443).
+//
+// Eight of the dev line's twenty-six publication points put that id on the
+// event, and before U18 nothing in this port needed it — newSessionTokens
+// minted it, used it for the claims and dropped it. The split is the smallest
+// change that exposes it: every existing caller keeps the two-value signature
+// it was written against, and only the sites that publish take the third value.
+func (s *Service) issueSession(ctx context.Context, user User) (AuthTokens, string, error) {
 	sessionID, err := newID("ses")
 	if err != nil {
-		return AuthTokens{}, err
+		return AuthTokens{}, "", err
 	}
 	refreshToken, refreshExp, err := s.issueToken(ctx, user, sessionID, "refresh", s.cfg.RefreshTokenTTL)
 	if err != nil {
-		return AuthTokens{}, err
+		return AuthTokens{}, "", err
 	}
 	accessToken, _, err := s.issueToken(ctx, user, sessionID, "access", s.cfg.AccessTokenTTL)
 	if err != nil {
-		return AuthTokens{}, err
+		return AuthTokens{}, "", err
 	}
 	now := s.now()
 	_, err = s.sessions.CreateSession(ctx, Session{
@@ -303,9 +428,66 @@ func (s *Service) newSessionTokens(ctx context.Context, user User) (AuthTokens, 
 		ExpiresAt:        refreshExp,
 	})
 	if err != nil {
+		return AuthTokens{}, "", err
+	}
+	return AuthTokens{AccessToken: accessToken, RefreshToken: refreshToken, ExpiresIn: s.cfg.AccessTokenTTL}, sessionID, nil
+}
+
+func (s *Service) newSessionTokens(ctx context.Context, user User) (AuthTokens, error) {
+	tokens, _, err := s.issueSession(ctx, user)
+	return tokens, err
+}
+
+// completeLocalLogin is the tail POST /login shares between its two entry
+// points: it opens the session and raises identity.auth.login.success with
+// `method: "local"` (node-auth auth.router.ts:649-653).
+//
+// The reference has one route here and this port has two methods — Login,
+// which collapses a second-factor account into ErrTwoFactorRequired, and
+// LoginWithChallenge, which mints the challenge the adapters answer with. Both
+// arrive by the same path through loginPassword and both end with a session, so
+// the publication lives in the tail they share. One helper rather than two
+// copies is what keeps the dev line's single site single: neither entry point
+// can drift from the other, and no caller can reach both and publish twice.
+func (s *Service) completeLocalLogin(ctx context.Context, user User) (AuthTokens, error) {
+	tokens, sessionID, err := s.issueSession(ctx, user)
+	if err != nil {
 		return AuthTokens{}, err
 	}
-	return AuthTokens{AccessToken: accessToken, RefreshToken: refreshToken, ExpiresIn: s.cfg.AccessTokenTTL}, nil
+	s.publish(ctx, func() Event {
+		return Event{
+			Name:      EventAuthLoginSuccess,
+			UserID:    user.ID,
+			SessionID: sessionID,
+			Data:      map[string]any{"method": loginMethodLocal},
+		}
+	})
+	return tokens, nil
+}
+
+// sessionIDOf recovers the session id from an access token this service has
+// just minted, for the one publication site that cannot take it from
+// issueSession: Auth.OAuthComplete publishes identity.auth.oauth.success, and
+// the session is opened two calls below it inside
+// OAuthService.HandleCallbackWithPolicy, whose exported signature returns the
+// tokens and not the id.
+//
+// Widening that signature would be a breaking change to an exported method for
+// the benefit of one event, and threading the id through the four places it
+// mints a session would spread the change across a file this PR otherwise does
+// not touch. Reading it back costs one HMAC verification on a path that has
+// just finished an HTTP round trip to the identity provider.
+//
+// An unparsable token yields the empty string rather than an error: the token
+// was minted here microseconds ago, so this cannot fail for any reason the
+// caller could act on, and an event with no session id is a smaller loss than a
+// completed OAuth login reported as a failure.
+func (s *Service) sessionIDOf(tokens AuthTokens) string {
+	claims, err := s.parseToken(tokens.AccessToken, "access")
+	if err != nil {
+		return ""
+	}
+	return claims.Sid
 }
 
 func (s *Service) ForgotPassword(ctx context.Context, in ForgotPasswordInput) (string, error) {
@@ -355,6 +537,14 @@ func (s *Service) ResetPassword(ctx context.Context, in ResetPasswordInput) erro
 	if err := ps.UpdatePassword(ctx, user.ID, user.TenantID, pwHash); err != nil {
 		return err
 	}
+	// Nothing is published here, deliberately. POST /reset-password changes a
+	// password exactly as POST /change-password does and raises no event in
+	// either tree, where the authenticated route raises
+	// identity.user.password.changed (node-auth auth.router.ts:1030 against the
+	// reset route at :893-916, which has no publishRouterEvent call). The
+	// asymmetry is the reference's; adding the obvious publication here is the
+	// step that turns a port into a fork, and the conformance test in
+	// event_publication_test.go has no site for it.
 	return ps.ClearResetToken(ctx, user.ID, user.TenantID)
 }
 
@@ -377,7 +567,16 @@ func (s *Service) ChangePassword(ctx context.Context, in ChangePasswordInput) er
 	if err != nil {
 		return err
 	}
-	return ps.UpdatePassword(ctx, user.ID, user.TenantID, pwHash)
+	if err := ps.UpdatePassword(ctx, user.ID, user.TenantID, pwHash); err != nil {
+		return err
+	}
+	// node-auth auth.router.ts:1030, straight after the store write and before
+	// the 200. The user id and nothing else: the dev line puts neither the
+	// address nor any indication of what the password was on the payload.
+	s.publish(ctx, func() Event {
+		return Event{Name: EventUserPasswordChanged, UserID: user.ID}
+	})
+	return nil
 }
 
 // SendMagicLink mints a magic link, stores its hash and delivers it through
@@ -472,10 +671,29 @@ func (s *Service) verifyMagicLink(ctx context.Context, in MagicLinkVerifyInput, 
 		}
 		user.IsEmailVerified = true
 	}
-	tokens, err := s.newSessionTokens(ctx, user)
+	tokens, sessionID, err := s.issueSession(ctx, user)
 	if err != nil {
 		return User{}, AuthTokens{}, err
 	}
+	// node-auth auth.router.ts:1267 and :1282 — two publication points, one
+	// here. The dev line writes POST /magic-link/verify as two branches of one
+	// route, the step-up branch that checks the temp token and the direct-login
+	// branch that does not, and each ends with its own issueTokens and its own
+	// publish; the two payloads are identical, `method: "magic-link"` and no
+	// per-branch key. This port has those branches as requireUserID set or
+	// empty, and they converge here, so one publication covers both.
+	//
+	// It is deliberately not `magic-link-2fa` for the step-up branch. Both dev
+	// line sites write the same literal, and a subscriber that needed to tell
+	// the two apart would have no way to in the reference either.
+	s.publish(ctx, func() Event {
+		return Event{
+			Name:      EventAuthLoginSuccess,
+			UserID:    user.ID,
+			SessionID: sessionID,
+			Data:      map[string]any{"method": loginMethodMagicLink},
+		}
+	})
 	return user, tokens, nil
 }
 
@@ -535,10 +753,21 @@ func (s *Service) VerifySMSCode(ctx context.Context, in SMSCodeVerifyInput) (Use
 	if err := ss.ClearSMSCode(ctx, matched.ID, matched.TenantID); err != nil {
 		return User{}, AuthTokens{}, err
 	}
-	tokens, err := s.newSessionTokens(ctx, matched)
+	tokens, sessionID, err := s.issueSession(ctx, matched)
 	if err != nil {
 		return User{}, AuthTokens{}, err
 	}
+	// node-auth auth.router.ts:1408. As with magic-link, POST /sms/verify has a
+	// step-up mode and a direct mode there and one publish serves the tail both
+	// reach, with `method: "sms"` either way.
+	s.publish(ctx, func() Event {
+		return Event{
+			Name:      EventAuthLoginSuccess,
+			UserID:    matched.ID,
+			SessionID: sessionID,
+			Data:      map[string]any{"method": loginMethodSMS},
+		}
+	})
 	return matched, tokens, nil
 }
 
@@ -582,7 +811,20 @@ func (s *Service) VerifyEmail(ctx context.Context, in VerifyEmailInput) error {
 	if err := evs.MarkEmailVerified(ctx, user.ID, user.TenantID, true); err != nil {
 		return err
 	}
-	return evs.ClearEmailVerificationToken(ctx, user.ID, user.TenantID)
+	if err := evs.ClearEmailVerificationToken(ctx, user.ID, user.TenantID); err != nil {
+		return err
+	}
+	// node-auth auth.router.ts:1096, after both writes: the flag is set and the
+	// token cleared before the event says the address is verified.
+	//
+	// The other place this port marks an address verified raises nothing, and
+	// that is the dev line's shape too: the first magic-link login verifies the
+	// address as a side effect (verifyMagicLink above, node-auth
+	// auth.router.ts:1277-1280) and publishes only the login.
+	s.publish(ctx, func() Event {
+		return Event{Name: EventUserEmailVerified, UserID: user.ID}
+	})
+	return nil
 }
 
 func (s *Service) RequestEmailChange(ctx context.Context, in ChangeEmailRequestInput) (string, error) {
@@ -646,7 +888,23 @@ func (s *Service) ConfirmEmailChange(ctx context.Context, in ConfirmEmailChangeI
 	if err := ecs.ClearEmailChangeToken(ctx, user.ID, user.TenantID); err != nil {
 		return err
 	}
-	return s.deliverEmailChanged(ctx, user, oldEmail, newEmail, in.Lang)
+	if err := s.deliverEmailChanged(ctx, user, oldEmail, newEmail, in.Lang); err != nil {
+		return err
+	}
+	// node-auth auth.router.ts:1175, and the order is the dev line's: the notice
+	// to the old address is sent first and the event is raised only if it went
+	// (:1168-1174 precedes the publish). A mailer that throws there reaches the
+	// route's catch with the address already moved and the token already spent,
+	// so the change is applied and nothing is published — which is the behaviour
+	// ConfirmEmailChange's own doc comment already describes for the 500.
+	s.publish(ctx, func() Event {
+		return Event{
+			Name:   EventUserEmailChanged,
+			UserID: user.ID,
+			Data:   map[string]any{"oldEmail": oldEmail, "newEmail": newEmail},
+		}
+	})
+	return nil
 }
 
 func (s *Service) SetupTOTP(ctx context.Context, userID, tenantID string) (string, error) {
@@ -665,7 +923,16 @@ func (s *Service) VerifyTOTPSetup(ctx context.Context, userID, tenantID, secret,
 	if !validateTOTPCode(secret, code, s.now()) {
 		return ErrInvalidCode
 	}
-	return ts.UpdateTOTPSecret(ctx, userID, tenantID, secret, true)
+	if err := ts.UpdateTOTPSecret(ctx, userID, tenantID, secret, true); err != nil {
+		return err
+	}
+	// node-auth auth.router.ts:943, once the secret is confirmed and stored.
+	// POST /2fa/setup, which only mints a candidate secret, publishes nothing in
+	// either tree: enrolment is not enabled until a code verifies against it.
+	s.publish(ctx, func() Event {
+		return Event{Name: EventUser2FAEnabled, UserID: userID}
+	})
+	return nil
 }
 
 func (s *Service) VerifyTOTP(ctx context.Context, userID, tenantID, code string) (User, AuthTokens, error) {
@@ -676,10 +943,22 @@ func (s *Service) VerifyTOTP(ctx context.Context, userID, tenantID, code string)
 	if !validateTOTPCode(user.TOTPSecret, code, s.now()) {
 		return User{}, AuthTokens{}, ErrInvalidCode
 	}
-	tokens, err := s.newSessionTokens(ctx, user)
+	tokens, sessionID, err := s.issueSession(ctx, user)
 	if err != nil {
 		return User{}, AuthTokens{}, err
 	}
+	// node-auth auth.router.ts:968: POST /2fa/verify completing the second step
+	// of a password login. It is identity.auth.login.success and not a name of
+	// its own — the credential is in `data.method`, which is what makes five
+	// sites share one name.
+	s.publish(ctx, func() Event {
+		return Event{
+			Name:      EventAuthLoginSuccess,
+			UserID:    user.ID,
+			SessionID: sessionID,
+			Data:      map[string]any{"method": loginMethodTOTP},
+		}
+	})
 	return user, tokens, nil
 }
 
@@ -747,7 +1026,18 @@ func (s *Service) DisableTOTP(ctx context.Context, userID, tenantID string) erro
 	if !ok {
 		return ErrFeatureNotSupported
 	}
-	return ts.UpdateTOTPSecret(ctx, userID, tenantID, "", false)
+	if err := ts.UpdateTOTPSecret(ctx, userID, tenantID, "", false); err != nil {
+		return err
+	}
+	// node-auth auth.router.ts:997, once the secret is gone. The two policy
+	// refusals that guard the dev line's route — the per-user require2FA and the
+	// settings store's system-wide one — return before it and publish nothing;
+	// in this port those live above this call, on Auth, so a refused disable
+	// never reaches here either.
+	s.publish(ctx, func() Event {
+		return Event{Name: EventUser2FADisabled, UserID: userID}
+	})
+	return nil
 }
 
 func (s *Service) ListSessions(ctx context.Context, userID, tenantID string) ([]Session, error) {
@@ -895,6 +1185,15 @@ func (s *Service) DeleteAccount(ctx context.Context, in DeleteAccountInput) erro
 	if err := accountStore.DeleteUser(ctx, in.UserID, in.TenantID); err != nil {
 		return fmt.Errorf("auth: delete account: %w", err)
 	}
+	// node-auth auth.router.ts:1776, last of all — after every store the route
+	// touches and after the cookies are cleared, which in this port the adapter
+	// does on the way out. The user id is all the payload carries, and it names
+	// an account that no longer exists: a subscriber that wants anything else
+	// about the user has to have kept it from an earlier event, which is the
+	// same constraint the dev line's subscribers work under.
+	s.publish(ctx, func() Event {
+		return Event{Name: EventUserDeleted, UserID: in.UserID}
+	})
 	return nil
 }
 
