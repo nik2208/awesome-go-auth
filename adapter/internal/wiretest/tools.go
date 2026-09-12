@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	auth "github.com/nik2208/awesome-go-auth"
@@ -19,6 +20,17 @@ import (
 // goes behind auth.ToolsProtectMiddleware or — for the inbound webhook and the
 // two routes below — deliberately does not, so the cases here are written as a
 // mount-and-posture suite that happens to have two routes attached.
+//
+// U23 attached two more: POST <tools>/track/{eventName} and
+// POST <tools>/notify/{target}, the first pair to share that posture. What the
+// cases for them assert is what a route can get wrong that the facade cannot:
+// which request reaches a handler at all, what the handler read off the request,
+// and what it answered. The fan-out itself is auth_tools_test.go's, so these
+// read one telemetry record and one broadcast rather than four sinks. Two of
+// them carry a deviation apiece —
+// tools-track-ip-comes-from-the-configured-seam is
+// "the client address is the configured seam, not X-Forwarded-For", and
+// tools-request-bodies-are-typed is "a body that will not decode is refused".
 //
 // What the reference does, and what this suite pins instead: createToolsRouter
 // builds its guard as `authMiddleware ? [authMiddleware] : []`
@@ -46,26 +58,32 @@ import (
 // and the mount must serve, relative to the tools mount.
 //
 // It is spelled out by hand for the reason documentedRoutes is: a list derived
-// from the document agrees with whatever the document happens to say. U22 mounts
-// two routes and U24 the stream; U23 adds /track/{eventName} and
-// /notify/{target} here, U25 /telemetry and /webhook/{provider}.
+// from the document agrees with whatever the document happens to say. U22
+// mounted the two documentation routes, U23 the two POST routes and U24 the
+// stream; U25 adds /telemetry and /webhook/{provider}.
 var toolsDocumentedRoutes = map[string]string{
-	auth.DocsSpecPath:    http.MethodGet,
-	auth.DocsUIPath:      http.MethodGet,
-	auth.ToolsStreamPath: http.MethodGet,
+	auth.DocsSpecPath:                    http.MethodGet,
+	auth.DocsUIPath:                      http.MethodGet,
+	auth.ToolsTrackPath + "/{eventName}": http.MethodPost,
+	auth.ToolsNotifyPath + "/{target}":   http.MethodPost,
+	auth.ToolsStreamPath:                 http.MethodGet,
 }
 
 // toolsFeatureRoutes are the feature routes of the reference's router that are
 // not mounted yet. Every case that probes "not mounted" walks these as well as
 // the documented ones, so a route cannot arrive without the PR that owns it
 // noticing this list — U24 moved /stream out of here and into
-// toolsDocumentedRoutes, which is what mounting one of these looks like.
+// toolsDocumentedRoutes and U23 moved track and notify, which is what mounting
+// one of these looks like.
 var toolsFeatureRoutes = []string{
-	auth.ToolsTrackPath + "/identity.probe",
-	auth.ToolsNotifyPath + "/global",
 	auth.ToolsTelemetryPath,
 	auth.ToolsWebhookPath + "/probe",
 }
+
+// toolsDocsRoutes are the two documentation routes alone: the subset of
+// toolsDocumentedRoutes that is GET, carries no guard, and is switched by
+// Tools.Docs rather than by one of the four feature flags.
+var toolsDocsRoutes = []string{auth.DocsSpecPath, auth.DocsUIPath}
 
 // testToolsBasePath is what Tools.Docs.BasePath is set to when the suite checks
 // that the description follows the configuration rather than the mount.
@@ -106,10 +124,99 @@ func toolsConfig(t *testing.T, opts ...func(*auth.ToolsOptions)) auth.HTTPConfig
 }
 
 // toolsRequest builds a request for one route below the tools mount. No
-// credential and no CSRF pair: the two routes U22 mounts have no guard, and the
-// tools router carries none of the auth router's middleware either.
+// credential and no CSRF pair: the routes mounted so far are either unguarded
+// or behind whatever guard the case configured, and the tools router carries
+// none of the auth router's middleware either.
 func toolsRequest(env *Env, method, path string) *http.Request {
-	return httptest.NewRequest(method, env.Config.ToolsPath()+path, nil)
+	return httptest.NewRequest(method, env.Config.ToolsPath()+toolsProbePath(path), nil)
+}
+
+// toolsPost builds a POST below the tools mount carrying a JSON body, which is
+// what the two feature routes take.
+func toolsPost(env *Env, path, body string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, env.Config.ToolsPath()+toolsProbePath(path), stringReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+// toolsProbePath fills a documented path template with a segment every router
+// will route, the way openAPIProbe does for the auth document. A path with no
+// parameter comes back unchanged.
+func toolsProbePath(path string) string {
+	return openAPIPathParam.ReplaceAllString(path, openAPIProbeSegment)
+}
+
+// toolsRecorder is a facade whose sinks can be read back: a memory telemetry
+// store for what Track persisted, and an SSE distributor for what Track and
+// Notify broadcast. Both are the ordinary seams rather than a double for the
+// facade — what these cases are about is what the two routes hand it.
+type toolsRecorder struct {
+	tools     *auth.AuthTools
+	telemetry *auth.MemoryTelemetryStore
+
+	mu     sync.Mutex
+	topics []string
+	frames []auth.StreamEvent
+}
+
+// Publish and Subscribe make this an auth.SseDistributor. With a distributor
+// configured Broadcast publishes and does not also deliver locally, so every
+// broadcast either route causes arrives here exactly once.
+func (r *toolsRecorder) Publish(_ context.Context, topic string, ev auth.StreamEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.topics = append(r.topics, topic)
+	r.frames = append(r.frames, ev)
+	return nil
+}
+
+func (r *toolsRecorder) Subscribe(context.Context, func(string, auth.StreamEvent)) error { return nil }
+
+// broadcasts is the topics broadcast to and the frames sent, in order.
+func (r *toolsRecorder) broadcasts() ([]string, []auth.StreamEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.topics...), append([]auth.StreamEvent(nil), r.frames...)
+}
+
+// tracked is the telemetry records Track persisted, in order.
+func (r *toolsRecorder) tracked(t *testing.T) []auth.TelemetryEvent {
+	t.Helper()
+	events, err := r.telemetry.Query(context.Background(), auth.TelemetryFilter{})
+	if err != nil {
+		t.Fatalf("telemetry query: %v", err)
+	}
+	return events
+}
+
+// onlyTracked is the single record a case expects, or a failure naming how many
+// there actually were.
+func (r *toolsRecorder) onlyTracked(t *testing.T) auth.TelemetryEvent {
+	t.Helper()
+	events := r.tracked(t)
+	if len(events) != 1 {
+		t.Fatalf("telemetry records = %d, want exactly 1", len(events))
+	}
+	return events[0]
+}
+
+// toolsRecordingConfig is toolsConfig with a facade whose sinks are readable.
+// The override goes in ahead of the caller's edits, so a case that wants some
+// other facade can still say so.
+func toolsRecordingConfig(t *testing.T, opts ...func(*auth.ToolsOptions)) (auth.HTTPConfig, *toolsRecorder) {
+	t.Helper()
+	rec := &toolsRecorder{telemetry: auth.NewMemoryTelemetryStore()}
+	tools, err := auth.NewAuthTools(context.Background(), auth.NewEventBus(), auth.AuthToolsOptions{
+		Telemetry:  rec.telemetry,
+		SSE:        true,
+		SSEOptions: []auth.SseOption{auth.WithSseDistributor(rec)},
+	})
+	if err != nil {
+		t.Fatalf("NewAuthTools: %v", err)
+	}
+	rec.tools = tools
+	edits := append([]func(*auth.ToolsOptions){func(o *auth.ToolsOptions) { o.AuthTools = tools }}, opts...)
+	return toolsConfig(t, edits...), rec
 }
 
 // assertToolsUnrouted fails unless the request missed every tools route. Express
@@ -135,8 +242,14 @@ func assertToolsUnrouted(t *testing.T, rec *httptest.ResponseRecorder) {
 // reference registers them with.
 func assertNoToolsRoutes(t *testing.T, env *Env) {
 	t.Helper()
-	for path := range toolsDocumentedRoutes {
-		assertToolsUnrouted(t, env.Do(toolsRequest(env, http.MethodGet, path)))
+	// Each documented route on its own method as well as on GET: from U23 the set
+	// holds POST routes, and a POST route probed only with GET answers 404
+	// whether or not it is mounted, which would make this assertion pass on a
+	// configuration that had in fact mounted it.
+	for path, method := range toolsDocumentedRoutes {
+		for _, probe := range []string{http.MethodGet, method} {
+			assertToolsUnrouted(t, env.Do(toolsRequest(env, probe, path)))
+		}
 	}
 	for _, path := range toolsFeatureRoutes {
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
@@ -360,17 +473,314 @@ func testTools(t *testing.T, mount Mounter) {
 		}
 	})
 
-	t.Run("the four feature groups are not mounted yet", func(t *testing.T) {
-		// U22 mounted the skeleton and none of the feature routes: track and
-		// notify are U23, the telemetry query and the inbound webhook are U25.
-		// This case is the stop-point — the PR that mounts one of these replaces
-		// its entry here with real assertions, so a route cannot arrive without
-		// this list being edited. U24 did that for the stream, whose assertions
-		// are testToolsStream in tools_stream.go.
+	t.Run("the remaining feature groups are not mounted yet", func(t *testing.T) {
+		// The telemetry query and the inbound webhook are U25's. This case is
+		// U22's stop-point — the PR that mounts one of these replaces its entry
+		// in toolsFeatureRoutes with real assertions, the way U23 did for track
+		// and notify and U24 for the stream, so a route cannot arrive without
+		// this list being edited.
 		env := NewEnv(t, mount, toolsConfig(t))
 		for _, path := range toolsFeatureRoutes {
 			for _, method := range []string{http.MethodGet, http.MethodPost} {
 				assertToolsUnrouted(t, env.Do(toolsRequest(env, method, path)))
+			}
+		}
+	})
+
+	t.Run("POST <tools>/track/{eventName} tracks the event", func(t *testing.T) {
+		// tools.router.ts:141-159. The event name is the path parameter, the
+		// five identifiers come off the body, and the answer is 202 {"ok":true}
+		// whatever the four sinks did — track is awaited there and its result
+		// is discarded (:156-163).
+		cfg, rec := toolsRecordingConfig(t)
+		env := NewEnv(t, mount, cfg)
+
+		req := toolsPost(env, auth.ToolsTrackPath+"/identity.probe",
+			`{"data":{"k":"v"},"userId":"u1","tenantId":"acme","sessionId":"s1","correlationId":"c1"}`)
+		req.Header.Set("User-Agent", "probe/1.0")
+		got := env.Do(req)
+
+		AssertStatus(t, got, http.StatusAccepted)
+		if body := Body(t, got); body["ok"] != true {
+			t.Errorf("body = %v, want {\"ok\": true} (tools.router.ts:158)", body)
+		}
+
+		event := rec.onlyTracked(t)
+		for _, f := range []struct{ name, got, want string }{
+			{"EventName", event.EventName, "identity.probe"},
+			{"UserID", event.UserID, "u1"},
+			{"TenantID", event.TenantID, "acme"},
+			{"SessionID", event.SessionID, "s1"},
+			{"CorrelationID", event.CorrelationID, "c1"},
+			{"UserAgent", event.UserAgent, "probe/1.0"},
+		} {
+			if f.got != f.want {
+				t.Errorf("record.%s = %q, want %q", f.name, f.got, f.want)
+			}
+		}
+		if event.Meta["k"] != "v" {
+			t.Errorf("record.Meta = %v, want the body's data", event.Meta)
+		}
+		// And the event reached the stream as well as the store, which is what
+		// makes this the facade's Track and not a store write: no tenant, user
+		// or session topic is asserted here — EventTopics is auth_tools_test's.
+		topics, _ := rec.broadcasts()
+		if len(topics) == 0 {
+			t.Error("the tracked event reached no SSE topic (auth-tools.ts:233-246)")
+		}
+	})
+
+	t.Run("the client address is the configured seam, not X-Forwarded-For", func(t *testing.T) {
+		// tools-track-ip-comes-from-the-configured-seam. The reference's route
+		// reads the left-most element of X-Forwarded-For and falls back to the
+		// socket (tools.router.ts:144); this port reads HTTPConfig.ClientIP,
+		// whose default is the socket peer, so that one binary does not hold two
+		// address rules and a host's trust configuration is not overridden by
+		// one route.
+		t.Run("the default is the socket peer", func(t *testing.T) {
+			cfg, rec := toolsRecordingConfig(t)
+			env := NewEnv(t, mount, cfg)
+			req := toolsPost(env, auth.ToolsTrackPath+"/identity.probe", `{}`)
+			req.Header.Set("X-Forwarded-For", "203.0.113.9, 198.51.100.4")
+			AssertStatus(t, env.Do(req), http.StatusAccepted)
+
+			ip := rec.onlyTracked(t).IP
+			if strings.Contains(ip, "203.0.113.9") {
+				t.Errorf("record.IP = %q, which is the caller's X-Forwarded-For: the header must be "+
+					"read nowhere, or a caller chooses the address in the telemetry store", ip)
+			}
+			if ip == "" {
+				t.Error("record.IP is empty, want the socket peer with its port stripped")
+			}
+		})
+
+		t.Run("a configured ClientIP is authoritative", func(t *testing.T) {
+			cfg, rec := toolsRecordingConfig(t)
+			cfg.ClientIP = func(*http.Request) string { return "198.51.100.7" }
+			env := NewEnv(t, mount, cfg)
+			req := toolsPost(env, auth.ToolsTrackPath+"/identity.probe", `{}`)
+			req.Header.Set("X-Forwarded-For", "203.0.113.9")
+			AssertStatus(t, env.Do(req), http.StatusAccepted)
+
+			if ip := rec.onlyTracked(t).IP; ip != "198.51.100.7" {
+				t.Errorf("record.IP = %q, want the value HTTPConfig.ClientIP returned: a deployment "+
+					"that has stated which hop it trusts must not be overridden by this route", ip)
+			}
+		})
+	})
+
+	t.Run("the user id falls back to the authenticated principal", func(t *testing.T) {
+		// `userId ?? req.user?.id ?? req.user?.sub` (tools.router.ts:147). The
+		// principal is whatever the configured guard put on the context, which
+		// for a host passing its adapter's Middleware is the authenticated user.
+		principal := func(o *auth.ToolsOptions) {
+			o.Access = auth.ToolsProtected(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					ctx := auth.ContextWithUser(r.Context(), auth.User{ID: "from-the-guard"})
+					next.ServeHTTP(w, r.WithContext(ctx))
+				})
+			})
+		}
+		for _, c := range []struct{ name, body, want string }{
+			{"no userId in the body", `{}`, "from-the-guard"},
+			{"a userId in the body wins", `{"userId":"u9"}`, "u9"},
+			// "" is not nullish, so it wins there too — which is why the field
+			// is decoded into a pointer rather than a string.
+			{"an explicit empty userId wins", `{"userId":""}`, ""},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				cfg, rec := toolsRecordingConfig(t, principal)
+				env := NewEnv(t, mount, cfg)
+				AssertStatus(t, env.Do(toolsPost(env, auth.ToolsTrackPath+"/identity.probe", c.body)), http.StatusAccepted)
+				if got := rec.onlyTracked(t).UserID; got != c.want {
+					t.Errorf("record.UserID = %q, want %q", got, c.want)
+				}
+			})
+		}
+	})
+
+	t.Run("POST <tools>/notify/{target} broadcasts to that topic alone", func(t *testing.T) {
+		// tools.router.ts:166-178. The target is the path parameter, decoded —
+		// `user:123` is the document's own example (openapi.ts:1470) — and the
+		// four options come off the body.
+		cfg, rec := toolsRecordingConfig(t)
+		env := NewEnv(t, mount, cfg)
+
+		got := env.Do(toolsPost(env, auth.ToolsNotifyPath+"/user%3A123",
+			`{"data":{"m":1},"type":"alert","tenantId":"acme","userId":"u1","metadata":{"x":true}}`))
+
+		AssertStatus(t, got, http.StatusAccepted)
+		if body := Body(t, got); body["ok"] != true {
+			t.Errorf("body = %v, want {\"ok\": true} (tools.router.ts:177)", body)
+		}
+
+		topics, frames := rec.broadcasts()
+		if len(topics) != 1 || topics[0] != "user:123" {
+			t.Fatalf("broadcast topics = %v, want exactly [user:123]: notify addresses the topic it "+
+				"is given and does not fan out across EventTopics", topics)
+		}
+		frame := frames[0]
+		if frame.Type != "alert" || frame.TenantID != "acme" || frame.UserID != "u1" {
+			t.Errorf("frame = %+v, want type alert for acme/u1", frame)
+		}
+		if frame.Metadata["x"] != true {
+			t.Errorf("frame.Metadata = %v, want the body's metadata", frame.Metadata)
+		}
+		// Nothing was persisted: notify is not track, and the telemetry store
+		// is not one of the channels it reaches.
+		if events := rec.tracked(t); len(events) != 0 {
+			t.Errorf("notify wrote %d telemetry records, want 0", len(events))
+		}
+	})
+
+	t.Run("notify reaches the SSE channel and only that one", func(t *testing.T) {
+		// The route destructures data, type, tenantId, userId and metadata
+		// (tools.router.ts:168) and passes those four options (:171-176). It
+		// never reads `channels`, so NotifyOptions.Channels falls to its default
+		// ['sse'] on every request and the email and SMS channels of the facade
+		// are unreachable over HTTP — the quirk, and the safer shape.
+		cfg, rec := toolsRecordingConfig(t)
+		env := NewEnv(t, mount, cfg)
+		AssertStatus(t, env.Do(toolsPost(env, auth.ToolsNotifyPath+"/global",
+			`{"data":"hello","channels":["email","sms"],"userId":"u1"}`)), http.StatusAccepted)
+
+		topics, frames := rec.broadcasts()
+		if len(topics) != 1 || topics[0] != "global" {
+			t.Fatalf("broadcast topics = %v, want exactly [global]", topics)
+		}
+		// And the default type, which Notify resolves rather than the route
+		// (auth-tools.ts:298).
+		if frames[0].Type != "notification" {
+			t.Errorf("frame.Type = %q, want %q", frames[0].Type, "notification")
+		}
+		if frames[0].Data != "hello" {
+			t.Errorf("frame.Data = %v, want the body's data: notify's payload is not narrowed to an object", frames[0].Data)
+		}
+	})
+
+	t.Run("both routes go behind the configured guard", func(t *testing.T) {
+		// The reference spreads ...protect onto both (tools.router.ts:141,
+		// :166). A guard that refuses must stop the call before the facade sees
+		// it — a route that fanned out first and then refused would have sent
+		// the webhooks already.
+		refused := 0
+		cfg, rec := toolsRecordingConfig(t, func(o *auth.ToolsOptions) {
+			o.Access = auth.ToolsProtected(func(http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					refused++
+					w.WriteHeader(http.StatusForbidden)
+				})
+			})
+		})
+		env := NewEnv(t, mount, cfg)
+
+		for _, path := range []string{auth.ToolsTrackPath + "/identity.probe", auth.ToolsNotifyPath + "/global"} {
+			AssertStatus(t, env.Do(toolsPost(env, path, `{"data":{"k":"v"}}`)), http.StatusForbidden)
+		}
+		if refused != 2 {
+			t.Errorf("the guard ran %d times, want 2", refused)
+		}
+		if events := rec.tracked(t); len(events) != 0 {
+			t.Errorf("a refused call still tracked %d events", len(events))
+		}
+		if topics, _ := rec.broadcasts(); len(topics) != 0 {
+			t.Errorf("a refused call still broadcast to %v", topics)
+		}
+	})
+
+	t.Run("a body that will not decode is refused", func(t *testing.T) {
+		// tools-request-bodies-are-typed. The reference casts and cannot fail —
+		// `{"data": 42}` is tracked as 42 there, where Track takes a
+		// map[string]any here. The envelope is this router's own, a bare
+		// {"error": ...} (tools.router.ts:194, :230, :323), and nothing is
+		// handed to the facade.
+		cfg, rec := toolsRecordingConfig(t)
+		env := NewEnv(t, mount, cfg)
+		for _, c := range []struct{ path, body string }{
+			{auth.ToolsTrackPath + "/identity.probe", `{`},
+			{auth.ToolsTrackPath + "/identity.probe", `{"data": 42}`},
+			{auth.ToolsTrackPath + "/identity.probe", `{"tenantId": 7}`},
+			{auth.ToolsNotifyPath + "/global", `{"metadata": "not-an-object"}`},
+		} {
+			got := env.Do(toolsPost(env, c.path, c.body))
+			AssertStatus(t, got, http.StatusBadRequest)
+			body := Body(t, got)
+			if _, ok := body["error"].(string); !ok || len(body) != 1 {
+				t.Errorf("POST %s with %s answered %v, want a bare {\"error\": ...}", c.path, c.body, body)
+			}
+		}
+		if events := rec.tracked(t); len(events) != 0 {
+			t.Errorf("a refused body still tracked %d events", len(events))
+		}
+		if topics, _ := rec.broadcasts(); len(topics) != 0 {
+			t.Errorf("a refused body still broadcast to %v", topics)
+		}
+	})
+
+	t.Run("a bodyless call is accepted", func(t *testing.T) {
+		// express.json leaves req.body = {} and both handlers read undefined off
+		// it, so neither requires a body — which is why track's requestBody is
+		// documented `required: false` (openapi.ts:1400-1401).
+		cfg, rec := toolsRecordingConfig(t)
+		env := NewEnv(t, mount, cfg)
+		for _, path := range []string{auth.ToolsTrackPath + "/identity.probe", auth.ToolsNotifyPath + "/global"} {
+			AssertStatus(t, env.Do(toolsRequest(env, http.MethodPost, path)), http.StatusAccepted)
+		}
+		if event := rec.onlyTracked(t); event.EventName != "identity.probe" || len(event.Meta) != 0 {
+			t.Errorf("record = %+v, want identity.probe with no payload", event)
+		}
+	})
+
+	t.Run("a feature flag unmounts its own route and no other", func(t *testing.T) {
+		// `if (telemetry)` and `if (notify)` (tools.router.ts:140, :165): the
+		// route is not registered at all, so what answers is the router's 404
+		// and not a handler's refusal — and the document stops describing it.
+		for _, c := range []struct {
+			name string
+			edit func(*auth.ToolsOptions)
+			gone string
+			kept string
+		}{
+			{"telemetry off", func(o *auth.ToolsOptions) { o.DisableTelemetry = true },
+				auth.ToolsTrackPath + "/{eventName}", auth.ToolsNotifyPath + "/{target}"},
+			{"notify off", func(o *auth.ToolsOptions) { o.DisableNotify = true },
+				auth.ToolsNotifyPath + "/{target}", auth.ToolsTrackPath + "/{eventName}"},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				env := NewEnv(t, mount, toolsConfig(t, c.edit))
+				assertToolsUnrouted(t, env.Do(toolsRequest(env, http.MethodPost, c.gone)))
+				AssertStatus(t, env.Do(toolsRequest(env, http.MethodPost, c.kept)), http.StatusAccepted)
+
+				paths := toolsDocumentPaths(t, toolsDocument(t, env))
+				base := env.Config.ToolsPath()
+				if _, ok := paths[base+c.gone]; ok {
+					t.Errorf("the document still describes %q with its flag off", base+c.gone)
+				}
+				if _, ok := paths[base+c.kept]; !ok {
+					t.Errorf("the document no longer describes %q", base+c.kept)
+				}
+			})
+		}
+	})
+
+	t.Run("the two feature routes are POST only, with one segment", func(t *testing.T) {
+		// Express's :param captures a single segment and router.post registers
+		// POST alone, so every shape below matches no layer and ends at the
+		// router's 404 — ahead of the guard, which is why an unauthenticated
+		// caller is told 404 rather than 401.
+		env := NewEnv(t, mount, toolsConfig(t))
+		for _, prefix := range []string{auth.ToolsTrackPath, auth.ToolsNotifyPath} {
+			for _, c := range []struct{ method, path string }{
+				{http.MethodGet, prefix + "/probe"},
+				{http.MethodPut, prefix + "/probe"},
+				{http.MethodDelete, prefix + "/probe"},
+				{http.MethodPost, prefix},
+				{http.MethodPost, prefix + "/"},
+				{http.MethodPost, prefix + "/a/b"},
+			} {
+				t.Run(c.method+" "+c.path, func(t *testing.T) {
+					assertToolsUnrouted(t, env.Do(toolsRequest(env, c.method, c.path)))
+				})
 			}
 		}
 	})
@@ -419,7 +829,7 @@ func testTools(t *testing.T, mount Mounter) {
 		// toolsDocumentedRoutes also holds feature routes, which this option
 		// does not touch.
 		env := NewEnv(t, mount, toolsConfig(t, func(o *auth.ToolsOptions) { o.Docs.Enabled = false }))
-		for _, path := range []string{auth.DocsSpecPath, auth.DocsUIPath} {
+		for _, path := range toolsDocsRoutes {
 			assertToolsUnrouted(t, env.Do(toolsRequest(env, http.MethodGet, path)))
 		}
 	})
@@ -501,7 +911,7 @@ func testTools(t *testing.T, mount Mounter) {
 		// router.get registers GET alone (tools.router.ts:333, :348); anything
 		// else matches no layer and falls through to the router 404.
 		env := NewEnv(t, mount, toolsConfig(t))
-		for path := range toolsDocumentedRoutes {
+		for _, path := range toolsDocsRoutes {
 			for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
 				t.Run(method+" "+path, func(t *testing.T) {
 					assertToolsUnrouted(t, env.Do(toolsRequest(env, method, path)))

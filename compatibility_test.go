@@ -78,7 +78,9 @@ var wantDeviationIDs = []string{
 	"session-rotated-reports-one-session-id",
 	"sse-slow-consumer-is-disconnected",
 	"temp-token-is-typed-not-an-access-token",
+	"tools-request-bodies-are-typed",
 	"tools-router-requires-an-explicit-guard-decision",
+	"tools-track-ip-comes-from-the-configured-seam",
 	"totp-accepts-one-step-of-skew",
 	"totp-issuer-defaults-to-config-issuer",
 	"totp-setup-omits-qrcode",
@@ -241,6 +243,24 @@ var wantClaims = map[string][]string{
 	"tools-router-requires-an-explicit-guard-decision": {
 		"ToolsMounted", "Tools.Enabled", "Tools.Access", "authMiddleware",
 		"404", "ToolsPublic()", "process.stderr", "outgoing webhook", "sms",
+	},
+	// The header that is read nowhere, the seam that is read instead and its
+	// default, the reference's own two halves, and the precedent that decided
+	// it. `trust proxy` is what makes the reference's rule undecidable from
+	// inside a library rather than merely different, so an entry that lost it
+	// would read as this port preferring its own taste.
+	"tools-track-ip-comes-from-the-configured-seam": {
+		"X-Forwarded-For", "HTTPConfig.ClientIP", "socket peer",
+		"req.socket.remoteAddress", "trust proxy", "telemetry store",
+		"admin-cookie-secure-flag-is-configured-not-forwarded",
+	},
+	// Both statuses, both routes, the Go type that forces the question and the
+	// TypeScript cast that avoids it, plus the two facts that keep the entry
+	// honest: that a bodyless call is still accepted, and that the reference's
+	// own refusal for a malformed body is the same 400 from express.json.
+	"tools-request-bodies-are-typed": {
+		"400", "202", "map[string]any", "Record<string, unknown>",
+		"express.json", "<tools>/track", "<tools>/notify",
 	},
 	// Both directions of the reference's failure, the seam this port reads
 	// instead, and the precedent — ClientIP — that decided it.

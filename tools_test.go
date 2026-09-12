@@ -197,9 +197,11 @@ func TestToolsHandlerRoutes(t *testing.T) {
 	})
 
 	t.Run("everything else is a 404", func(t *testing.T) {
-		// The remaining feature routes are U23's and U25's, and the reference's
-		// router has no layer on its own root either. GET /stream is not here
-		// any more: U24 mounts it, and tools_stream_test.go is where it answers.
+		// The remaining feature routes are U25's, and the reference's router has
+		// no layer on its own root either. GET /stream is not here any more —
+		// U24 mounts it and tools_stream_test.go is where it answers — and
+		// track and notify are here on GET alone, because they are POST routes;
+		// TestToolsTrackAndNotifyRouting is where they answer.
 		for _, path := range []string{
 			DefaultToolsPath,
 			DefaultToolsPath + "/",
@@ -334,22 +336,158 @@ func TestGenerateToolsOpenAPISpec(t *testing.T) {
 		}
 	})
 
-	t.Run("without Docs the only feature route described is the stream", func(t *testing.T) {
-		// U24 mounts GET <tools>/stream and adds its path item here beside the
-		// switch case that mounts it; track, notify, the telemetry query and the
-		// inbound webhook are still U23's and U25's. A path item written ahead
-		// of its route would document an endpoint that answers 404, which is
-		// what the conformance suite exists to catch.
+	t.Run("the mounted feature routes follow their own flags", func(t *testing.T) {
+		// Three path items so far: track and notify under their flags
+		// (openapi.ts:1385, :1456) and the stream under its own (:1493). The two
+		// U25 routes are described by nothing because they are mounted by
+		// nothing — a path item written ahead of its route would document an
+		// endpoint that answers 404, which is what the conformance suite exists
+		// to catch.
 		document := GenerateToolsOpenAPISpec(ToolsOpenAPIInfo{Telemetry: true, Notify: true, Stream: true, Webhook: true})
 		paths := document["paths"].(map[string]any)
-		if len(paths) != 1 {
-			t.Errorf("paths = %v, want only the stream until U23 mounts its two", paths)
+		for path, method := range map[string]string{
+			DefaultToolsPath + ToolsTrackPath + "/{eventName}": "post",
+			DefaultToolsPath + ToolsNotifyPath + "/{target}":   "post",
+			DefaultToolsPath + ToolsStreamPath:                 "get",
+		} {
+			item, ok := paths[path].(map[string]any)
+			if !ok {
+				t.Fatalf("the document does not describe %q", path)
+			}
+			if _, ok := item[method]; !ok {
+				t.Errorf("%q is described without %s", path, strings.ToUpper(method))
+			}
 		}
-		if _, ok := paths[DefaultToolsPath+ToolsStreamPath]; !ok {
-			t.Errorf("the document does not describe %q (openapi.ts:1492-1522)", DefaultToolsPath+ToolsStreamPath)
+		if len(paths) != 3 {
+			t.Errorf("paths = %v, want exactly track, notify and the stream until U25 mounts its two", paths)
 		}
-		if off := GenerateToolsOpenAPISpec(ToolsOpenAPIInfo{Telemetry: true, Notify: true, Webhook: true}); len(off["paths"].(map[string]any)) != 0 {
-			t.Errorf("paths = %v with the stream flag off, want none", off["paths"])
+
+		if off := GenerateToolsOpenAPISpec(ToolsOpenAPIInfo{Webhook: true}); len(off["paths"].(map[string]any)) != 0 {
+			t.Errorf("paths = %v, want none: all three flags are off", off["paths"])
+		}
+	})
+}
+
+// TestToolsPathParam pins the rule the two parameterised routes match on:
+// exactly one segment below the route prefix, percent-decoded, and "" for
+// everything else. The %2F case is the reason it reads EscapedPath rather than
+// Path — Express captures the raw segment and decodes it afterwards, so a
+// parameter carrying an encoded slash is one parameter there and would be two
+// segments to a decoded matcher.
+func TestToolsPathParam(t *testing.T) {
+	cfg := toolsTestConfig()
+	param := func(path string) string {
+		return toolsPathParam(httptest.NewRequest(http.MethodPost, path, nil), cfg, ToolsTrackPath)
+	}
+
+	for path, want := range map[string]string{
+		DefaultToolsPath + "/track/identity.probe":    "identity.probe",
+		DefaultToolsPath + "/track/a%2Fb":             "a/b",
+		DefaultToolsPath + "/track/user%3A123":        "user:123",
+		DefaultToolsPath + "/track/a":                 "a",
+		DefaultToolsPath + "/track":                   "",
+		DefaultToolsPath + "/track/":                  "",
+		DefaultToolsPath + "/track/a/b":               "",
+		DefaultToolsPath + "/notify/global":           "",
+		DefaultToolsPath + DocsSpecPath:               "",
+		DefaultToolsPath + "/tracking/identity.probe": "",
+	} {
+		if got := param(path); got != want {
+			t.Errorf("toolsPathParam(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// TestToolsTrackAndNotifyRouting is the routing half of the two routes: which
+// requests reach a handler at all, which fall through to the router's 404, and
+// that a switched-off flag unmounts the route rather than making it refuse.
+//
+// What the handlers then do with a request — the body, the address, the 202 —
+// is pinned for all four adapters in adapter/internal/wiretest/tools.go.
+func TestToolsTrackAndNotifyRouting(t *testing.T) {
+	serve := func(cfg HTTPConfig, method, path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		(&Auth{}).ToolsHandler(cfg).ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+		return rec
+	}
+	cfg := toolsTestConfig()
+
+	t.Run("POST with one segment is accepted", func(t *testing.T) {
+		for _, path := range []string{
+			DefaultToolsPath + "/track/identity.probe",
+			DefaultToolsPath + "/notify/user%3A123",
+		} {
+			rec := serve(cfg, http.MethodPost, path)
+			if rec.Code != http.StatusAccepted {
+				t.Errorf("POST %s = %d, want 202", path, rec.Code)
+			}
+			if body := strings.TrimSpace(rec.Body.String()); body != `{"ok":true}` {
+				t.Errorf("POST %s body = %s, want {\"ok\":true}", path, body)
+			}
+		}
+	})
+
+	t.Run("every other shape is the router's 404", func(t *testing.T) {
+		// Express's :param captures one segment and router.post registers POST
+		// alone, so each of these matches no layer at all — which is why they
+		// answer 404 rather than whatever the guard would have answered.
+		for _, c := range []struct{ method, path string }{
+			{http.MethodGet, DefaultToolsPath + "/track/identity.probe"},
+			{http.MethodPut, DefaultToolsPath + "/track/identity.probe"},
+			{http.MethodPost, DefaultToolsPath + "/track"},
+			{http.MethodPost, DefaultToolsPath + "/track/"},
+			{http.MethodPost, DefaultToolsPath + "/track/a/b"},
+			{http.MethodGet, DefaultToolsPath + "/notify/global"},
+			{http.MethodPost, DefaultToolsPath + "/notify"},
+			{http.MethodPost, DefaultToolsPath + "/notify/a/b"},
+		} {
+			if rec := serve(cfg, c.method, c.path); rec.Code != http.StatusNotFound {
+				t.Errorf("%s %s = %d, want 404", c.method, c.path, rec.Code)
+			}
+		}
+	})
+
+	t.Run("a switched-off flag unmounts its route", func(t *testing.T) {
+		// `if (telemetry)` and `if (notify)` (tools.router.ts:140, :165): the
+		// route is not registered, so the answer is the router's 404 and not a
+		// handler's refusal. Each flag unmounts its own route and no other.
+		for _, c := range []struct {
+			name string
+			edit func(*ToolsOptions)
+			gone string
+			kept string
+		}{
+			{"telemetry off", func(o *ToolsOptions) { o.DisableTelemetry = true },
+				DefaultToolsPath + "/track/identity.probe", DefaultToolsPath + "/notify/global"},
+			{"notify off", func(o *ToolsOptions) { o.DisableNotify = true },
+				DefaultToolsPath + "/notify/global", DefaultToolsPath + "/track/identity.probe"},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				off := toolsTestConfig()
+				c.edit(&off.Tools)
+				if rec := serve(off, http.MethodPost, c.gone); rec.Code != http.StatusNotFound {
+					t.Errorf("POST %s = %d, want 404", c.gone, rec.Code)
+				}
+				if rec := serve(off, http.MethodPost, c.kept); rec.Code != http.StatusAccepted {
+					t.Errorf("POST %s = %d, want 202", c.kept, rec.Code)
+				}
+			})
+		}
+	})
+
+	t.Run("a body that will not decode is refused", func(t *testing.T) {
+		// tools-request-bodies-are-typed. The envelope is this router's own —
+		// a bare {"error": ...} — and not the auth router's.
+		for _, body := range []string{`{`, `{"data": 42}`, `[1,2]`, `{"tenantId": 7}`} {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, DefaultToolsPath+"/track/identity.probe", strings.NewReader(body))
+			(&Auth{}).ToolsHandler(cfg).ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("POST with body %s = %d, want 400", body, rec.Code)
+			}
+			if got := strings.TrimSpace(rec.Body.String()); got != `{"error":"Invalid request body"}` {
+				t.Errorf("POST with body %s answered %s", body, got)
+			}
 		}
 	})
 }
