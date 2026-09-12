@@ -43,9 +43,9 @@ import (
 // — the widest of them is the OAuth conflict site, which spreads an error's own
 // data under a provider key (node-auth auth.router.ts:1480) and is still an
 // object. Keeping the narrower type means Event.Data is assignable to
-// WebhookPayload.Data and to TelemetryEvent.Meta with no conversion and no
-// runtime type check, and a publisher cannot pass a shape a JSON consumer would
-// receive as a bare string.
+// OutgoingWebhookEvent.Data and to TelemetryEvent.Meta with no conversion and
+// no runtime type check, and a publisher cannot pass a shape a JSON consumer
+// would receive as a bare string. Event.OutgoingWebhook is what relies on that.
 //
 // The field order is the order this struct already had, with the four new
 // fields appended. The reference's order is different (event, timestamp, data,
@@ -113,8 +113,9 @@ func (e Event) WithRequestContext(ctx context.Context) Event {
 // for this event: OutgoingWebhookEvent.Metadata, built the way the reference
 // builds it (auth-tools.ts:257-262).
 //
-// It exists so that the webhook envelope U19 will send is derived from the
-// event rather than assembled a second time beside it. OutgoingWebhookEvent
+// It exists so that the webhook envelope WebhookSender sends is derived from
+// the event rather than assembled a second time beside it —
+// Event.OutgoingWebhook is its one caller. OutgoingWebhookEvent
 // already holds Metadata as a map[string]any, and the alternative — a second
 // struct with the same four identifiers — would be the thing that drifts.
 //

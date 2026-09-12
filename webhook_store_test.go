@@ -111,17 +111,17 @@ func TestWebhookConfigMatches(t *testing.T) {
 	}
 }
 
-// WebhookConfig and WebhookEndpoint read an empty events list in opposite ways,
-// and both are deliberate: the store's rule is the reference's positive
-// containment test, the dispatcher's is the in-code list this port shipped
-// before the store existed. U19 (M9) merges the two; until then neither may be
-// quietly aligned to the other.
-func TestEmptyEventsMeansTheOppositeInTheDispatcher(t *testing.T) {
+// An empty events list subscribes a configuration to nothing. The removed
+// WebhookDispatcher read the same emptiness as "every event", which is why it
+// could not be pointed at a store rather than replaced; the store's rule is the
+// reference's positive containment test (webhook-store.interface.ts:106) and is
+// the only one left.
+func TestEmptyEventsSubscribesToNothing(t *testing.T) {
 	if (WebhookConfig{}).Matches("identity.auth.login.success", "") {
 		t.Error("WebhookConfig with no events matched; the reference subscribes it to nothing")
 	}
-	if !webhookMatches(WebhookEndpoint{}, "identity.auth.login.success") {
-		t.Error("WebhookEndpoint with no events did not match; webhooks.go means every event by it")
+	if (WebhookConfig{Events: []string{}}).Matches("identity.auth.login.success", "") {
+		t.Error("WebhookConfig with an empty events slice matched; absent and empty mean the same here")
 	}
 }
 

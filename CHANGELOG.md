@@ -8,7 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-
 - The admin console's skeleton: the access guard, its own login and logout, the
   two static asset routes and the HTML shell, mounted at `HTTPConfig.Admin.Path`
   — `/admin` by default, and a sibling of `APIPrefix` rather than a child of it,
@@ -22,18 +21,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   legacy `adminSecret` and the ordinary user store, in that order, and sets a
   24-hour session cookie; `POST <admin>/logout` clears it. Everything M8 mounts
   from here sits behind `AdminGuard.Protect`.
+- **The reference's outbound webhook wire format** (`webhook_sender.go`,
+  `WebhookSender`). The port of `src/tools/webhook-sender.ts`: one `POST` to
+  `WebhookConfig.URL` carrying the serialised `OutgoingWebhookEvent` and
+  `Content-Type: application/json`, `X-Webhook-Event`, `X-Webhook-Delivery`,
+  `X-Webhook-Timestamp` and — only when the subscription holds a secret —
+  `X-Webhook-Signature: sha256=<hex HMAC-SHA256 of the body>`
+  (`webhook-sender.ts:24-33`, `:54-56`). Three details of it are reproduced
+  rather than improved, because a receiver would see each one: the delivery id
+  is minted *inside* the retry loop (`:27`), so it identifies an attempt and not
+  an event and cannot be used to deduplicate; `X-Webhook-Timestamp` is the
+  envelope's own timestamp rather than the moment of the request (`:28`), so a
+  retry an hour later still names the instant the event happened; and the body
+  is serialised once before the first attempt (`:20`), so every attempt carries
+  identical bytes and an identical signature. The timestamp is a string in the
+  exact shape `toISOString()` produces — UTC, always three fractional digits, a
+  literal `Z` — which is what `OutgoingWebhookEvent.Timestamp` has said since
+  v0.8.0 and what the new exported `WebhookTimestamp` produces: Go's RFC 3339
+  emits as many fractional digits as the value happens to have, and a receiver
+  checking a signature over the raw body would see a different string for the
+  same instant. `Event.OutgoingWebhook` builds the envelope from an `Event`,
+  taking `metadata` from `Event.WebhookMetadata()` rather than assembling the
+  four identifiers a second time.
+- **Retry, with the reference's arithmetic** (`WebhookSender.Send`). Stated in
+  attempts rather than retries, because the two are off by one:
+  `while (attempt <= maxRetries)` runs `WebhookConfig.Retries()+1` times, so the
+  default 3 is **four** requests. A non-2xx and a transport failure are the same
+  failure and both retry while attempts remain (`webhook-sender.ts:37-43`);
+  between them the sender waits `WebhookConfig.RetryDelay()` doubled once per
+  retry already made — with the defaults 1s, 2s, 4s — and the last attempt is
+  not followed by a wait, because the reference returns out of the loop before
+  the delay (`:39`, `:42`). Both defaults are resolved in the sender and not in
+  the store, which is why `MaxRetries` and `RetryDelayMs` are `*int`: a stored
+  `0` means "deliver once, never retry" and must not decay into four
+  deliveries, and a stored negative count sends nothing at all because
+  `while (attempt <= -1)` never runs. The exhaustion is silent on the wire and
+  in the log, as the reference's is.
+- **A pluggable deliverer** (`WebhookDeliverer`, `WebhookAttempt`,
+  `HTTPWebhookDeliverer`, `WebhookDelivererFunc`). The seam that replaces the
+  reference's bare `fetch` (`webhook-sender.ts:36`), and it sits *below* the
+  format and *below* the policy: the sender has already built the envelope,
+  signed it, minted the attempt's delivery id and decided how many attempts
+  remain, so an implementation POSTs `Body` to `URL` with `Headers` and reports
+  what happened. A host moving delivery onto a queue reimplements neither the
+  signature, nor the retry policy, nor the envelope. `WebhookAttempt` is
+  self-contained and JSON-serialisable, and deliberately carries `ConfigID` but
+  never the subscription's secret. The doc comment on `WebhookDeliverer` states
+  what a host owes in full — no ordering is promised or required; this package
+  promises at-most-once and persists nothing, so at-least-once is the host's to
+  buy by making the call durable before returning `nil`; once it returns `nil`
+  this package is finished, so a queueing deliverer owns the retry policy and
+  the dead-letter queue for the real request, and reproduces the reference's
+  schedule from `Retries()` and `RetryDelay()` rather than from hard-coded
+  numbers; and the delivery id must be resent rather than re-minted. The
+  default is `HTTPWebhookDeliverer`, which is the reference's own behaviour plus
+  the request timeout Go needs and the reference does without
+  (`DefaultWebhookTimeout`, 10s, per-instance).
+- **`WebhookEmitter`** — step 4 of the reference's `AuthTools.track`
+  (`auth-tools.ts:263-281`) and exactly that step: look the subscriptions up,
+  build one envelope, fan out. The lookup is synchronous on the calling
+  goroutine as `track`'s is; a store failure becomes an empty result and never a
+  failed publish (`.catch(() => [])`, `:265`); the envelope is built once and
+  shared, so two subscriptions receive byte-identical bodies; and every delivery
+  runs on its own goroutine with `context.WithoutCancel` of the caller's
+  context, because the reference does not await `send` (`:280`) and a delivery
+  that died when the response was written would be a retry policy that never
+  retried. Failures are silent by default, as the reference's are; the optional
+  `OnError` hook is how a deployment buys the observability back.
+  `WebhookEmitter.Subscribe(bus)` is the one-line bridge from the event bus,
+  and it is a call a host makes — **nothing in this package subscribes an
+  emitter for you.** Neither tree ships such a bridge, `AuthTools` is U21, and
+  the order webhooks run in relative to telemetry, the bus and SSE is one
+  decision that belongs to the facade that owns all four.
 
-  Four deliberate differences, all in the register and all in the same direction.
-  An admin block with no `AccessPolicy` and no `Secret` is **not mounted**, where
-  the reference serves the console unguarded after a warning on stderr — ask for
-  that by name with `AccessPolicy: auth.AdminOpen()`. The unauthenticated
-  browser branch reaches the login shell and nothing else, where the reference
-  lets *any* `Accept: text/html` GET through to *any* guarded route. The guard
-  accepts only a typed admin token or an access token, so a refresh token and the
-  pre-second-factor step-up token are not admin credentials, and `isRoot` is
-  honoured only on the token `<admin>/login` mints. And the session cookie's
-  `Secure` flag and prefix come from `CookieOptions`, never from
-  `X-Forwarded-Proto`.
+### Changed
+- **BREAKING — `WebhookDispatcher` and its wire are removed.** `webhooks.go` is
+  gone, and with it `WebhookDispatcher`, `NewWebhookDispatcher`,
+  `(*WebhookDispatcher).Dispatch`, `WebhookEndpoint`, `WebhookPayload` and the
+  `X-Signature-SHA256` header. None of it was the reference's: the endpoint
+  list, the `{id, event, timestamp, data}` envelope and that header name were
+  this port's own invention, written before `webhook-sender.ts` was ported, and
+  v0.8.0's `WebhookStore` entry named this release as the one that would replace
+  them. A deployment on the old type changes three things. **Subscriptions move
+  from code into a store**: build a `WebhookStore` — `NewMemoryWebhookStore()`
+  is the in-process one — and `AddWebhook` a `WebhookConfig` per endpoint
+  instead of passing `WebhookEndpoint` values to a constructor. Note that an
+  empty `Events` list now subscribes to **nothing**, where `WebhookEndpoint`
+  read the same emptiness as every event: use `auth.WebhookEventWildcard` for
+  the old behaviour. **The wiring changes shape**:
+  `bus.Subscribe("*", func(e auth.Event) { dispatcher.Dispatch(ctx, e) })`
+  becomes `(&auth.WebhookEmitter{Store: store}).Subscribe(bus)`. **And every
+  receiver has to be updated**, because both the header and the body changed: a
+  receiver reads the signature from `X-Webhook-Signature` rather than
+  `X-Signature-SHA256` (`VerifyWebhookSignature` is unchanged, keeps its
+  signature and now lives in `webhook_sender.go`), and it decodes an
+  `OutgoingWebhookEvent` — `{event, version, timestamp, data, metadata}`, with
+  `timestamp` a string and the four identifiers under `metadata` — rather than
+  `WebhookPayload`'s `{id, event, timestamp, data}`. Deliveries are also no
+  longer a single fire-and-forget POST: they retry, so a receiver must be
+  idempotent, and it may not key that idempotency on `X-Webhook-Delivery`, which
+  changes per attempt. `examples/chi-postgres` shows the whole migration.
+  Nothing else in the package referenced the removed type, no route changed on
+  any adapter, and no entry was added to the deviation register — this release
+  removes a deviation's worth of difference rather than adding one.
 
 ## [0.9.0] - 2026-09-12
 

@@ -16,7 +16,7 @@ Complete reference for every public type, interface, function, and option in the
 8. [Custom Claims](#custom-claims)
 9. [OAuth 2.0 + Account Linking](#oauth-20--account-linking)
 10. [SSE (Server-Sent Events)](#sse-server-sent-events)
-11. [Webhooks](#webhooks)
+11. [Outgoing webhooks](#outgoing-webhooks)
 12. [Telemetry](#telemetry)
 13. [Mailer](#mailer)
 14. [Delivery](#delivery)
@@ -1152,26 +1152,114 @@ type SseDistributor interface {
 
 ---
 
-## Webhooks
+## Outgoing webhooks
 
-### `NewWebhookDispatcher(endpoints ...WebhookEndpoint) *WebhookDispatcher`
+The reference's own wire (`src/tools/webhook-sender.ts`). Subscriptions live in a
+`WebhookStore` (see the store seams above), not in a list hard-coded at
+construction time, and the store is the only filter in the chain: `FindByEvent`
+decides who is delivered to and the sender POSTs whatever it is handed, checking
+neither `isActive` nor `events` a second time.
 
-### `WebhookEndpoint`
+### The request
+
+One `POST` to `WebhookConfig.URL` per matching subscription, with
+`Content-Type: application/json` and
+
+| Header | Value |
+|--------|-------|
+| `X-Webhook-Event` | the event name, e.g. `identity.auth.login.success` |
+| `X-Webhook-Delivery` | a fresh UUID **per attempt**, not per event — it is minted inside the retry loop, so it cannot be used to deduplicate |
+| `X-Webhook-Timestamp` | the *envelope's* timestamp, not the moment of the request: a retry still names the instant the event happened |
+| `X-Webhook-Signature` | `sha256=<hex HMAC-SHA256 of the raw body, keyed by Secret>` — only when `Secret` is set; `VerifyWebhookSignature` checks it |
+
+The body is `OutgoingWebhookEvent`:
+
+```json
+{"event":"identity.auth.login.success","version":"1","timestamp":"2026-09-12T10:00:00.123Z","data":{"method":"local"},"metadata":{"userId":"usr_…","tenantId":"t1","sessionId":"ses_…","correlationId":"…"}}
+```
+
+`timestamp` is a **string**, in exactly the shape JavaScript's `toISOString()`
+produces — UTC, always three fractional digits, a literal `Z` — because Go's
+RFC 3339 emits as many digits as the value has, and a receiver checking a
+signature over the raw body would see a different string for the same instant.
+`WebhookTimestamp(t)` produces it. `data` is always present and is `null` when
+the event carried none. `metadata` carries only the identifiers that are known;
+the client address and user agent are deliberately **not** among them, because a
+webhook leaves the deployment.
+
+### Retry
+
+`WebhookConfig.Retries()` (default 3) is a count of *retries*, so the default is
+**four** requests. A non-2xx answer and a transport failure are the same failure
+and both retry while attempts remain; between them the sender waits
+`WebhookConfig.RetryDelay()` (default 1s) doubled once per retry already made —
+1s, 2s, 4s — and the last attempt is not followed by a wait. A stored
+`maxRetries` of `0` means "deliver once, never retry"; a negative one sends
+nothing at all. Exhaustion is silent, as it is in the reference.
+
+Because deliveries retry, **a receiver must be idempotent** — and must not key
+that idempotency on `X-Webhook-Delivery`.
+
+### `WebhookDeliverer` — the delivery seam
 
 ```go
-type WebhookEndpoint struct {
-    ID, URL, Secret string
-    Events          []string // empty = all events
+type WebhookDeliverer interface {
+    DeliverWebhook(ctx context.Context, attempt WebhookAttempt) error
 }
 ```
 
-### `(*WebhookDispatcher).Dispatch(ctx, Event)`
+The seam sits below the format and below the policy: a `WebhookAttempt` is a
+request that is already built, already signed and already numbered, so a host
+replacing the transport reimplements neither the envelope, nor the signature,
+nor the back-off. It is self-contained and JSON-serialisable, and carries
+`ConfigID` but never the subscription's secret — so it can go straight onto a
+queue. The default is `HTTPWebhookDeliverer`, which is the reference's own
+behaviour with a per-instance `Timeout` (`DefaultWebhookTimeout`, 10s).
 
-Sends the event to all matching endpoints asynchronously. Signs each request with `X-Signature-SHA256: sha256=<hmac-hex>`.
+What a host owes when it replaces the default — the full contract is on the
+interface's doc comment:
+
+- **Ordering**: none is promised and none is required.
+- **Delivery**: this package promises at-most-once and persists nothing. A host
+  that needs at-least-once buys it by making `DeliverWebhook` durable before it
+  returns `nil`.
+- **Retry**: once `DeliverWebhook` returns `nil` this package is finished. A
+  queueing deliverer owns the retry policy and the dead-letter queue for the
+  real request, and reproduces the reference's schedule by reading
+  `WebhookConfig.Retries()` and `RetryDelay()` rather than hard-coding 3 and 1s.
+- **Idempotency**: resend the `X-Webhook-Delivery` you were handed; do not mint
+  one.
+- **Concurrency**: one goroutine per delivery; the call must be safe for
+  concurrent use and must bound its own work.
+
+### `WebhookEmitter` — wiring it up
+
+```go
+store := auth.NewMemoryWebhookStore()
+store.AddWebhook(ctx, auth.WebhookConfig{
+    URL:    "https://hooks.example.com/auth",
+    Secret: secret,
+    Events: []string{auth.EventAuthLoginSuccess}, // or auth.WebhookEventWildcard
+})
+
+webhooks := &auth.WebhookEmitter{Store: store}
+webhooks.Subscribe(bus) // the whole of the bridge from the event bus
+```
+
+`Emit` looks the subscriptions up synchronously, builds one envelope shared by
+every delivery, and fires each on its own goroutine; it returns without waiting.
+A store failure means "no webhooks for this event", never a failed publish.
+Failures are silent by default — set `OnError` to hear about them.
+
+**Nothing subscribes an emitter for you.** Which events reach a webhook is the
+host's call; the facade that orders webhooks against telemetry, the bus and SSE
+arrives with the `AuthTools` port.
 
 ### `VerifyWebhookSignature(secret string, body []byte, sigHeader string) error`
 
-Validates an inbound webhook signature header.
+Validates an `X-Webhook-Signature` header against the raw body it should cover,
+in constant time. Used by a receiver; it is also what verifies the delivery and
+claims webhooks below, which share this envelope.
 
 ---
 
