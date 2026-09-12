@@ -564,7 +564,7 @@ func openAPIPaths(prefix string) map[string]any {
 				"parameters":  tokenDelivery,
 				"requestBody": body(schema("RegisterInput")),
 				"responses": respond(http.StatusCreated, "Registered", schema("RegisterResult"),
-					HTTPErrInvalidBody, HTTPErrWeakPassword, HTTPErrUserExists),
+					HTTPErrInvalidBody, HTTPErrInvalidInput, HTTPErrWeakPassword, HTTPErrUserExists),
 			},
 		},
 		prefix + "/login": map[string]any{

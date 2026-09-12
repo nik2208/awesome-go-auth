@@ -69,9 +69,35 @@ func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
+// Register creates a user and opens a session for them.
+//
+// The two fields are required, and their absence is refused before any store is
+// touched — the order the default register handler on the private dev line
+// node-auth works in, which throws AuthError('Email and password are required',
+// 'INVALID_INPUT', 400) before it hashes the password or calls userStore.create
+// (node-auth auth.router.ts:515-525, resolved against DevLineRevision). That is
+// the dev line and not the published reference at ReferenceRevision, whose
+// /register is mounted only when the host supplies options.onRegister
+// (auth.router.ts:713) and which has no default handler and no INVALID_INPUT
+// code at all. Without the check an empty password reached the length test and
+// came back as ErrWeakPassword, which tells a caller who sent no password to
+// choose a stronger one, and an empty address reached the store and created a
+// user with a blank email.
+//
+// The check runs after normalisation, so an address that is only whitespace is
+// refused here rather than stored as the empty string. The dev line tests the
+// untrimmed body value and would accept it; this is the narrower reading, and
+// it can only refuse a request the dev line would have turned into an account
+// with no usable address.
+//
+// A successful call also opens a session, which the published reference does
+// not: see the register-issues-a-session entry in CompatibilityNotes.
 func (s *Service) Register(ctx context.Context, in RegisterInput) (User, AuthTokens, error) {
 	var zeroTokens AuthTokens
 	in.Email = normalizeEmail(in.Email)
+	if in.Email == "" || in.Password == "" {
+		return User{}, zeroTokens, ErrInvalidInput
+	}
 	if len(in.Password) < s.cfg.MinPasswordLen {
 		return User{}, zeroTokens, ErrWeakPassword
 	}

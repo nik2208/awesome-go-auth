@@ -603,6 +603,60 @@ func testRegister(t *testing.T, mount Mounter) {
 		AssertError(t, rec, http.StatusConflict, "User already exists", auth.CodeUserExists)
 	})
 
+	// A body missing either credential is refused before any store work, with
+	// the message and code of the private dev line node-auth — not as a weak
+	// password, which is what an absent password used to be reported as. The
+	// same refusal has to come back in both delivery modes: the check precedes
+	// the branch that decides between cookies and body tokens, and a bearer
+	// client that got a different answer here would have a second failure shape
+	// to handle.
+	//
+	// The two ways a caller asks for its tokens, kept local: only this loop uses
+	// them. noCookiesAtAll is the stronger claim bearer mode can carry — cookie
+	// mode still gets the CSRF cookie from the middleware on every response,
+	// refusals included, so there the claim has to be made per credential name.
+	registerDeliveryModes := []struct {
+		name           string
+		apply          func(*http.Request)
+		noCookiesAtAll bool
+	}{
+		{"cookie mode", func(*http.Request) {}, false},
+		{"bearer mode", func(r *http.Request) { r.Header.Set(auth.AuthStrategyHeader, auth.AuthStrategyBearer) }, true},
+	}
+	for _, mode := range registerDeliveryModes {
+		t.Run("missing credentials "+mode.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name string
+				body map[string]string
+			}{
+				{"no email", map[string]string{"password": "password1", "tenantId": "t1"}},
+				{"no password", map[string]string{"email": "missingpw@example.com", "tenantId": "t1"}},
+				{"neither, keys absent", map[string]string{"tenantId": "t1"}},
+				{"neither, keys empty", map[string]string{"email": "", "password": "", "tenantId": "t1"}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					env := NewEnv(t, mount, auth.DefaultHTTPConfig())
+					req := env.Request(http.MethodPost, "/register", tc.body)
+					mode.apply(req)
+					rec := env.Do(req)
+					AssertError(t, rec, http.StatusBadRequest, "Email and password are required", auth.CodeInvalidInput)
+					// The refusal has to grant nothing, which the envelope
+					// alone does not say. AssertError pins the body to exactly
+					// {error, code}, so an accessToken or refreshToken leaked
+					// into it already fails there in either mode; the cookie
+					// jar is the half it does not cover, and a refusal that
+					// still set an access or refresh cookie would otherwise
+					// pass every assertion above.
+					AssertNoCookie(t, rec, hostAccess)
+					AssertNoCookie(t, rec, hostRefresh)
+					if mode.noCookiesAtAll {
+						AssertNoCookies(t, rec)
+					}
+				})
+			}
+		})
+	}
+
 	t.Run("weak password", func(t *testing.T) {
 		env := NewEnv(t, mount, auth.DefaultHTTPConfig())
 		rec := env.Do(env.Request(http.MethodPost, "/register", map[string]string{"email": "weak@example.com", "password": "x"}))

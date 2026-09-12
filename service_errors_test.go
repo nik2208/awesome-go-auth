@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -41,13 +42,75 @@ func TestRegister_WeakPassword(t *testing.T) {
 	}
 }
 
-func TestRegister_EmptyPassword(t *testing.T) {
-	svc := newTestSvc(t)
-	_, _, err := svc.Register(context.Background(), RegisterInput{
-		Email: "nopw@example.com", Password: "", TenantID: "t1",
-	})
-	if err != ErrWeakPassword {
-		t.Fatalf("expected ErrWeakPassword, got %v", err)
+// A missing field is refused as a missing field, not as a weak password: the
+// default register handler on the private dev line node-auth checks both for
+// presence before it hashes or stores anything (node-auth
+// auth.router.ts:515-525, resolved against DevLineRevision — the published
+// reference has no default register handler), and until this test an empty
+// password fell through to the length check and came back as ErrWeakPassword
+// while an empty address reached the store and was written.
+func TestRegister_MissingFieldsAreInvalidInput(t *testing.T) {
+	cases := []struct {
+		name  string
+		email string
+		pw    string
+	}{
+		{"no password", "nopw@example.com", ""},
+		{"no email", "", "password1"},
+		{"neither", "", ""},
+		// Trimmed to nothing: the address the store would hold is the empty one.
+		{"whitespace email", "   ", "password1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newTestSvc(t)
+			_, _, err := svc.Register(context.Background(), RegisterInput{
+				Email: tc.email, Password: tc.pw, TenantID: "t1",
+			})
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("expected ErrInvalidInput, got %v", err)
+			}
+		})
+	}
+}
+
+// The store must not have been reached at all, in any of the four shapes: the
+// refusal is what stops a blank or whitespace-only address becoming a row.
+// Probing one spelling is not enough — a regression that stored the untrimmed
+// address would be invisible to a lookup on the empty string — so this asserts
+// every spelling the four calls could have been keyed under and then, because a
+// lookup only finds the key it is given, that the store is empty outright.
+//
+// The whitespace address is the case worth guarding: it is the one the dev line
+// would have accepted (its check is on the untrimmed body value), so it is the
+// one a future "match the dev line exactly" edit is most likely to let through.
+func TestRegister_MissingFieldsCreateNoUser(t *testing.T) {
+	users := NewMemoryUserStore()
+	svc, err := NewService(testConfig("errtest12345678901234567890123456"), users, NewMemorySessionStore())
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	ctx := context.Background()
+
+	for _, in := range []RegisterInput{
+		{Email: "", Password: "password1", TenantID: "t1"},
+		{Email: "   ", Password: "password1", TenantID: "t1"},
+		{Email: "nopw@example.com", Password: "", TenantID: "t1"},
+		{Email: "", Password: "", TenantID: "t1"},
+	} {
+		if _, _, err := svc.Register(ctx, in); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("Register(email=%q, password=%q): expected ErrInvalidInput, got %v",
+				in.Email, in.Password, err)
+		}
+	}
+
+	for _, email := range []string{"", "   ", "nopw@example.com"} {
+		if _, err := users.GetUserByEmail(ctx, email, "t1"); err == nil {
+			t.Errorf("a user was created for email %q before the refusal", email)
+		}
+	}
+	if n := len(users.byID); n != 0 {
+		t.Errorf("store holds %d user(s) after four refused registrations, want 0", n)
 	}
 }
 

@@ -92,6 +92,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new on the wire: no new status, no new code, no new body field, on this route
   or any other. No route, request body or response shape changes. See
   README_DETAILED.md, "Password verifier (migration seam)".
+- **`ErrInvalidInput`, `CodeInvalidInput` and `HTTPErrInvalidInput`** — the
+  sentinel, the `INVALID_INPUT` code and the catalog entry behind that refusal,
+  mapped in `HTTPErrorFor` and documented on `POST /register` in the generated
+  OpenAPI document alongside `INVALID_BODY`, `WEAK_PASSWORD` and `USER_EXISTS`.
+- **`DevLineRevision`** — the second tree this package cites, `nik2208/node-auth`
+  at `e8af923` (unreleased). Nothing in the deviation register resolves against
+  it (`Deviation.Citations` is `ReferenceRevision` only, and the register test
+  enforces that); it exists so a reader can tell which tree a `file:line` in a
+  doc comment means, and so the one fact copied from an unreleased tree — the
+  `INVALID_INPUT` refusal above — is recorded as the bet it is instead of being
+  attributed to the published reference.
+- **`register-issues-a-session` is now in the deviation register, provisionally.**
+  This port's `POST /register` has always issued a session alongside its
+  `201 {"success":true,"userId":…}` — cookies in cookie mode, top-level
+  `accessToken`/`refreshToken` under `X-Auth-Strategy: bearer`, and a refresh
+  session row either way — where the published reference returns that body and
+  nothing else, and only mounts the route at all when the host supplies
+  `options.onRegister`: its register route never reaches `sendTokens` or
+  `issueTokens`, so the caller has to `POST /login` next
+  (`auth.router.ts:713-730`, `:726`, `:399-406`). The difference was
+  undocumented, and it is client-visible, so it is now an entry in
+  `CompatibilityNotes()`. **The entry records the difference; it does not bless
+  it.** A registration that authenticates bypasses whatever email verification
+  gate the deployment configured — under `strict` the new account holds an access
+  token `POST /login` would have refused it — which the family already tracks as
+  a security-relevant defect in
+  [#21](https://github.com/nik2208/awesome-go-auth/issues/21) and pins under
+  protest in `awesome-lambda-auth/test/contract/cases_register_test.go`. The
+  entry says so in its own text, is marked provisional, and is to be retired
+  rather than reworded when #21 lands; "there is no knob" describes this release,
+  not a decision that it stays that way. README.md's generated deviations section
+  is regenerated from it.
+
+### Changed
+- **`POST /auth/register` refuses a missing email or password with
+  `400 {"error":"Email and password are required","code":"INVALID_INPUT"}`.** The
+  message and the code come from the private dev line `node-auth` (unreleased,
+  the new `DevLineRevision`) and **not** from the published reference
+  `awesome-node-auth@cc01e997` that `ReferenceRevision` pins: the dev line mounts
+  `/register` by default and its default handler checks both fields for presence
+  and throws `AuthError('Email and password are required', 'INVALID_INPUT', 400)`
+  before it hashes the password or calls `userStore.create`
+  (`node-auth auth.router.ts:515-525`), while the published reference mounts
+  `/register` only when the host supplies `options.onRegister`
+  (`auth.router.ts:713`), has no default handler and has no `INVALID_INPUT` code
+  anywhere in its source. This port answered `WEAK_PASSWORD` for an empty
+  password — telling a caller who sent none to choose a stronger one — and, for a
+  missing address, ran the whole registration and stored a user with a blank
+  email. Both now stop at the same refusal, before any store is touched. The
+  check lives in `Service.Register`, so a direct library caller gets the new
+  `ErrInvalidInput` sentinel and all four adapters get the wire answer through
+  `HTTPErrorFor`; it runs after email normalisation, so an address that is only
+  whitespace is refused here rather than stored as the empty string (the dev
+  line tests the untrimmed body value and would accept it — the narrower
+  reading, and it can only refuse a request the dev line would have turned into
+  an account with no usable address). A password that is present but short still
+  answers `WEAK_PASSWORD`, unchanged. Covered by the wiretest suite on all four
+  adapters, in cookie and bearer mode.
 
 ## [0.6.0] - 2026-09-12
 
