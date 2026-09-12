@@ -102,7 +102,7 @@ type WebhookConfig struct {
 	// Secret is the HMAC-SHA256 signing key (:16); empty means the delivery is
 	// unsigned. It is held in the clear, because the signature has to be
 	// reproducible and the reference holds it in the clear too — the admin
-	// listing is what masks it to "***" (admin.router.ts:1382), not the store.
+	// listing is what masks it to "***" (admin.router.ts:1381), not the store.
 	Secret string `json:"secret,omitempty"`
 	// IsActive gates delivery (:18) and defaults to true when nil — see Active,
 	// which is the only place that default is applied.
