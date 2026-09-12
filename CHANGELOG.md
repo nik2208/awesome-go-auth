@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-12
+
+The admin console. Fifty-one routes, split across five pull requests not by
+count but by what a reviewer has to check in each: who gets in, then the reads
+shape by shape, then the ordinary writes, then the eight routes that hold or
+mint a credential, then uploads and the document.
+
+The guard is the release's substance. Four access policies, the legacy bearer
+secret, and three deliberate narrowings of the reference, each argued in the
+register: a console with no access decision mounts nothing rather than serving
+itself to anyone who can reach the port; the unauthenticated-GET branch reaches
+the login shell alone, where in the reference it reaches every guarded GET that
+accepts `text/html`; and the guard accepts only typed session tokens, where a
+bare `jwt.verify` makes every token its secret signs an admin credential — the
+2FA step-up token included.
+
+Uploads arrive behind an `UploadStore` seam rather than a directory, composing
+with the UI's read-only `Uploads` filesystem so a host wires one thing. The key
+a client supplies is never used: it is derived, and the grammar the derivation
+produces cannot spell a path separator, so traversal is impossible rather than
+checked.
+
+One route comes from the family's private development line rather than the
+published reference — `POST <admin>/users/{id}/promote`, registered there
+without the `/api` prefix its fifty siblings carry. Reproduced as written and
+registered as such, so nobody reads it as an invention of this port.
+
+The conformance suite now holds the mounted console and the development line's
+registration list to each other in both directions, and holds the served
+document to the mount with the reference's own sixteen omissions named one by
+one rather than sampled.
+
 ### Added
 - **`POST <admin>/users/{id}/promote`, and the admin surface closed at fifty-one
   routes** (`admin_promote.go`). The console's last route, and the one that
