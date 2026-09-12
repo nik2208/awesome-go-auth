@@ -8,6 +8,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The `AuthTools` facade and its fan-out** (`auth_tools.go`). The port of
+  `src/tools/auth-tools.ts`: one `Track` call becomes four shapes — a
+  `TelemetryEvent` for the store, an `Event` for the bus, a `StreamEvent` for
+  the stream and an `OutgoingWebhookEvent` for each matching subscription — in
+  the source's own order, **telemetry, bus, SSE, webhooks**
+  (`auth-tools.ts:216`, `:221`, `:233`, `:249`). The order is reproduced rather
+  than chosen because it is observable: a bus subscriber that reads the
+  telemetry store finds the record for the event it is handling only because
+  the save already happened. One event id and one instant are generated per
+  event and shared by every shape (`auth-tools.ts:200-201`), which is what makes
+  the per-connection SSE deduplication work when an event reaches a connection
+  on more than one topic.
+- **The SSE frame carries the whole telemetry record**, not the tracked payload
+  — the question U20 left open on purpose. The reference puts `telemetryEvent`
+  on the frame (`auth-tools.ts:240`), so a client reads the payload at
+  `rawData.data` and gets the correlation id, session id, IP and user agent
+  beside it. The record is spelled on the wire with the reference's key names
+  (`event`, `data`) rather than this package's Go field names (`EventName`,
+  `Meta`), and the `Success` field, which this port's `TelemetryEvent` has and
+  the reference's has not, is left zero and never sent: a tracked event is a
+  thing that happened, not a thing that succeeded.
+- **`EventTopics` and `StreamTopics`**, the two halves of the topic rule, which
+  have to agree or a subscriber never sees an event meant for it. `EventTopics`
+  is the reference's `resolveTopics` (`auth-tools.ts:353-359`): `global`, then
+  `tenant:<id>`, `user:<id>` and `session:<id>` for each identifier present.
+  `StreamTopics` is its stream route's server-authorised list and subset filter
+  (`tools.router.ts:207-216`): `global`, `tenant:<id>`, `user:<id>`, and a
+  client-requested topic outside that set is dropped rather than refused. The
+  two deliberately do **not** agree about `session:<id>`, because the reference
+  does not: it is published to and cannot be subscribed to through that route,
+  and both halves are reproduced rather than reconciled in either direction. In
+  this port the tenant topic is unreachable for a second reason until M8 —
+  `Event.TenantID` is empty on everything the library publishes.
+- **Failure isolation, sink by sink.** Nothing a sink does fails the call and
+  nothing a sink does stops another sink, so `Track` returns no error: the
+  telemetry write is awaited and its error discarded (`auth-tools.ts:218`), a
+  webhook store lookup that fails is no webhooks rather than a failure
+  (`:251`), each delivery is fire-and-forget with its own error discarded
+  (`:266`), and a broadcast that reaches nobody is not reported in either tree.
+  The one place the reference *can* fail the caller — an unguarded
+  `eventBus.publish` (`:231`) — cannot here, because `EventBus.Publish` recovers
+  each handler; that is U18's already-registered
+  `event-handler-panic-does-not-fail-the-publisher` inherited, not a new
+  difference. `AuthToolsOptions.OnError` is how a deployment buys back the
+  observability the reference discards, and nil — silence — is the default.
+- **`Notify`**, the other public method (`auth-tools.ts:292-342`): one payload
+  to one named topic and, optionally, to the user's inbox and handset. It is the
+  one broadcast in the package that does not fan out across `EventTopics`,
+  because the caller names the channel. The email and SMS channels are reached
+  only for a user the store returns who has the contact detail in question, the
+  subject falls back to the type and then to `Notification`, and the two default
+  bodies encode the same payload differently — indented for email, compact for
+  SMS — because the reference passes `null, 2` to one `JSON.stringify` and not
+  the other. Both transports are the ones this package already has,
+  `MailerTransport` and `SMSTransport`, rather than a second copy of their
+  configuration.
+- **`AuthTools.Bridge`**, and the decision that it is not automatic. The
+  reference's `AuthTools` is fed by a host calling `track` and by nothing else;
+  this port additionally raises nineteen `identity.*` events that no `track`
+  call produced, so **by default a deployment gets silence from them** and one
+  call changes that. Subscribing the bus automatically was rejected mainly
+  because it would deliver every *tracked* event twice — `Track` publishes at
+  step 2 and then broadcasts and fires webhooks at steps 3 and 4, so a facade
+  that also subscribed would hear its own publication and repeat both, with a
+  second event id the deduplication cannot collapse — and breaking that loop
+  inside the library means a hidden marker on `Event` that exists so one type
+  can ignore another's messages. A default that POSTs account events to whatever
+  URLs a store happens to hold is also the unrecoverable half of the choice, and
+  U19 drew this line first and said why. `Bridge` runs the same fan-out minus
+  the bus step, so a bridged event gets the same id, frame and envelope a
+  tracked one does.
 - The admin console's skeleton: the access guard, its own login and logout, the
   two static asset routes and the HTML shell, mounted at `HTTPConfig.Admin.Path`
   — `/admin` by default, and a sibling of `APIPrefix` rather than a child of it,

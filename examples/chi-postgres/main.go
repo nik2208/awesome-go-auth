@@ -108,16 +108,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("sse: %v", err)
 	}
-	// One bus event becomes one StreamEvent on one topic: the user's own
-	// channel. The topic scheme is the reference's, and choosing which of its
-	// channels an event goes to is the AuthTools facade's job — this is the
-	// low-level seam, wired here so the example streams something.
-	stopSSE := sse.BridgeEventBus(context.Background(), bus, func(e auth.Event) []string {
-		if e.UserID == "" {
-			return nil
-		}
-		return []string{"user:" + e.UserID}
-	})
+	// One bus event becomes one StreamEvent on each topic auth.EventTopics
+	// resolves for it — `global`, and the tenant, user and session channels of
+	// whichever identifiers the event carries. That rule is the AuthTools
+	// facade's, exported so that a host wiring this low-level seam directly
+	// broadcasts to the same channels auth.StreamTopics lets a connection
+	// subscribe to. A deployment that also wants telemetry and outgoing webhooks
+	// from these events builds an auth.AuthTools and calls its Bridge instead of
+	// this.
+	stopSSE := sse.BridgeEventBus(context.Background(), bus, auth.EventTopics)
 	defer stopSSE()
 
 	// ── 4. Optional outgoing webhooks ──────────────────────────────────────
@@ -192,7 +191,12 @@ func main() {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		topics := []string{"user:" + user.ID, "global"}
+		// The server-authorised list for this principal: `global` plus the
+		// tenant and user channels. Passing nil for the requested topics is a
+		// client that asked for nothing and so gets all three; a route that
+		// honours a `topics` query parameter passes it here and has it filtered
+		// against the same list.
+		topics := auth.StreamTopics(user.ID, user.TenantID, nil)
 		if err := sse.Serve(w, r, topics, auth.SseConnectionMeta{UserID: user.ID, TenantID: user.TenantID}); err != nil {
 			log.Printf("sse stream for %s ended: %v", user.ID, err)
 		}
