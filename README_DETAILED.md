@@ -2321,6 +2321,88 @@ against a remote JWKS and falls back to the local cookie — see
 [Resource server mode](#resource-server-mode). Both put the principal where that
 adapter's `UserFromContext` reads it.
 
+### `HTTPConfig.RateLimiter` — the rate-limiter slot
+
+The reference declares `RouterOptions.rateLimiter` (`auth.router.ts:46`) and
+ships no algorithm behind it: the slot is the whole feature, and a deployment
+supplies its own middleware (`express-rate-limit`, a gateway shim, whatever it
+already runs). `HTTPConfig.RateLimiter` is that slot in this port's shape.
+
+```go
+cfg := auth.DefaultHTTPConfig()
+cfg.RateLimiter = func(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if overBudget(r) {
+            w.Header().Set("Retry-After", "60")
+            auth.WriteJSON(w, http.StatusTooManyRequests, map[string]any{
+                "error": "Too many requests",
+            })
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+nethttp.MountWithConfig(mux, a, cfg) // chi, gin and echo take the same cfg
+```
+
+**Which routes.** Every route of the auth router, on all four adapters — the
+reference spreads `...rl` onto each one (`auth.router.ts:541` onwards). The
+JWKS document is outside the slot, as it is there: it is registered above the
+whole chain and carries no limiter (`:490`).
+
+One pair of routes is inside the slot here and outside it in the reference. When
+an OAuth provider is not configured, the reference replaces the real handlers
+with bare 404 stubs that carry no limiter (`:1361-1362` for Google,
+`:1407-1408` for GitHub); this port mounts one always-guarded handler per OAuth
+route and decides on the configuration inside it. Behind a limiter at its limit,
+`GET <prefix>/oauth/{provider}` and its callback therefore answer `429` here
+where the reference answers `404`, and they consume budget here that they do not
+consume there.
+
+**Where in the chain.** Outermost: the limiter runs before the CSRF middleware
+and before the auth middleware. That is the reference's order — `rl` is the
+first handler on each route, ahead of `authMiddleware` (`GET /me`, `:656`) and
+therefore ahead of the double-submit check, which that middleware performs and
+which the one route mounted without it repeats by hand inside its handler
+(`:1489-1495`). A refusal therefore costs nothing downstream: no CSRF cookie is
+minted, no token is verified, no store is read. The wiretest suite pins all
+three of those on each adapter.
+
+**One call per route.** The field is a constructor, not a handler: each adapter
+calls it once for every route it mounts — some thirty calls — and mounts the
+handler it returns. Anything the limiter counts with must therefore be created
+*outside* the function and captured by it, as `httprate.LimitByIP` and the
+usual `tollbooth` wrappers are written:
+
+```go
+limiter := tollbooth.NewLimiter(5, nil)       // one budget, allocated once
+cfg.RateLimiter = func(next http.Handler) http.Handler {
+    return tollbooth.LimitHandler(limiter, next)
+}
+```
+
+Allocating the counter inside the function body instead gives every route a
+private budget — thirty times the intended allowance — where the reference,
+which passes one Express handler *instance* to every route, gets a single
+budget shared across the router.
+
+**`nil` means no limiter**, which is the default and the reference's own
+behaviour when the option is absent — it collapses to an empty middleware list
+(`:468`). Nothing else in the wire contract changes either way.
+
+> **Note for the admin router.** The family's private development line carries a
+> second, separate slot on its admin router (`AdminOptions.rateLimiter`,
+> `admin.router.ts:211`, collapsed to an empty list the same way at `:577`) and
+> spreads it onto exactly one route, `POST /users/:id/promote` (`:1030`); its
+> admin login route (`:614`) carries none. That path is relative to the admin
+> router's own mount, which the host app chooses and which defaults to `/admin`
+> (`admin.router.ts:190`, `openapi.ts:674`) — it is not under
+> `HTTPConfig.APIPrefix`. Those line numbers are in that private tree, not in
+> `auth.ReferenceRevision`, whose admin router carries no rate-limiter slot at
+> all. No admin route exists in this port yet, so nothing is wired here;
+> whoever lands the admin router should mount the promote route behind
+> `HTTPConfig.RateLimiter`.
+
 ---
 
 ## Security Helpers

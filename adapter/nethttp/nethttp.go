@@ -84,7 +84,8 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 	prefix := a.cfg.Prefix()
 	// IdP mode: the JWKS document, mounted first and bare. The reference
 	// registers it before every middleware so that it is always public
-	// (auth.router.ts:473-474) and only when an idProvider block is configured
+	// (auth.router.ts:473-474), spreads no rate limiter onto it (:490), and
+	// registers it only when an idProvider block is configured
 	// (:473); here that condition is auth.WithIDP. GET only, as there; net/http
 	// routes HEAD to a GET pattern itself, which is Express's own fallback from
 	// HEAD to the GET handler.
@@ -145,10 +146,24 @@ func (a *Adapter) mountCredentialRoutes(mux *http.ServeMux, prefix string) {
 	mux.Handle("POST "+prefix+"/change-email/confirm", a.guard(http.HandlerFunc(a.ChangeEmailConfirm)))
 }
 
-// guard wraps a mounted route in the CSRF middleware, which also distributes
-// the CSRF cookie the browser clients read.
+// guard wraps a mounted route in the outer chain every auth route carries: the
+// rate-limiter slot, then the CSRF middleware, which also distributes the CSRF
+// cookie the browser clients read.
+//
+// The order is the reference's. It spreads its rate limiter onto each route
+// ahead of the auth middleware (auth.router.ts:468, :656), so a refusal is
+// answered before any token is verified, any store is read or any double-submit
+// pair is compared. HTTPConfig.RateLimiter carries the rest of the reasoning;
+// with no limiter configured this is the CSRF middleware alone, unchanged.
+//
+// It wraps every route of the auth router, which is what the reference spreads
+// ...rl onto, and not the JWKS document, which is mounted bare above as it is
+// there (:490). The one place the two lines do not coincide is the OAuth pair
+// when the provider is not configured: the reference swaps in bare 404 stubs
+// carrying no rl (:1361-1362, :1407-1408) where this port keeps the guarded
+// handler and decides inside it. See auth.HTTPConfig.RateLimiter.
 func (a *Adapter) guard(h http.Handler) http.Handler {
-	return auth.CSRFMiddleware(a.cfg)(h)
+	return auth.RateLimitMiddleware(a.cfg)(auth.CSRFMiddleware(a.cfg)(h))
 }
 
 type registerRequest struct {

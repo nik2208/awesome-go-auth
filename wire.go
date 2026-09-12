@@ -425,6 +425,71 @@ type HTTPConfig struct {
 	// (auth.router.ts:510, :541); gating all of them is the
 	// resource-server-gates-all-credential-routes deviation.
 	ResourceServer bool
+	// RateLimiter is the reference's RouterOptions.rateLimiter
+	// (auth.router.ts:46): the slot a host drops its own limiter into. nil —
+	// the default — means no limiter, which is the reference's own default:
+	// it collapses the slot to an empty middleware list when the option is
+	// absent (rl, auth.router.ts:468) and ships no algorithm of its own.
+	//
+	// The adapters apply it to every route of the auth router, the routes the
+	// reference spreads ...rl onto (auth.router.ts:541 onwards), and not to the
+	// JWKS document, which is registered ahead of the whole chain and carries
+	// no rl (:490).
+	//
+	// One pair of routes falls inside the slot here that falls outside it
+	// there. When an OAuth provider is not configured the reference registers
+	// bare 404 stubs in place of the real handlers, with no rl on them
+	// (:1361-1362 for Google, :1407-1408 for GitHub); this port mounts one
+	// always-guarded handler per OAuth route and decides on the configuration
+	// inside it. Behind a limiter at its limit those two requests are therefore
+	// answered 429 here and 404 there, and they consume budget here that they
+	// do not consume there.
+	//
+	// Position in the chain is the load-bearing part. The reference puts rl
+	// first on each route, ahead of the auth middleware (GET /me,
+	// auth.router.ts:656) and therefore ahead of the double-submit check,
+	// which the auth middleware performs and which the one route without that
+	// middleware repeats by hand inside its handler (:1489-1495). A refusal
+	// consequently costs nothing downstream: no token is verified, no store is
+	// read, no CSRF comparison is made. The adapters reproduce that order —
+	// RateLimiter outermost, then CSRFMiddleware, then the auth middleware.
+	//
+	// The field is a constructor, not a handler, and each adapter calls it once
+	// per route at mount time — some thirty calls for one mount. Whatever the
+	// limiter counts with, a bucket or a map or a store handle, therefore has
+	// to be created outside this function and captured by it, the way
+	// httprate.LimitByIP and the tollbooth wrappers are written. Allocating the
+	// counter inside the function gives every route a private budget instead of
+	// the single shared one the reference gets from passing one Express handler
+	// instance to every route.
+	//
+	// Note for the admin router when it lands: the family's private development
+	// line carries a second, separate slot on its admin router
+	// (AdminOptions.rateLimiter, admin.router.ts:211, collapsed to an empty
+	// list the same way at :577) and spreads it onto exactly one route, POST
+	// /users/:id/promote (:1030); its admin login route (:614) carries none.
+	// That path is relative to the admin router's own mount, which the host app
+	// chooses and which defaults to /admin (admin.router.ts:190,
+	// openapi.ts:674) — not to APIPrefix. These line numbers are in that
+	// private tree and do not resolve against ReferenceRevision, which carries
+	// no admin rateLimiter at all. No admin route exists here yet, so nothing
+	// below implements that half.
+	RateLimiter func(http.Handler) http.Handler
+}
+
+// RateLimitMiddleware returns the configured rate limiter, or a pass-through
+// when HTTPConfig.RateLimiter is nil.
+//
+// It is the counterpart of CSRFMiddleware and the adapters compose the two in
+// that order — this one outermost — so that a refused request never reaches
+// either the CSRF comparison or the auth middleware. See HTTPConfig.RateLimiter
+// for the reference citations.
+func RateLimitMiddleware(cfg HTTPConfig) func(http.Handler) http.Handler {
+	limiter := cfg.RateLimiter
+	if limiter == nil {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return limiter
 }
 
 // DefaultHTTPConfig returns the conventions an adapter uses when the host app
