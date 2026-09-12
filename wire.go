@@ -66,14 +66,30 @@ const (
 	CodeNotImplemented      = "NOT_IMPLEMENTED"
 )
 
-// Codes with no counterpart in the reference catalog. The reference delegates
-// registration to a host-supplied callback and therefore has no code of its own
-// for a duplicate address or a rejected password; these fill that hole. No
-// shipped client branches on them.
+// Codes with no counterpart in the published reference catalog. The reference
+// delegates registration to a host-supplied callback and therefore has no code
+// of its own for a duplicate address or a rejected password; these fill that
+// hole. No shipped client branches on them.
+//
+// CodeInvalidInput is the one with a counterpart, but not in the published
+// reference: it comes from the private dev line node-auth (DevLineRevision),
+// which mounts POST /register by default and gives that default handler a
+// presence check on the two fields, refusing the pair with 400 {"error": "Email
+// and password are required", "code": "INVALID_INPUT"} before it hashes or
+// stores anything (node-auth auth.router.ts:515-525). The message and the code
+// here are that handler's, spelled exactly, so a client written against either
+// sees one answer.
+//
+// The published reference at ReferenceRevision has neither: it mounts
+// /register only when the host supplies options.onRegister (auth.router.ts:713)
+// and has no default handler, so the string INVALID_INPUT does not occur in it.
+// Copying an answer from an unreleased tree is a deliberate bet, recorded in
+// DevLineRevision's own doc comment; nothing else in this package does it.
 const (
 	CodeUserExists   = "USER_EXISTS"
 	CodeWeakPassword = "WEAK_PASSWORD"
 	CodeInvalidBody  = "INVALID_BODY"
+	CodeInvalidInput = "INVALID_INPUT"
 )
 
 // HTTPError is the family error envelope together with its status code.
@@ -131,6 +147,10 @@ var (
 	HTTPErrUserExists   = HTTPError{Status: http.StatusConflict, Message: "User already exists", Code: CodeUserExists}
 	HTTPErrWeakPassword = HTTPError{Status: http.StatusBadRequest, Message: "Password is too weak", Code: CodeWeakPassword}
 	HTTPErrInvalidBody  = HTTPError{Status: http.StatusBadRequest, Message: "Invalid request body", Code: CodeInvalidBody}
+	// HTTPErrInvalidInput carries the dev line's literal message: a body that
+	// names neither field is not a weak password, and answering WEAK_PASSWORD
+	// there tells the user to pick a better one when they typed none at all.
+	HTTPErrInvalidInput = HTTPError{Status: http.StatusBadRequest, Message: "Email and password are required", Code: CodeInvalidInput}
 )
 
 // HTTPErrorFor maps a service sentinel onto the envelope. Routes whose failure
@@ -159,6 +179,8 @@ func HTTPErrorFor(err error) HTTPError {
 		return HTTPErrTwoFactorRequired
 	case errors.Is(err, ErrUserExists), errors.Is(err, ErrAlreadyExists):
 		return HTTPErrUserExists
+	case errors.Is(err, ErrInvalidInput):
+		return HTTPErrInvalidInput
 	case errors.Is(err, ErrWeakPassword):
 		return HTTPErrWeakPassword
 	case errors.Is(err, ErrFeatureNotSupported):

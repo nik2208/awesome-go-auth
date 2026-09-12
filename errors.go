@@ -17,6 +17,17 @@ var (
 	ErrTenantNotFound      = errors.New("auth: tenant not found")
 	ErrRoleNotFound        = errors.New("auth: role not found")
 
+	// ErrInvalidInput is a registration missing one of the two fields the route
+	// cannot proceed without. It is deliberately not ErrWeakPassword: an absent
+	// password is not a rejected one, and the default register handler on the
+	// private dev line node-auth refuses the pair together, before it hashes or
+	// stores anything (node-auth auth.router.ts:518-519, resolved against
+	// DevLineRevision). The published reference at ReferenceRevision mounts
+	// /register only when the host supplies options.onRegister and has no
+	// default handler at all, so it has no code of its own here. See
+	// Service.Register.
+	ErrInvalidInput = errors.New("auth: email and password are required")
+
 	// ErrEmailNotConfigured and ErrSMSNotConfigured mean the deployment has no
 	// way to deliver the credential a send route just asked for. They are
 	// deliberately not ErrFeatureNotSupported: that one says the configured

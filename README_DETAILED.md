@@ -74,7 +74,7 @@ Low-level constructor. Use `New()` for most cases.
 
 | Method | Description |
 |--------|-------------|
-| `Register(ctx, RegisterInput) (User, AuthTokens, error)` | Create a user and return tokens |
+| `Register(ctx, RegisterInput) (User, AuthTokens, error)` | Create a user and return tokens — see [Registration input](#registration-input) |
 | `Login(ctx, LoginInput) (User, AuthTokens, error)` | Authenticate and return tokens |
 | `Refresh(ctx, refreshToken) (AuthTokens, error)` | Rotate refresh token |
 | `Logout(ctx, refreshToken) error` | Revoke session |
@@ -107,6 +107,61 @@ Low-level constructor. Use `New()` for most cases.
 | `ListSessions(ctx, userID, tenantID) ([]Session, error)` | List active sessions |
 | `RevokeSessionByID(ctx, sessionID) error` | Revoke a specific session |
 | `CleanupExpiredSessions(ctx) (int, error)` | Delete expired sessions |
+
+### Registration input
+
+`Register` requires an email and a password, and refuses a call missing either
+one before it touches a store:
+
+```go
+_, _, err := svc.Register(ctx, auth.RegisterInput{Email: "", Password: "s3cret!!"})
+// err is auth.ErrInvalidInput
+```
+
+On the wire that is
+`400 {"error":"Email and password are required","code":"INVALID_INPUT"}` on
+`POST /auth/register`, on all four adapters and in both delivery modes — the
+refusal happens before the branch that chooses between cookies and body tokens,
+so a bearer client sees the same answer as a cookie one.
+
+The message and the code are copied from the private dev line `node-auth`
+(unreleased, `DevLineRevision`) and **not** from the published reference
+`awesome-node-auth@cc01e997` that `ReferenceRevision` pins. The dev line mounts
+`POST /register` by default and its default handler throws
+`AuthError('Email and password are required', 'INVALID_INPUT', 400)` before
+hashing the password or calling `userStore.create`
+(`node-auth auth.router.ts:515-525`). The published reference mounts `/register`
+only when the host supplies `options.onRegister` (`auth.router.ts:713`), has no
+default handler, and therefore has no `INVALID_INPUT` code anywhere — the string
+does not occur in its source. Copying an answer from an unreleased tree is a
+deliberate bet that the published one will grow the same answer; it is the only
+place this port does so, and `DevLineRevision` in `compatibility.go` says which
+citations resolve against which tree.
+
+Two things this replaces. An empty password used to reach the length check and
+come back as `WEAK_PASSWORD`, which tells a caller who sent no password at all
+to choose a stronger one; a missing address used to reach the store and create a
+user with a blank email. A password that is *present* but shorter than
+`Config.MinPasswordLen` still answers `WEAK_PASSWORD`, unchanged — the two codes
+are what tell a client which of the two happened.
+
+The check runs after the email is normalised (trimmed and lowercased), so an
+address that is only whitespace is refused here rather than stored as the empty
+string. The dev line tests the untrimmed body value and would accept it; this is
+the narrower reading, and it can only refuse a request the dev line would have
+turned into an account with no usable address.
+
+Note that a successful `POST /auth/register` also opens a session — cookies, or
+body tokens under `X-Auth-Strategy: bearer` — where the published reference
+returns `201 {"success":true,"userId":…}` and nothing else. There is no knob to
+turn that off in this release, and it is **not** a settled decision: a
+registration that authenticates bypasses whatever email verification gate the
+deployment configured, so under `strict` the new account holds an access token
+that `POST /auth/login` would have refused it. That is tracked as a defect in
+[#21](https://github.com/nik2208/awesome-go-auth/issues/21) and recorded
+provisionally as `register-issues-a-session` in [README.md](README.md) so the
+difference is visible on the wire contract while the issue is open; when #21
+lands the behaviour changes and the entry is retired.
 
 ---
 
@@ -2526,6 +2581,7 @@ Internal helpers (unexported) available for use within the package:
 | `ErrSessionNotFound` | Refresh token session not found |
 | `ErrSessionRevoked` | Session was explicitly revoked |
 | `ErrWeakPassword` | Password shorter than MinPasswordLen |
+| `ErrInvalidInput` | `Register` called with no email or no password — see [Registration input](#registration-input) |
 | `ErrFeatureNotSupported` | Required store interface not implemented |
 | `ErrEmailNotVerified` | Login attempted before email verification |
 | `ErrInvalidCode` | Wrong SMS code or TOTP code |

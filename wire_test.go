@@ -186,6 +186,10 @@ func TestErrorCatalogLiterals(t *testing.T) {
 		HTTPErrUserExists:   {409, "User already exists", "USER_EXISTS"},
 		HTTPErrWeakPassword: {400, "Password is too weak", "WEAK_PASSWORD"},
 		HTTPErrInvalidBody:  {400, "Invalid request body", "INVALID_BODY"},
+		// The dev line's literal register refusal (auth.router.ts:519). A client
+		// that reads the message must see the same sentence from either
+		// implementation, so both halves are pinned.
+		HTTPErrInvalidInput: {400, "Email and password are required", "INVALID_INPUT"},
 	}
 	for got, want := range messages {
 		if got.Status != want.status || got.Message != want.message || got.Code != want.code {
@@ -204,6 +208,9 @@ func TestErrorMapping(t *testing.T) {
 		{ErrEmailNotVerified, HTTPErrorFor, HTTPErrEmailNotVerified},
 		{ErrUserExists, HTTPErrorFor, HTTPErrUserExists},
 		{ErrWeakPassword, HTTPErrorFor, HTTPErrWeakPassword},
+		// A missing field and a rejected one are different answers: both are
+		// 400, and the codes are what tell a client which of the two happened.
+		{ErrInvalidInput, HTTPErrorFor, HTTPErrInvalidInput},
 		{ErrSessionRevoked, HTTPErrorFor, HTTPErrSessionRevoked},
 		{ErrFeatureNotSupported, HTTPErrorFor, HTTPErrNotImplemented},
 		// A revoked session must never collapse into a generic token failure:
@@ -251,7 +258,7 @@ func TestUnmappedSentinelsAreDeliberate(t *testing.T) {
 		ErrSessionRevoked, ErrWeakPassword, ErrFeatureNotSupported, ErrEmailNotVerified,
 		ErrInvalidCode, ErrTwoFactorRequired, ErrAlreadyExists, ErrTenantNotFound,
 		ErrRoleNotFound, ErrEmailNotConfigured, ErrSMSNotConfigured,
-		ErrOAuthAccountConflict,
+		ErrOAuthAccountConflict, ErrInvalidInput,
 	}
 	for _, err := range all {
 		mapped := HTTPErrorFor(err) != HTTPErrInternal

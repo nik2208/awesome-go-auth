@@ -64,6 +64,7 @@ var wantDeviationIDs = []string{
 	"oauth-provisioning-is-a-policy-not-a-function",
 	"one-time-tokens-are-base64url",
 	"password-policy-on-reset-and-change",
+	"register-issues-a-session",
 	"resource-server-gates-all-credential-routes",
 	"temp-token-is-typed-not-an-access-token",
 	"totp-accepts-one-step-of-skew",
@@ -102,6 +103,20 @@ var wantClaims = map[string][]string{
 		"MinRefreshInterval", "invalidateCache", "RS256", "401",
 	},
 	"csrf-cookie-not-reissued-with-tokens": {"Set-Cookie", "setTokenCookies"},
+	// Both halves of the difference, the fact that there is no way back to the
+	// reference (an entry that dropped "no knob" would read as a documented
+	// option a deployment could take), and — the part that must survive every
+	// future reword — that this is a provisional record of the defect tracked as
+	// nik2208/awesome-go-auth#21, that what it costs is the email verification
+	// gate, and that awesome-lambda-auth's contract suite already classifies it
+	// that way. An entry that keeps the wire facts but loses the bypass reads as
+	// a settled product decision, which is exactly what it is not.
+	"register-issues-a-session": {
+		"201", "userId", "accessToken", "refreshToken", "Set-Cookie",
+		"sendTokens", "POST /login", "no knob",
+		"Provisional", "email verification", "nik2208/awesome-go-auth#21",
+		"cases_register_test.go", "EMAIL_NOT_VERIFIED",
+	},
 	"cookie-max-age-follows-configured-ttl": {
 		"Max-Age=2592000", "Max-Age=604800", "RefreshTokenTTL", "refreshTokenExpiresIn",
 	},
