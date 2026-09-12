@@ -1351,6 +1351,94 @@ func CompatibilityNotes() APICompatibilityNotes {
 					"falls entirely on a store implementor, which is why it is stated on the " +
 					"three interfaces rather than only here.",
 			},
+			{
+				ID:      "tools-router-requires-an-explicit-guard-decision",
+				Title:   "A tools router with no stated access posture is not served at all",
+				Surface: "`HTTPConfig.Tools`: the whole tools surface under `Tools.Path`, `/tools` by default",
+				Behaviour: "Mounts nothing unless `HTTPConfig.ToolsMounted()` — `Tools.Enabled` set, a " +
+					"`Tools.AuthTools` facade supplied *and* `Tools.Access` configured. With the " +
+					"flag on and no access decision, no route under `Tools.Path` is registered " +
+					"and every tools path answers `404`, on all four adapters, the two " +
+					"unguarded documentation routes included. The reference's own default is " +
+					"one named call away: `Access: auth.ToolsPublic()` serves every route to " +
+					"every caller, which is what an empty `protect` list means there. " +
+					"`auth.ToolsProtected(mw)` is the other posture, and it answers nil — so " +
+					"nothing mounts — for a nil `mw`, because a configuration that degrades " +
+					"from guarded to open when a variable was left unassigned is the failure " +
+					"this entry is about.",
+				Reference: "Builds the router regardless. The guard slot is " +
+					"`const protect: RequestHandler[] = authMiddleware ? [authMiddleware] : []`, " +
+					"and nothing at all is said when it is left empty — unlike " +
+					"`createAdminRouter`, which at least writes a line to `process.stderr`. All " +
+					"four feature flags default to `true`, so the router a host gets by " +
+					"forgetting `authMiddleware` is not a stub: `POST /track/:eventName`, " +
+					"`POST /notify/:target` and `GET /stream` answer anyone who can reach the " +
+					"port, and so does `GET /telemetry` wherever a telemetry store is " +
+					"configured.",
+				Citations: []string{
+					"tools.router.ts:117-135",
+					"tools.router.ts:121-124",
+					"tools.router.ts:135",
+					"tools.router.ts:140-245",
+					"admin.router.ts:531-536",
+				},
+				Why: "The two grounds that decided " +
+					"`admin-console-requires-an-explicit-policy` both hold here, and the " +
+					"second holds with more force. `HTTPConfig.Tools` is new in this release, " +
+					"so no existing Go deployment's configuration can be broken by refusing: " +
+					"no host has ever set these fields, and the first to set them reads the " +
+					"field doc while doing it. And the reference's signal cannot be ported " +
+					"because there is none — this package writes diagnostics through " +
+					"`Config.Logger`, which defaults to nil and discards them, and here the " +
+					"reference does not even print the warning its admin router prints. " +
+					"What is different is the surface, and it is priced rather than assumed. " +
+					"`track` and `notify` do not read the user table; they write telemetry and " +
+					"send messages, and that door costs more rather than less. " +
+					"`POST /track/:eventName` takes `userId`, `tenantId` and `sessionId` from " +
+					"the request body and only falls back to the authenticated principal, so " +
+					"an anonymous caller forges telemetry attributed to any user — and `Track` " +
+					"fans that forgery out to all four sinks: it is persisted, it is published " +
+					"on the event bus where the host's own subscribers act on it, it is " +
+					"broadcast to the SSE connections holding `user:<id>`, and it fires every " +
+					"matching outgoing webhook, which is the deployment POSTing " +
+					"attacker-chosen content to a third party in its own name and under its " +
+					"own signature. `POST /notify/:target` sends on the `sse`, `email` and " +
+					"`sms` channels, so with a mailer and an SMS transport configured an " +
+					"anonymous caller makes the deployment send a named user mail and SMS — " +
+					"which costs money and sender reputation, neither refundable. And " +
+					"`GET /stream` with no principal still resolves to the topic `global`, " +
+					"which carries every tracked event as a whole telemetry record, user id, " +
+					"session id, IP and user agent included. Requiring the host to name the " +
+					"posture is the same statement made where it cannot be missed, and " +
+					"`ToolsMounted()` is exported so a host can turn the refusal into its own " +
+					"startup error in one line: " +
+					"`if cfg.Tools.Enabled && !cfg.ToolsMounted() { log.Fatal(\"tools: no access decision\") }`.",
+				Notes: []DeviationNote{
+					{
+						Label: "Restoring the reference's default",
+						Text: "One field where the `HTTPConfig` is built — " +
+							"`cfg.Tools.Access = auth.ToolsPublic()` — and the router is served " +
+							"exactly as `createToolsRouter(tools, {})` serves it. Nothing else " +
+							"changes: the routes, the bodies, the mount and the four feature " +
+							"flags are the same either way. The name is the point: a reviewer " +
+							"reading the host's own source sees the posture, instead of having " +
+							"to notice a field that is not there.",
+					},
+					{
+						Label: "What the guard does and does not cover",
+						Text: "`Tools.Access` is spread onto the routes the reference spreads " +
+							"`...protect` onto: `track`, `notify`, `stream` and the telemetry " +
+							"query. Two route groups never see it, there or here. The inbound " +
+							"webhook is registered with no guard at all, because the caller is " +
+							"a third-party provider with no session to present, and the two " +
+							"documentation routes carry none either — so `GET <tools>/docs` " +
+							"and `GET <tools>/openapi.json` are readable by anyone who can " +
+							"reach the mount even when everything else is guarded. Keep " +
+							"`Tools.Docs.Enabled` off in production for the reason " +
+							"`docs-routes-are-opt-in` gives.",
+					},
+				},
+			},
 		},
 	}
 }

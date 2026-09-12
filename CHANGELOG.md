@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The tools router's skeleton and its authentication posture** (`tools.go`,
+  `HTTPConfig.Tools`). The port of `createToolsRouter`'s front half
+  (`tools.router.ts:117-135`) and of its two documentation routes (`:332-352`).
+  It mounts **beside** `APIPrefix`, at `Tools.Path` — `/tools` by default,
+  which is the reference's own `swaggerBasePath` (`:127`) — because
+  `createToolsRouter` is a second Express router the host mounts where it likes,
+  outside the auth router's CSRF, rate-limiter and event-context layers. It
+  carries none of those here either, which is what keeps `POST <tools>/track`
+  reachable by a server-to-server caller once U23 mounts it.
+  **The posture is a deviation.** The reference's guard slot is
+  `authMiddleware ? [authMiddleware] : []` with all four feature flags
+  defaulting to `true`, and it says nothing when the slot is left empty, so a
+  host that forgets the middleware publishes `track`, `notify` and `stream`
+  unauthenticated. This port mounts nothing until `HTTPConfig.ToolsMounted()` —
+  `Tools.Enabled`, a `Tools.AuthTools` facade, **and** a `Tools.Access`
+  decision. The reference's own default is one named call: `Access:
+  auth.ToolsPublic()`. `auth.ToolsProtected(mw)` is the guarded posture, and it
+  refuses a nil `mw` rather than degrading to an open router. See the
+  `tools-router-requires-an-explicit-guard-decision` entry in the deviation
+  register for what an open tools surface costs.
+- **The four feature flags**, spelled in the negative —
+  `ToolsOptions.DisableTelemetry`, `DisableNotify`, `DisableStream`,
+  `DisableWebhook` — so that a zero `ToolsOptions` selects what
+  `createToolsRouter(tools, {})` selects: all four groups on
+  (`tools.router.ts:121-124`). `ToolsOptions.Features()` resolves the negation
+  once, for the router, the document and every route U23 through U25 adds.
+- **The tools router's own documentation routes and its own OpenAPI generator**
+  (`openapi_tools.go`): `GET <tools>/openapi.json` and `GET <tools>/docs`, both
+  under `Tools.Docs` — the reference's second `swagger` / `swaggerBasePath`
+  pair (`tools.router.ts:93-101`), `DocsOptions` again because it is the same
+  pair of options, and a plain bool for the same reason `HTTPConfig.Docs` is.
+  Neither route carries the guard, as neither carries `protect` there (`:333`,
+  `:348`). `GenerateToolsOpenAPISpec` is the port of `buildOpenApiSpec`
+  (`openapi.ts:1366-1637`), a second generator because the reference has a
+  second one and because it describes a router mounted somewhere else entirely.
+  The Swagger UI page is `SwaggerUIHandler` unchanged: the reference has one
+  builder for all three of its routers, and its title — "Tools API" — is a
+  quirk this port already reproduces on the auth router, where it is wrong, and
+  which on this one is simply correct.
+- **The shape U23 through U25 add a route into**: one `switch` in
+  `(*Auth).ToolsHandler`, the way U12 left the admin surface, plus
+  `auth.ToolsProtectMiddleware(cfg)` for the routes the reference spreads
+  `...protect` onto and the five `Tools*Path` constants. Conformance for all
+  four adapters is `adapter/internal/wiretest/tools.go`, which holds the
+  document and the mount to each other in both directions; `suite.go` gained one
+  line. It is deliberately **not** in that file's `conditionalRoutes` registry,
+  which holds every set to `GenerateOpenAPISpec` — the auth router's document,
+  whose paths are relative to `HTTPConfig.Prefix()`.
 - **The `AuthTools` facade and its fan-out** (`auth_tools.go`). The port of
   `src/tools/auth-tools.ts`: one `Track` call becomes four shapes — a
   `TelemetryEvent` for the store, an `Event` for the bus, a `StreamEvent` for

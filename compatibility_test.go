@@ -78,6 +78,7 @@ var wantDeviationIDs = []string{
 	"session-rotated-reports-one-session-id",
 	"sse-slow-consumer-is-disconnected",
 	"temp-token-is-typed-not-an-access-token",
+	"tools-router-requires-an-explicit-guard-decision",
 	"totp-accepts-one-step-of-skew",
 	"totp-issuer-defaults-to-config-issuer",
 	"totp-setup-omits-qrcode",
@@ -229,6 +230,17 @@ var wantClaims = map[string][]string{
 		"ID ascending", "AdminUserStore", "SessionLister", "RoleLister",
 		"ORDER BY", "listUsers(1, 0)", "first registered user", "offset",
 		"AdminPolicyFirstUser", "insertion order",
+	},
+	// M9's guard, and the one entry of this milestone that declines a reference
+	// default outright. The claims keep the refusal, the three things a mount
+	// needs, the one-call way back, and the two facts that make the refusal an
+	// argument rather than a preference: that the reference says nothing at all
+	// here where its admin router at least writes to process.stderr, and what
+	// an open door actually costs — an outgoing webhook leaving the deployment
+	// in its own name, and SMS that is paid for.
+	"tools-router-requires-an-explicit-guard-decision": {
+		"ToolsMounted", "Tools.Enabled", "Tools.Access", "authMiddleware",
+		"404", "ToolsPublic()", "process.stderr", "outgoing webhook", "sms",
 	},
 	// Both directions of the reference's failure, the seam this port reads
 	// instead, and the precedent — ClientIP — that decided it.

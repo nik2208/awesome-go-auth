@@ -202,6 +202,25 @@ func (ad *Adapter) Mount(group *echo.Group) {
 		group.Any(adminPath, admin)
 		group.Any(adminPath+"/*", admin)
 	}
+
+	// The tools router, mounted only when it is configured — Tools.Enabled, an
+	// AuthTools to serve and an access decision, which is what
+	// HTTPConfig.ToolsMounted reports. It mounts at Tools.Path and not under
+	// prefix: the reference's createToolsRouter is a sibling of the auth router,
+	// not a child (auth.ToolsOptions).
+	//
+	// One shared net/http handler for the whole subtree, as for the admin
+	// console, and two patterns because echo's wildcard does not match the bare
+	// mount path. group.Any rather than a method list: from U23 on this router
+	// answers POST as well as GET, and the handler itself 404s a method it does
+	// not serve. It carries none of the auth router's middleware;
+	// adapter/nethttp/tools.go says why.
+	if ad.cfg.ToolsMounted() {
+		tools := serveHTTP(h.ToolsHandler())
+		toolsPath := ad.cfg.ToolsPath()
+		group.Any(toolsPath, tools)
+		group.Any(toolsPath+"/*", tools)
+	}
 }
 
 // mountCredentialRoutes registers the nineteen routes that create, prove,

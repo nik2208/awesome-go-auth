@@ -572,6 +572,18 @@ type HTTPConfig struct {
 	// the auth router's middleware, and for the one configuration this port
 	// refuses to serve.
 	Admin AdminOptions
+
+	// Tools mounts the tools router: the reference's createToolsRouter, which
+	// like the admin router is a second router the host mounts beside the auth
+	// router rather than under it (tools.router.ts:114, :127), so these routes
+	// sit at Tools.Path and not below APIPrefix. Nothing is registered unless
+	// HTTPConfig.ToolsMounted() — Tools.Enabled, an AuthTools to serve, *and*
+	// an access decision — and every tools path answers 404 otherwise.
+	//
+	// See ToolsOptions in tools.go for the four feature flags, for the guard
+	// slot and why this port will not mount the router without one, and for the
+	// shape each route of U23 through U25 is added into.
+	Tools ToolsOptions
 }
 
 // RateLimitMiddleware returns the configured rate limiter, or a pass-through
@@ -617,6 +629,9 @@ func (c HTTPConfig) resolve(accessTTL, refreshTTL time.Duration) HTTPConfig {
 	// the four adapters and the handler behind them agree on one spelling of it
 	// — adminRouterPath strips exactly this string.
 	c.Admin.Path = c.AdminPath()
+	// And the tools mount, for the same reason: toolsRouterPath strips exactly
+	// this string.
+	c.Tools.Path = c.ToolsPath()
 	if strings.TrimSpace(c.Cookies.RefreshTokenPath) == "" {
 		c.Cookies.RefreshTokenPath = c.APIPrefix + "/refresh"
 	}
