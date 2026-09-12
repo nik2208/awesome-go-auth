@@ -596,7 +596,7 @@ release that closes the gap.
 | OpenAPI / Swagger docs | ⚠️ Partial | `GenerateOpenAPISpec` returns the document; nothing serves it. | v0.7.0 |
 | Event-driven tooling (event bus, SSE, inbound/outbound webhooks, telemetry, notify) | ⚠️ Primitives only | `EventBus`, `SseHub`, `WebhookDispatcher` and `TelemetryStore` exist, but the service publishes no events, there is no tools router, and the outbound webhook headers differ from the reference. | v0.11.0 |
 | Client libraries compatibility (Angular + Flutter) | ✅ For the auth surface | Verified by [awesome-lambda-auth](https://github.com/nik2208/awesome-lambda-auth) with both official clients unmodified against a live stack. | — |
-| Rate limiting | ⚠️ Slot only | The reference ships no algorithm either, but it does ship the slot: `RouterOptions.rateLimiter` spread onto every auth route (`auth.router.ts:46`, `:468`). `HTTPConfig.RateLimiter` is that slot; the algorithm stays the integrator's. | v0.7.0 |
+| Rate limiting | ✅ Slot implemented | The reference ships no algorithm — it declares a slot (`RouterOptions.rateLimiter`) and spreads it onto every auth route. `HTTPConfig.RateLimiter` is that slot: a `func(http.Handler) http.Handler` applied by all four adapters to every auth route, outside the CSRF and auth middlewares as the reference applies it, `nil` (the default) meaning none. The algorithm stays the integrator's middleware, as it is there. | — |
 | MCP server (`awesome-node-auth-mcp-server`) | ➖ Out of scope | Out of parity scope for this library. | — |
 
 ### Roadmap

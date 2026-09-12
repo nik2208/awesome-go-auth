@@ -87,9 +87,10 @@ func (ad *Adapter) Middleware() echo.MiddlewareFunc {
 // all — see mountCredentialRoutes and auth.ResourceServerGatedRoutes.
 func (ad *Adapter) Mount(group *echo.Group) {
 	prefix := ad.cfg.Prefix()
-	// IdP mode: the JWKS document, mounted first and bare — no CSRF, no auth —
-	// because the reference registers it ahead of every middleware
-	// (auth.router.ts:473-474) and only when an idProvider block is configured
+	// IdP mode: the JWKS document, mounted first and bare — no limiter, no CSRF,
+	// no auth — because the reference registers it ahead of every middleware
+	// (auth.router.ts:473-474), spreads no rate limiter onto it (:490), and
+	// registers it only when an idProvider block is configured
 	// (:473); here that condition is auth.WithIDP. HEAD is registered next to
 	// GET because echo, unlike net/http and Express, does not fall back from one
 	// to the other.
@@ -161,11 +162,20 @@ func serveHTTP(h http.Handler) echo.HandlerFunc {
 	}
 }
 
-// guard runs the shared CSRF middleware in front of an Echo handler. Reusing
-// the net/http middleware — rather than reimplementing it here — is what keeps
-// the enforcement matrix identical across adapters.
+// guard runs the shared outer chain in front of an Echo handler: the
+// rate-limiter slot, then the CSRF middleware. Reusing the net/http middleware
+// — rather than reimplementing it here — is what keeps the enforcement matrix
+// identical across adapters.
+//
+// The order is the reference's: it spreads its rate limiter onto each route
+// ahead of the auth middleware and therefore ahead of the double-submit check
+// (auth.router.ts:468, :656), so a refusal costs nothing downstream. A limiter
+// that answers never calls through, so h never runs and err stays nil — the
+// response the limiter wrote is the whole response, exactly as for a CSRF
+// refusal. See auth.HTTPConfig.RateLimiter.
 func (ad *Adapter) guard(h echo.HandlerFunc) echo.HandlerFunc {
-	mw := auth.CSRFMiddleware(ad.cfg)
+	limit, csrf := auth.RateLimitMiddleware(ad.cfg), auth.CSRFMiddleware(ad.cfg)
+	mw := func(next http.Handler) http.Handler { return limit(csrf(next)) }
 	return func(c echo.Context) error {
 		var err error
 		mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {

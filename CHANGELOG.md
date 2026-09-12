@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`HTTPConfig.RateLimiter` — the reference's rate-limiter slot.** The
+  reference declares `RouterOptions.rateLimiter` (`auth.router.ts:46`) and ships
+  no algorithm behind it: the slot is the whole feature. `HTTPConfig.RateLimiter`
+  is that slot as a `func(http.Handler) http.Handler`, `nil` (the default)
+  meaning no limiter — which is what the reference does with the option absent,
+  collapsing it to an empty middleware list (`rl`, `:468`). All four adapters
+  apply it to every route of the auth router, the routes the reference spreads
+  `...rl` onto (`:541` onwards), and not to the JWKS document, which is
+  registered above the chain and carries no limiter there (`:490`) or here. The
+  one place the two lines diverge is the OAuth pair when the provider is not
+  configured: the reference swaps in bare 404 stubs with no limiter on them
+  (`:1361-1362`, `:1407-1408`), where this port keeps its always-mounted guarded
+  handler and decides inside it, so behind a limiter at its limit those two
+  requests answer `429` here and `404` there.
+  The position in the chain is the load-bearing part and is the reference's:
+  outermost, ahead of the CSRF middleware and ahead of the auth middleware
+  (`GET /me`, `:656`), so a refusal mints no CSRF cookie, verifies no token and
+  reads no store. `auth.RateLimitMiddleware(cfg)` is the composable form, a
+  pass-through when the slot is empty. A new wiretest group pins all of it on
+  net/http, chi, gin and echo: every documented route passes through the slot
+  exactly once, a limiter answering `429` short-circuits both middlewares
+  (asserted on the body, the absence of any `Set-Cookie`, and a user-store
+  lookup counter that stays at zero), and a `nil` slot answers identically to a
+  pass-through one on every route, and the JWKS document is still served behind
+  a limiter that refuses everything it sees, which is how the route stays
+  provably outside the slot. `RateLimiter` is a constructor, called once per
+  route at mount time, so a limiter's counter has to be allocated outside it to
+  be shared across routes the way the reference's single Express handler
+  instance is. No new routes, so the OpenAPI document is unchanged. See
+  README_DETAILED.md, "`HTTPConfig.RateLimiter` — the rate-limiter slot".
+- **Noted, not implemented:** the family's private development line carries a
+  second, separate slot on its admin router (`AdminOptions.rateLimiter`,
+  `admin.router.ts:211`, collapsed the same way at `:577`) and spreads it onto
+  exactly one route, `POST /users/:id/promote` (`:1030`) — its admin login
+  route (`:614`) carries none. That path is relative to the admin router's own
+  mount, which the host app chooses and which defaults to `/admin`
+  (`admin.router.ts:190`, `openapi.ts:674`), not to `HTTPConfig.APIPrefix`.
+  Those line numbers are in that private tree, not in `ReferenceRevision`, whose
+  admin router carries no rate-limiter slot at all. No admin route exists in
+  this port yet.
+
 ## [0.6.0] - 2026-09-12
 
 The consuming half of identity, and the policies the reference leaves to its
