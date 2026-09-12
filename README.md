@@ -585,27 +585,38 @@ release that closes the gap.
 | CSRF protection | ✅ Implemented | `CSRFMiddleware`, double-submit cookie + header, exemption table pinned to the reference. | — |
 | Account management | ✅ Implemented | Register, `UpdateProfile`, `DeleteAccount`, password and email lifecycle. | — |
 | OAuth login + account linking | ✅ Implemented | Signed state, PKCE, single-use nonce; Google and GitHub presets, `AdditionalAuthParams` and declarative `ProfileMap`/`MapProfile` for generic providers; `OAuthProvisioning` replaces the reference's abstract `findOrCreateUser` (auto-create, domain allowlist, verified-address demand, `FieldMap`), and the account-conflict flow is complete — stash, the reference's `/account-conflict` redirect, then `/link-request` and `/link-verify`. | — |
-| Dynamic email templates + UI i18n fallback | ✅ Implemented | The reference's six template ids with its en/it built-ins, `TemplateStore` overrides rendered under its `{{T.key}}`/`{{key}}` rule, per-request site-URL links and the old-address notice on `/change-email/confirm`. The `welcome` template renders but `POST /register` does not mail it yet (the reference does, `auth.router.ts:719-724`); UI translations are stored and are read by `GET /ui/config` once the UI router lands (v0.8.0). | — |
+| Dynamic email templates + UI i18n fallback | ✅ Implemented | The reference's six template ids with its en/it built-ins, `TemplateStore` overrides rendered under its `{{T.key}}`/`{{key}}` rule, per-request site-URL links and the old-address notice on `/change-email/confirm`. The `welcome` template renders but `POST /register` does not mail it yet (the reference does, `auth.router.ts:719-724`); UI translations are stored and are read by `GET /ui/config` once the UI router lands (v0.7.0 for the route, v0.9.0 for the pages). | — |
 | Custom token claims | ✅ Implemented | `Config.BuildTokenClaims` hook, plus `StaticClaims`/`UserFieldClaims`/`ChainClaims` and the synchronous `ClaimsWebhook` (this port's extension); the hook runs at mint time and on `/me`, never in the middleware. | — |
-| Identity Provider (IdP) mode (RS256 + JWKS + resource-server validation) | ⚠️ Partial | Discovery, authorize, token and userinfo endpoints exist; the signing key, `kid` and published keys are injectable (`IDPConfig.Signer`, `KeyID`, `PublicKeys`, with `ParseRSAPrivateKeyPEM` for the reference's PEM form), authorization codes go through `AuthCodeStore`, and `IssueIdPTokenPair` mints the reference's RS256 pair. Both halves of the JWKS contract are in: `auth.WithIDP` makes all four adapters serve the document at `<prefix>/.well-known/jwks.json` (`IDPConfig.JWKSPath`) with the reference's `Cache-Control` and CORS headers, with `<base>/jwks` kept as a deprecated alias through the 0.x line and removed in v1.0.0; and on the consuming side `JWKSClient` caches a remote JWKS with stale-while-revalidate, `VerifyRS256` verifies a bearer token against it (RS256 pinned before the key lookup, `kid` rotation retried once and rate-limited, `iss` checked), `ResourceServerMiddleware` is wired on all four adapters — bearer against the JWKS, cookie against the local HS256 secret, neither path reading a store — and `HTTPConfig.ResourceServer` unmounts the credential routes. What keeps this ⚠️: the OIDC endpoints themselves are mounted by `(*IDP).RegisterHandlers` on the host's own mux rather than by the four adapters, so they are outside the wiretest conformance suite. | v0.7.0 |
-| RBAC | ⚠️ Service-level | `RolesPermissionsStore` and service helpers; no HTTP surface (the admin router is absent). | v0.9.0 |
-| Multi-tenancy | ⚠️ Service-level | `TenantStore` and membership helpers; no HTTP surface. | v0.9.0 |
-| API keys (M2M) | ⚠️ Service-level | `APIKeyService` + `APIKeyMiddleware`; no management routes. | v0.9.0 |
-| Admin panel | ❌ Absent | `ServeAdminUI()` serves a static page; none of the reference's admin routes exist, and no admin guard. | v0.9.0 |
-| Built-in UI + auth runtime (`auth.js`) | ⚠️ Partial | `ServeAuthUI()`/`ServeAuthJS()` serve hand-written assets, not the reference's; no `GET /ui/config`, no branding. | v0.8.0 |
-| OpenAPI / Swagger docs | ⚠️ Partial | `GenerateOpenAPISpec` returns the document; nothing serves it. | v0.8.0 |
-| Event-driven tooling (event bus, SSE, inbound/outbound webhooks, telemetry, notify) | ⚠️ Primitives only | `EventBus`, `SseHub`, `WebhookDispatcher` and `TelemetryStore` exist, but the service publishes no events, there is no tools router, and the outbound webhook headers differ from the reference. | v0.10.0 |
+| Identity Provider (IdP) mode (RS256 + JWKS + resource-server validation) | ⚠️ Partial | Discovery, authorize, token and userinfo endpoints exist; the signing key, `kid` and published keys are injectable (`IDPConfig.Signer`, `KeyID`, `PublicKeys`, with `ParseRSAPrivateKeyPEM` for the reference's PEM form), authorization codes go through `AuthCodeStore`, and `IssueIdPTokenPair` mints the reference's RS256 pair. Both halves of the JWKS contract are in: `auth.WithIDP` makes all four adapters serve the document at `<prefix>/.well-known/jwks.json` (`IDPConfig.JWKSPath`) with the reference's `Cache-Control` and CORS headers, with `<base>/jwks` kept as a deprecated alias through the 0.x line and removed in v1.0.0; and on the consuming side `JWKSClient` caches a remote JWKS with stale-while-revalidate, `VerifyRS256` verifies a bearer token against it (RS256 pinned before the key lookup, `kid` rotation retried once and rate-limited, `iss` checked), `ResourceServerMiddleware` is wired on all four adapters — bearer against the JWKS, cookie against the local HS256 secret, neither path reading a store — and `HTTPConfig.ResourceServer` unmounts the credential routes. What keeps this ⚠️: the OIDC endpoints themselves are mounted by `(*IDP).RegisterHandlers` on the host's own mux rather than by the four adapters, so they are outside the wiretest conformance suite; the adapters take them over in v0.7.0. | v0.7.0 |
+| RBAC | ⚠️ Service-level | `RolesPermissionsStore` and service helpers; no HTTP surface (the admin router is absent). | v0.10.0 |
+| Multi-tenancy | ⚠️ Service-level | `TenantStore` and membership helpers; no HTTP surface. | v0.10.0 |
+| API keys (M2M) | ⚠️ Service-level | `APIKeyService` + `APIKeyMiddleware`; no management routes. | v0.10.0 |
+| Admin panel | ❌ Absent | `ServeAdminUI()` serves a static page; none of the reference's admin routes exist, and no admin guard. | v0.10.0 |
+| Built-in UI + auth runtime (`auth.js`) | ⚠️ Partial | `ServeAuthUI()`/`ServeAuthJS()` serve hand-written assets, not the reference's; no `GET /ui/config`, no branding. | v0.9.0 |
+| OpenAPI / Swagger docs | ⚠️ Partial | `GenerateOpenAPISpec` returns the document; nothing serves it. | v0.7.0 |
+| Event-driven tooling (event bus, SSE, inbound/outbound webhooks, telemetry, notify) | ⚠️ Primitives only | `EventBus`, `SseHub`, `WebhookDispatcher` and `TelemetryStore` exist, but the service publishes no events, there is no tools router, and the outbound webhook headers differ from the reference. | v0.11.0 |
 | Client libraries compatibility (Angular + Flutter) | ✅ For the auth surface | Verified by [awesome-lambda-auth](https://github.com/nik2208/awesome-lambda-auth) with both official clients unmodified against a live stack. | — |
-| Rate limiting | ➖ Not a library concern | The reference ships none either; it is the integrator's middleware. | — |
+| Rate limiting | ⚠️ Slot only | The reference ships no algorithm either, but it does ship the slot: `RouterOptions.rateLimiter` spread onto every auth route (`auth.router.ts:46`, `:468`). `HTTPConfig.RateLimiter` is that slot; the algorithm stays the integrator's. | v0.7.0 |
 | MCP server (`awesome-node-auth-mcp-server`) | ➖ Out of scope | Out of parity scope for this library. | — |
 
 ### Roadmap
 
-The gaps above close in order, one minor release per milestone: v0.4.0 email
-flows (site URLs, template store, delivery webhook), v0.5.0 2FA knobs and claims,
-v0.6.0 OAuth provisioning, v0.7.0 IdP key injection and RS256 verification,
-v0.8.0 `/ui/config`, vendored reference UI and served docs, v0.9.0 the admin
-router, v0.10.0 the tools router and event plane. v1.0.0 removes the shims those
-releases deprecate. The settings store was the other half of the v0.8.0 item and
-landed ahead of it: it is in [Unreleased](CHANGELOG.md), and `/ui/config` — the
-one route that reads its branding block — is what is left of that milestone.
+The gaps above close in order, one minor release per milestone. Shipped so far:
+v0.4.0 email flows (site URLs, template store, delivery webhook), v0.5.0 2FA
+knobs, token claims and the IdP signing key, v0.6.0 OAuth provisioning, the JWKS
+route, RS256 verification and the settings store.
+
+What is left, and where each row of the table above closes:
+
+| Release | Closes |
+|---|---|
+| v0.7.0 | served OpenAPI and Swagger UI, `GET /ui/config`, a rate-limiter middleware slot, the OIDC endpoints mounted by the adapters, a password-verifier seam |
+| v0.8.0 | the store seams the admin surface needs: user, session and role listers, a complete `APIKeyStore`, a `WebhookStore` |
+| v0.9.0 | the reference's UI assets vendored byte for byte, with SSR and the page catch-all |
+| v0.10.0 | the admin router, all fifty-one routes |
+| v0.11.0 | the event plane, the reference's outbound-webhook wire format, the `SseManager` protocol and the tools router |
+| v1.0.0 | removal of the shims those releases deprecate, and a final documentation truth pass |
+
+v0.11.0 carries the breaking removals (`SseHub`, `WebhookDispatcher`, the
+`X-Signature-SHA256` header, the old `TelemetryEvent` shape), which is why they
+are gathered into one release rather than spread across three.
