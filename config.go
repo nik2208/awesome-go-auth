@@ -144,6 +144,21 @@ type Config struct {
 	// does not consult them either — see settings_store.go and README_DETAILED,
 	// "Runtime settings". WithSettingsStore sets it.
 	Settings SettingsStore
+	// Events is the bus every identity.* event is raised on: the reference's
+	// routerOptions.eventBus (node-auth auth.router.ts:418-420, where
+	// publishRouterEvent takes it and returns early when it is undefined).
+	//
+	// Optional, and nil is the common case. A deployment that subscribes to
+	// nothing configures nothing, and Service.publish then does no work at all —
+	// not even building the payload, which is why the publication sites pass a
+	// builder rather than a value. See Service.publish.
+	//
+	// It sits on Config rather than being a ServiceOption for the reason
+	// Settings does: the reference carries it in the same options bag as the
+	// stores, a host that builds its Config by hand must be able to reach it,
+	// and NewWithConfig is the constructor that takes the struct whole.
+	// WithEventBus sets it.
+	Events *EventBus
 	// SiteURLs is the reference's config.email.siteUrl, which may be one string
 	// or an array of them (auth-config.model.ts). Two things are read off it:
 	//

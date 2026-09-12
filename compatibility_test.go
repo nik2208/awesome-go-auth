@@ -60,6 +60,7 @@ var wantDeviationIDs = []string{
 	"docs-routes-are-opt-in",
 	"event-handler-panic-does-not-fail-the-publisher",
 	"forgot-password-succeeds-on-delivery-failure",
+	"identity-events-are-raised-from-the-development-line",
 	"jwks-cors-wildcard-string-form",
 	"jwks-unknown-kid-refetch-is-rate-limited",
 	"link-request-exempts-bearer-from-csrf",
@@ -69,6 +70,7 @@ var wantDeviationIDs = []string{
 	"register-issues-a-session",
 	"register-route-is-always-mounted",
 	"resource-server-gates-all-credential-routes",
+	"session-rotated-reports-one-session-id",
 	"temp-token-is-typed-not-an-access-token",
 	"totp-accepts-one-step-of-skew",
 	"totp-issuer-defaults-to-config-issuer",
@@ -158,6 +160,28 @@ var wantClaims = map[string][]string{
 	"ui-ssr-config-json-is-html-escaped": {
 		"window.__AUTH_CONFIG__", "JSON.stringify", `<`, "</script>",
 		"JSON.parse", "SetEscapeHTML(false)", "siteName", "customCss", "logoUrl",
+	},
+	// Both halves of the asymmetry — that this port publishes and that the
+	// published reference publishes nothing at all — plus the three things a
+	// reader needs in order to check the claim rather than take it: that the
+	// publication points come from the development line, the arithmetic of the
+	// twenty-six, and that AuthTools.track is a host's own event being re-emitted
+	// rather than a publication point. An entry that kept "raises events" and
+	// lost "the reference raises none" would read as a port of something,
+	// which is exactly what it is not.
+	"identity-events-are-raised-from-the-development-line": {
+		"PublishContext", "nineteen", "twenty-six", "AuthTools.track",
+		"nik2208/node-auth", "DevLineRevision", "Config.Events",
+		"nothing in the library publishes at all",
+	},
+	// The wire fact (one session row per login rather than per refresh), the
+	// payload fact (the two ids are equal), the reference mechanism that makes
+	// the claim checkable, and — the half most likely to be lost in a reword —
+	// that single-use rotation still holds, because an entry reduced to "the
+	// session id does not change" reads as a missing security property.
+	"session-rotated-reports-one-session-id": {
+		"previousSessionId", "sessionId", "issueTokens", "revoke",
+		"single-use", "identity.session.rotated",
 	},
 }
 

@@ -643,10 +643,83 @@ func (a *Auth) OAuthComplete(ctx context.Context, in OAuthCompleteInput) (OAuthC
 	// on — see OAuthBeginInput.
 	user, tokens, err := wiring.Service.HandleCallbackWithPolicy(ctx, a.service, wiring.LinkedAccounts, info, meta.TenantID, "", wiring.provisioning())
 	if err != nil {
+		// Before the stash, as in the dev line, whose catch publishes and then
+		// stashes and then redirects (node-auth auth.router.ts:1480 precedes
+		// :1486-1488). Nothing downstream depends on the order; keeping it means
+		// a subscriber and the pending-link store see the conflict in the same
+		// sequence in both trees.
+		a.publishOAuthConflict(ctx, in.Provider, err)
 		a.stashAccountConflict(ctx, wiring, in.Provider, meta.TenantID, err)
 		return OAuthCompleteResult{RedirectTo: redirectTo}, err
 	}
+	// node-auth auth.router.ts:1444, the publish at the end of handleOAuthLogin
+	// — one site there serving three callback routes, and one here serving every
+	// configured provider. It is a separate name from identity.auth.login.success
+	// although an OAuth callback is a login, and it is raised only on the path
+	// that issues tokens: a callback that diverts to the 2FA page returns before
+	// it (node-auth auth.router.ts:1441).
+	//
+	// `provider` is the dev line's `user.loginProvider ?? 'oauth'`, read against
+	// what the callback route does to the user just before it calls
+	// handleOAuthLogin: `user.loginProvider = user.loginProvider ?? <name>`
+	// (node-auth auth.router.ts:1476, :1526, :1576). So the value is the
+	// provider recorded on the account when there is one and the provider that
+	// served this callback otherwise, and the literal 'oauth' is unreachable in
+	// both trees. The fallback is deliberately in.Provider and not
+	// User.loginProviderOrLocal, which would answer "local" — the one value this
+	// key must never carry.
+	a.service.publish(ctx, func() Event {
+		provider := user.LoginProvider
+		if provider == "" {
+			provider = in.Provider
+		}
+		return Event{
+			Name:      EventAuthOAuthSuccess,
+			UserID:    user.ID,
+			SessionID: a.service.sessionIDOf(tokens),
+			Data:      map[string]any{"provider": provider, "redirectTo": redirectTo},
+		}
+	})
 	return OAuthCompleteResult{User: user, Tokens: tokens, RedirectTo: redirectTo}, nil
+}
+
+// publishOAuthConflict raises identity.auth.oauth.conflict for a callback that
+// ended in an account conflict: node-auth auth.router.ts:1480, :1530 and :1580.
+//
+// Three publication points there and one here, and the reason is the shape of
+// the two routers rather than a decision. The dev line writes the Google, the
+// GitHub and the generic callback as three separate handlers with three copies
+// of the same catch, each naming its provider as a literal; this port has one
+// OAuthComplete that every provider reaches, and the literal is in.Provider.
+// All three dev line payloads are the same three keys.
+//
+// It is the one reachable name raised on a path that ends in a redirect rather
+// than a JSON body, and the one that carries no user id — there is no user yet,
+// which is the whole content of a conflict. The two remaining keys are the
+// spread of the AuthError's own data (node-auth auth.router.ts:1481); this
+// port's OAuthAccountConflictError carries exactly those two fields, and
+// populates both whenever it is constructed at all (oauth.go:683), so they are
+// written unconditionally rather than omitted when empty.
+//
+// A non-conflict failure publishes nothing. The dev line's catch tests the
+// error code before it publishes, so a provider that returned a 500, a state
+// that did not verify and a refusal from the provisioning policy all pass
+// through silently.
+func (a *Auth) publishOAuthConflict(ctx context.Context, provider string, err error) {
+	var conflict *OAuthAccountConflictError
+	if !errors.As(err, &conflict) {
+		return
+	}
+	a.service.publish(ctx, func() Event {
+		return Event{
+			Name: EventAuthOAuthConflict,
+			Data: map[string]any{
+				"provider":          provider,
+				"email":             conflict.Email,
+				"providerAccountId": conflict.ProviderAccountID,
+			},
+		}
+	})
 }
 
 // stashAccountConflict parks an account conflict for the link flow to pick up,

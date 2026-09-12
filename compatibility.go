@@ -815,6 +815,107 @@ func CompatibilityNotes() APICompatibilityNotes {
 				},
 			},
 			{
+				ID:    "identity-events-are-raised-from-the-development-line",
+				Title: "The library raises `identity.*` events where the published reference raises none",
+				Surface: "`auth.Config.Events` / `auth.WithEventBus`, and the nineteen routes that " +
+					"publish through it",
+				Behaviour: "Nineteen publication points raise fifteen of the twenty-six declared " +
+					"`identity.*` names: login success and failure, logout, session rotation, " +
+					"registration, the two 2FA transitions, password change, email verification, " +
+					"email change, the magic-link and SMS logins, and the OAuth success and conflict. " +
+					"Each carries the payload and the `data` keys the development line builds there, " +
+					"and each goes through `EventBus.PublishContext`, so the correlation id, client " +
+					"address and user agent the request carried travel with it. A deployment that " +
+					"configures no bus — the default, and the common case — publishes nothing and " +
+					"allocates nothing.",
+				Reference: "At this revision **nothing in the library publishes at all**. " +
+					"`AuthEventBus.publish` exists, is documented and is never called from the router; " +
+					"the twenty-six names are declared and none is raised. The single `.publish` " +
+					"outside the bus is `AuthTools.track`, which re-emits an event a *host* handed it " +
+					"rather than one the library observed. A host wiring `new AuthEventBus()` into " +
+					"`routerOptions.eventBus` at this revision receives nothing.",
+				Citations: []string{"auth-event-bus.ts:55-64", "auth-event-names.ts:5-40", "auth-tools.ts:231"},
+				Why: "The publication points are not invented, they are ported: they exist in " +
+					"nik2208/node-auth, the private development line the published package is cut " +
+					"from, where `publishRouterEvent` is called nineteen times in the auth router, " +
+					"four times in the admin router and three times in the configurator — twenty-six " +
+					"in all. That is the behaviour the family's next release has, and the whole event " +
+					"plane this milestone builds (webhook delivery, the SSE stream, the telemetry " +
+					"store) subscribes to a bus that would otherwise never speak. Shipping the " +
+					"vocabulary without the publishers would mean every consumer downstream " +
+					"subscribing to silence. The alternative — waiting for the dev line to ship — " +
+					"would leave this port's `EventBus` as documented dead code it already was.",
+				Notes: []DeviationNote{
+					{
+						Label: "Which tree a citation means",
+						Text: "The citations on this entry are the published reference, as every " +
+							"entry in this register is. The publication points themselves are cited " +
+							"in the source as `node-auth <file>:<line>`, which resolves against " +
+							"`DevLineRevision`; a bare `<file>:<line>` is `ReferenceRevision`. A " +
+							"reviewer who greps the published tree for `publishRouterEvent` finds " +
+							"nothing, and that is the expected result rather than a missing port.",
+					},
+					{
+						Label: "What is deliberately not published",
+						Text: "Eleven of the twenty-six declared names are raised by neither tree, " +
+							"and this port has the obvious call site for several — " +
+							"`identity.tenant.created` next to `Service.CreateTenant`, " +
+							"`identity.user.linked` next to the account-linking routes. None is " +
+							"raised. The seven remaining development-line points are in its admin " +
+							"router and its configurator, neither of which this port has yet; the " +
+							"admin router is M8's. `event_publication_test.go` pins all twenty-six, " +
+							"exercises the nineteen and names the surface and milestone for each of " +
+							"the seven.",
+					},
+				},
+			},
+			{
+				ID:      "session-rotated-reports-one-session-id",
+				Title:   "Refreshing rotates the token inside the session instead of opening a new one",
+				Surface: "`POST <prefix>/refresh`, and the `identity.session.rotated` event it raises",
+				Behaviour: "The refresh token is rotated in place: the stored hash and expiry of the " +
+					"*existing* session row are rewritten, the session id is unchanged, and no row is " +
+					"revoked. The `sid` claim of the new token pair is therefore the same as the old " +
+					"one, `GET <prefix>/sessions` shows one row per login however often it refreshes, " +
+					"and on the `identity.session.rotated` payload `data.previousSessionId` is equal " +
+					"to the event's own `sessionId`.",
+				Reference: "`issueTokens` creates a **new** session on every call and, when it was " +
+					"given the previous `sid` — which the refresh route passes — revokes the old one " +
+					"immediately after. So a refresh moves the session id, the session list grows a " +
+					"row per refresh and loses the revoked one, and the development line's " +
+					"`identity.session.rotated` carries two different ids: the new session in " +
+					"`sessionId` and the one just revoked in `data.previousSessionId`.",
+				Citations: []string{"auth.router.ts:425-439", "auth.router.ts:649"},
+				Why: "The difference predates the event by a long way — it is how this port's " +
+					"`Service.Refresh` has always worked — but until U18 nothing exposed it, and the " +
+					"event is what makes it a fact a consumer has to know rather than an internal " +
+					"choice. A subscriber that reads `previousSessionId` to stitch a session lineage " +
+					"together gets a self-edge here and a chain there, and it would have no way to " +
+					"find that out from the payload. Recording it was the alternative to changing " +
+					"rotation semantics inside a PR about publishing events: moving the session id on " +
+					"every refresh changes what `GET <prefix>/sessions` returns and invalidates every " +
+					"`sid` a host has stored, which is a wire change and belongs to its own PR with " +
+					"its own conformance run.",
+				Notes: []DeviationNote{
+					{
+						Label: "What still holds",
+						Text: "Both halves of what rotation is for are unaffected: the presented " +
+							"refresh token is single-use, because the stored hash is replaced by the " +
+							"new one, and a stolen token stops working the moment the legitimate " +
+							"client refreshes. `POST <prefix>/logout` revokes the session in both " +
+							"ports. Only the identity of the session across a refresh differs.",
+					},
+					{
+						Label: "Reading the event safely",
+						Text: "Treat `data.previousSessionId` as \"the session the presented refresh " +
+							"token belonged to\", which is true in both ports, rather than as \"a " +
+							"session that has just been revoked\", which is true only in the " +
+							"reference. A subscriber keying a session-management view on " +
+							"`sessionId` needs no change.",
+					},
+				},
+			},
+			{
 				ID:      "event-handler-panic-does-not-fail-the-publisher",
 				Title:   "A panicking event handler is contained instead of failing the request that published",
 				Surface: "`auth.EventBus.Publish` and `PublishContext`, and therefore every route that will publish an `identity.*` event",

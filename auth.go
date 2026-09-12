@@ -409,6 +409,31 @@ func WithSettingsStore(store SettingsStore) Option {
 	}
 }
 
+// WithEventBus sets Config.Events: the bus the library raises its identity.*
+// events on. It is the reference's routerOptions.eventBus (node-auth
+// auth.router.ts:92-96, read by publishRouterEvent at :418-420).
+//
+//	bus := auth.NewEventBus()
+//	bus.Subscribe(auth.EventAuthLoginSuccess, func(ev auth.Event) { … })
+//	bus.Subscribe(auth.EventBusWildcard, func(ev auth.Event) { … })
+//	a, err := auth.New(auth.WithEventBus(bus))
+//
+// A nil bus is refused rather than accepted as "no bus", which is the opposite
+// of leaving the option out. The distinction matters here more than it does for
+// the store options: an event that is never raised fails silently and stays
+// silent, so a host that wrote WithEventBus(b) with a b that turned out nil
+// would get exactly the symptom this option exists to prevent. Omitting the
+// option is how a deployment says it wants no events, and it is the default.
+func WithEventBus(bus *EventBus) Option {
+	return func(b *authBuilder) error {
+		if bus == nil {
+			return errors.New("auth: event bus is required")
+		}
+		b.cfg.Events = bus
+		return nil
+	}
+}
+
 // WithSiteURLs sets Config.SiteURLs: the base URLs the front ends are served
 // from. The first is canonical, every one of them is allowlisted for the
 // per-request origin match — see Config.SiteURLs and Auth.ResolveSiteURL.

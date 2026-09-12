@@ -163,6 +163,32 @@ adapters to the same answer.
   carries in `metadata` (`auth-tools.ts:257-262`), so that U19's envelope is
   derived from the event instead of assembled beside it — deliberately without
   `IP` and `UserAgent`, which stay inside the deployment.
+- **The `identity.*` events are now published.** `EventBus.Publish` had no call
+  site in this library: the bus existed, was documented, worked, and nothing had
+  ever raised an event through it, so every downstream consumer of the event
+  plane — webhook delivery, the SSE stream, telemetry, the tools router —
+  subscribed to a bus that never spoke. Nineteen publication points close that,
+  each at the point the private development line publishes and carrying the same
+  `data` keys: login success (`method` one of `local`, `totp`, `magic-link`,
+  `sms` — five sites, one name, as the source does it), login failure, logout,
+  session rotation, registration, the two 2FA transitions, password change,
+  email verification, email change, and the OAuth success and conflict. The seam
+  is `Config.Events` with `WithEventBus`, beside `Config.Settings`; every
+  publication goes through `EventBus.PublishContext`, so the correlation id, IP
+  and user agent the request carried reach the subscriber. A deployment that
+  configures no bus — the default — publishes nothing and allocates nothing,
+  which `TestPublishWithoutABusAllocatesNothing` pins because it is a property
+  of escape analysis rather than of the source.
+  `event_publication_test.go` is the conformance test: all twenty-six of the
+  development line's publication points are in one table, the nineteen this port
+  can reach are exercised and their payloads pinned key for key, and the seven it
+  cannot each name the surface that is missing and the milestone that will add it
+  (four in the admin router, M8; three in the configurator, which has no
+  counterpart here). Reachability is not an editorial field — it is checked
+  against the development-line *file* each citation names, so a live site cannot
+  be reclassified into silence. Eleven declared names stay unraised in both
+  trees, including the ones with an obvious call site here, and a test holds them
+  that way.
 - **`HTTPConfig.ClientIP` — the trust-proxy seam.** The reference reads
   `req.ip || req.socket.remoteAddress`, and Express's `req.ip` is the socket
   peer under the default `trust proxy` setting and a parsed `X-Forwarded-For`
@@ -234,6 +260,23 @@ adapters to the same answer.
   `EventBus` gains no `Unsubscribe`: the reference's `offEvent` has no
   line-for-line Go form, and the cancel-function shape that replaces it belongs
   with the first consumer that ends a subscription.
+- **Deliberate deviation registered:
+  `identity-events-are-raised-from-the-development-line`.** The publishers this
+  release adds have no counterpart in the published reference, which raises none
+  of the twenty-six names it declares; they are ported from nik2208/node-auth,
+  the private line the package is cut from. A consumer comparing the two
+  deployments sees events on one and silence on the other, so the asymmetry is a
+  fact the register has to carry rather than a detail of the port.
+- **Deliberate deviation registered:
+  `session-rotated-reports-one-session-id`.** `Service.Refresh` has always
+  rotated the refresh token inside the existing session rather than opening a new
+  one and revoking the old, which is what the reference's `issueTokens` does. The
+  difference predates this release and nothing exposed it until
+  `identity.session.rotated` started carrying `data.previousSessionId`, where it
+  is now visible as an id equal to the event's own `sessionId`. Rotation is still
+  single-use — the stored hash is replaced — and changing the session identity
+  across a refresh is a wire change to `GET <prefix>/sessions` that belongs to
+  its own PR, so the behaviour is recorded rather than altered here.
 
 ### Deprecated
 - **`ServeAuthJS()`**, which is now a thin wrapper over the vendored asset kept
