@@ -48,6 +48,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Those line numbers are in that private tree, not in `ReferenceRevision`, whose
   admin router carries no rate-limiter slot at all. No admin route exists in
   this port yet.
+- **`Config.PasswordVerifier` and `WithPasswordVerifier` — the migration seam.**
+  A deployment moving off another identity provider can now accept that
+  provider's password on the first login, adopt it as a local bcrypt hash and
+  stop calling the old system. `PasswordVerifier` is
+  `func(ctx context.Context, user User, password string) (ok, migrated bool, err error)`
+  and is consulted **only** after the stored hash has failed to verify what the
+  request carried, so a user whose local hash verifies never reaches it and a
+  finished migration costs nothing per login. Everything else does reach it —
+  not only the imported row whose hash is empty, but every account that never
+  had a password (OAuth-only, magic-link-only), which the reference refuses
+  outright (`local.strategy.ts:23-25`) — so **a verifier must key on its own
+  migration marker** and refuse before it touches the password it is handed or
+  calls anything over the network. `ok=false` is `ErrInvalidCredentials`, the
+  same value and therefore the same
+  `401 {"error":"Invalid credentials","code":"INVALID_CREDENTIALS"}`
+  an ordinary wrong password produces; `ok=true` with `migrated=true` hashes the
+  supplied password at `Config.BcryptCost` and writes it through
+  `UserPasswordStore.UpdatePassword` — the path `ResetPassword` and
+  `ChangePassword` already use — before any token is issued, **overwriting
+  whatever hash was stored** rather than only filling in an absent one, and
+  bypassing `Config.MinPasswordLen` because the credential is inherited rather
+  than chosen (an empty password is never written and behaves as
+  `migrated=false`); `ok=true` with `migrated=false` logs the user in and stores
+  nothing. A non-nil `err` is a
+  failure to decide rather than a rejection and fails the login closed with the
+  generic `500 {"error":"Internal server error"}`; so does a failed hash or a
+  store that cannot persist the migration, each reported as an opaque error
+  wrapped with `%v` and never `%w`, so that a store answering
+  `ErrFeatureNotSupported` cannot turn one branch into a distinguishable `501`
+  (`context.Canceled` and `context.DeadlineExceeded` are the exception and keep
+  `%w`, since `HTTPErrorFor` maps neither and both already answer the same
+  generic `500`). Every one of those failures also goes to `Config.Logger`,
+  with the user id and never the password, since the wire answer names no
+  branch.
+  This is an **additive port extension, not parity**: the reference's login path
+  verifies bcrypt directly and offers no hook of any kind
+  (`local.strategy.ts:19-29` calling `password.service.ts:8-10`, reached by
+  `auth.router.ts:541-544`), and its `AuthConfig` names no verifier, legacy hash
+  or migration. Unset — the default — nothing is called and `POST /auth/login`
+  answers exactly as it did before and exactly as the reference does. The seam
+  is not in the deviation register because *configured* it still puts nothing
+  new on the wire: no new status, no new code, no new body field, on this route
+  or any other. No route, request body or response shape changes. See
+  README_DETAILED.md, "Password verifier (migration seam)".
 
 ## [0.6.0] - 2026-09-12
 

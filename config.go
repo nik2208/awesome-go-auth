@@ -88,6 +88,19 @@ type Config struct {
 	// merely logged on Me. StaticClaims, UserFieldClaims, ChainClaims and
 	// ClaimsWebhook build one from configuration rather than code.
 	BuildTokenClaims TokenClaimsBuilder
+	// PasswordVerifier is the migration seam: the hook POST <prefix>/login
+	// consults for a user whose stored hash did not verify the supplied
+	// password, so that a deployment moving off another identity provider can
+	// accept that provider's password on the first login, adopt it as a local
+	// bcrypt hash and stop calling the old system.
+	//
+	// It is an additive port extension with no counterpart in the reference,
+	// whose login path verifies bcrypt directly and offers no hook
+	// (local.strategy.ts:19-29). Nil, the default, is the reference's behaviour
+	// exactly: the verifier is never called, and every login answers as it did
+	// before this field existed. WithPasswordVerifier sets it. See
+	// password_verifier.go.
+	PasswordVerifier PasswordVerifier
 	// SendMagicLink and SendSMSCode are the delivery seam. Both are optional to
 	// construct a service with and required to use the route that needs them:
 	// leaving one nil is what makes POST <prefix>/magic-link/send answer 500

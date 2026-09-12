@@ -238,6 +238,41 @@ func WithTokenClaimsBuilder(fn TokenClaimsBuilder) Option {
 	}
 }
 
+// WithPasswordVerifier sets Config.PasswordVerifier, the migration seam: the
+// hook POST <prefix>/login consults for a user whose stored hash did not verify
+// the supplied password, so a deployment can accept the password its previous
+// identity provider held, adopt it as a local hash and drop the dependency.
+//
+//	auth.WithPasswordVerifier(func(ctx context.Context, u auth.User, pw string) (bool, bool, error) {
+//		if u.Metadata["legacyIdP"] != "acme" {
+//			return false, false, nil
+//		}
+//		ok, err := acme.CheckPassword(ctx, u.Email, pw)
+//		return ok, ok, err
+//	})
+//
+// The marker check on the first line of that example is a requirement, not
+// decoration: the hook is reached for every account whose stored hash does not
+// verify, including OAuth-only and magic-link-only accounts that never had a
+// password, and it is reached from an unauthenticated route. See
+// PasswordVerifier, which also explains why adopting a password overwrites
+// whatever hash was stored.
+//
+// It is an additive port extension: the reference verifies bcrypt directly on
+// its login path and has no such hook (local.strategy.ts:19-29). Omitting this
+// Option is the reference's behaviour. Passing nil is refused, in the style of
+// the sender Options: an explicit setter reached with nothing to set is a
+// caller mistake, not a request to turn the seam off.
+func WithPasswordVerifier(verify PasswordVerifier) Option {
+	return func(b *authBuilder) error {
+		if verify == nil {
+			return errors.New("auth: password verifier is required")
+		}
+		b.cfg.PasswordVerifier = verify
+		return nil
+	}
+}
+
 // WithMagicLinkSender wires magic-link delivery. Without it POST
 // <prefix>/magic-link/send answers 500 EMAIL_NOT_CONFIGURED, because the route
 // cannot put the link in its response body.
