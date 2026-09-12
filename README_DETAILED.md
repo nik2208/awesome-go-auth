@@ -1114,41 +1114,141 @@ account-conflict pair the callback parks for the link flow (`pending-link:`).
 
 ## SSE (Server-Sent Events)
 
-### `SseHub`
+### `SseManager`
 
-Thread-safe in-process SSE broker.
+The reference's `SseManager` (`src/tools/sse-manager.ts`): connections rather
+than channels, a set of server-chosen topics per connection, and `StreamEvent`
+frames broadcast to every connection subscribed to a topic.
 
 ```go
-hub := auth.NewSseHub()
+sse, err := auth.NewSseManager(ctx)
 
-// Publish from anywhere
-hub.Publish(ctx, userID, auth.SseMessage{
-    Event: "notification",
-    Data:  map[string]any{"message": "Hello!"},
+// One handler holds one connection for its whole life. The topics are the
+// server's decision — a client never names a channel.
+http.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
+    user, ok := auth.UserFromContext(r.Context())
+    if !ok {
+        http.Error(w, "unauthorized", http.StatusUnauthorized)
+        return
+    }
+    _ = sse.Serve(w, r, []string{"user:" + user.ID, "global"},
+        auth.SseConnectionMeta{UserID: user.ID, TenantID: user.TenantID})
 })
 
-// Serve to a client
-http.Handle("/events", auth.ServeSSE(hub, userID))
+// Publish from anywhere.
+sse.Broadcast(ctx, "user:"+userID, auth.StreamEvent{
+    Type: "notification",
+    Data: map[string]any{"message": "Hello!"},
+})
 ```
 
-### `(*SseHub).Subscribe(ctx, channel) (<-chan SseMessage, error)`
-### `(*SseHub).Publish(ctx, channel, msg) error`
-### `(*SseHub).Unsubscribe(channel, ch)`
+No route is mounted for this yet: `GET <prefix>/tools/stream` arrives with the
+tools router.
 
-### `ServeSSE(hub *SseHub, channel string) http.HandlerFunc`
+### `NewSseManager(ctx context.Context, opts ...SseOption) (*SseManager, error)`
 
-Returns an HTTP handler that streams `text/event-stream` to the client. Sends a `:ping` keepalive comment every 30 seconds.
+With no options: heartbeats every 30 s, deduplication on, no distributor — the
+reference's defaults. `ctx` bounds the distributor subscription, and the error
+is that subscription failing.
+
+Options: `WithSseHeartbeat(d)` (`0` disables, as the reference's `0` does),
+`WithSseDeduplicate(bool)`, `WithSseDistributor(SseDistributor)`,
+`WithSseSendBuffer(frames)`.
+
+### `(*SseManager).Serve(w, r, topics []string, meta SseConnectionMeta) error`
+
+Registers a connection, writes the `connected` frame, and streams until the
+client goes away or the request context is cancelled. It blocks the request
+goroutine for the life of the stream, which is what Go has instead of an
+Express `Response` that stays open on its own.
+
+### `(*SseManager).Broadcast(ctx, topic string, ev StreamEvent)`
+
+Fills an empty `ID` and `Timestamp`, overwrites `Topic`, and delivers. Returns
+nothing, as the reference's `broadcast` does. Fanning one event across several
+topics means building the `StreamEvent` once, with its id, and passing the same
+value to each call — that is what the deduplication keys on.
+
+### `(*SseManager).Disconnect(id)`, `ConnectionCount()`, `HeartbeatInterval()`, `Deduplicate()`
+
+### `(*SseManager).BridgeEventBus(ctx, bus *EventBus, topics func(Event) []string) (cancel func())`
+
+Broadcasts every bus event to the topics resolved for it, and returns the
+function that stops doing so. The low-level seam only: deciding topics, payload
+and the order telemetry, the bus, SSE and webhooks are served in belongs to the
+`AuthTools` facade.
+
+### The frame
+
+```
+id: <event id>\n
+event: <event type>\n
+data: {"id":…,"timestamp":…,"topic":…,"type":…,"userId":…,"tenantId":…,"rawData":<payload>}\n
+\n
+```
+
+Two things to read carefully, both the reference's: the payload arrives under
+`rawData`, and there is **no `data` key at all**. The keep-alive is the comment
+`: heartbeat\n\n`, with the space the reference's code writes (its own docs say
+`:heartbeat`).
+
+### Resume: there is none
+
+Nothing reads the `Last-Event-ID` header a browser sends when its `EventSource`
+reconnects, and no delivered event is retained. A reconnect resumes from *now*;
+whatever was raised while the client was away is gone. The `id:` line is an
+identity and a deduplication key, not a cursor. This matches the reference
+exactly — anything that needs delivery across a reconnect is adding a guarantee,
+not implementing one.
+
+### `StreamEvent`
+
+```go
+type StreamEvent struct {
+    ID        string         // `id:` line; filled with a UUIDv4 when empty
+    Type      string         // `event:` line
+    Timestamp string         // ISO 8601, filled when empty
+    Topic     string         // overwritten by Broadcast
+    Data      any            // reaches the client as rawData
+    UserID    string
+    TenantID  string
+    Metadata  map[string]any
+}
+```
+
+Its JSON tags are the shape a **distributor** carries, not the shape of the
+frame.
 
 ### `SseDistributor` interface
 
-Implement for Redis/Kafka-based multi-instance SSE scaling:
+The seam for cross-instance fan-out — and the only thing that makes SSE work at
+all where every connection lives in its own process, such as a Lambda Function
+URL:
 
 ```go
 type SseDistributor interface {
-    Publish(ctx, channel string, msg SseMessage) error
-    Subscribe(ctx, channel string) (<-chan SseMessage, error)
+    Publish(ctx context.Context, topic string, event StreamEvent) error
+    Subscribe(ctx context.Context, fn func(topic string, event StreamEvent)) error
 }
 ```
+
+What it owes: no ordering is required; at-most-once and at-least-once are both
+safe (the deduplication absorbs only an *immediate* redelivery); and a `Publish`
+that returns an error makes the manager fall back to delivering to its own
+connections and no others.
+
+**The fact to design around**: with a distributor configured, `Broadcast` does
+not deliver locally. Local connections are served only when the distributor
+calls the subscription back, so a distributor that does not echo a publisher's
+own events reaches every instance except the one that raised them.
+
+### Slow consumers
+
+Each connection has a bounded queue (`WithSseSendBuffer`, 64 frames by
+default). A publisher is never blocked by a reader, and a connection that falls
+behind is disconnected rather than buffered without limit — a deliberate
+difference from the reference, registered as
+`sse-slow-consumer-is-disconnected`.
 
 ---
 

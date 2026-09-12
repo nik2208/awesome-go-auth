@@ -417,3 +417,76 @@ func TestEventBusPanicIsContainedToOneHandler(t *testing.T) {
 		}
 	}
 }
+
+// Subscribe's cancel function is the port of the reference's offEvent
+// (auth-event-bus.ts:79-81). Go funcs are not comparable, so there is no
+// Unsubscribe(name, handler) to write; the cancel is what the caller already
+// holds.
+func TestEventBusSubscribeCancels(t *testing.T) {
+	bus := NewEventBus()
+	var ran []string
+	bus.Subscribe(EventUserCreated, func(Event) { ran = append(ran, "kept") })
+	cancel := bus.Subscribe(EventUserCreated, func(Event) { ran = append(ran, "cancelled") })
+	stopWildcard := bus.Subscribe(EventBusWildcard, func(Event) { ran = append(ran, "wildcard") })
+
+	bus.Publish(Event{Name: EventUserCreated})
+	if len(ran) != 3 {
+		t.Fatalf("before cancelling, handlers run = %v, want all three", ran)
+	}
+
+	ran = nil
+	cancel()
+	cancel() // idempotent: the second call has nothing to remove
+	bus.Publish(Event{Name: EventUserCreated})
+	want := []string{"kept", "wildcard"}
+	if len(ran) != len(want) || ran[0] != want[0] || ran[1] != want[1] {
+		t.Fatalf("after cancelling, handlers run = %v, want %v: cancelling one subscription must not touch its neighbours", ran, want)
+	}
+
+	ran = nil
+	stopWildcard()
+	bus.Publish(Event{Name: EventUserCreated})
+	if len(ran) != 1 || ran[0] != "kept" {
+		t.Fatalf("after cancelling the wildcard, handlers run = %v, want [kept]", ran)
+	}
+}
+
+// Two subscriptions of the same func value are two subscriptions, which is the
+// case a listener-identity offEvent gets wrong and an id-keyed cancel does not.
+func TestEventBusCancelRemovesOneOfTwoIdenticalHandlers(t *testing.T) {
+	bus := NewEventBus()
+	calls := 0
+	handler := func(Event) { calls++ }
+	cancel := bus.Subscribe(EventUserCreated, handler)
+	bus.Subscribe(EventUserCreated, handler)
+
+	cancel()
+	bus.Publish(Event{Name: EventUserCreated})
+	if calls != 1 {
+		t.Fatalf("handler ran %d times, want 1: cancelling one registration must leave the other", calls)
+	}
+}
+
+// Publish dispatches against a snapshot taken under the read lock, so a cancel
+// from inside a handler does not reach the event being delivered — the same
+// rule EventEmitter has, since it clones its listener array before emitting.
+func TestEventBusCancelDuringDispatchAppliesToTheNextEvent(t *testing.T) {
+	bus := NewEventBus()
+	var ran []string
+	var cancelLater func()
+	bus.Subscribe(EventUserCreated, func(Event) {
+		ran = append(ran, "first")
+		cancelLater()
+	})
+	cancelLater = bus.Subscribe(EventUserCreated, func(Event) { ran = append(ran, "second") })
+
+	bus.Publish(Event{Name: EventUserCreated})
+	if len(ran) != 2 {
+		t.Fatalf("handlers run = %v, want both: a cancel cannot reach a dispatch already in flight", ran)
+	}
+	ran = nil
+	bus.Publish(Event{Name: EventUserCreated})
+	if len(ran) != 1 || ran[0] != "first" {
+		t.Fatalf("handlers run = %v, want [first] on the next event", ran)
+	}
+}

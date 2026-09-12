@@ -93,6 +93,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emitter for you.** Neither tree ships such a bridge, `AuthTools` is U21, and
   the order webhooks run in relative to telemetry, the bus and SSE is one
   decision that belongs to the facade that owns all four.
+- **The reference's `SseManager` protocol** (`sse.go`). `SseManager` is
+  `src/tools/sse-manager.ts` ported whole: connections rather than channels, a
+  set of server-chosen topics per connection, `StreamEvent` frames with `id`,
+  `type`, `timestamp`, `topic`, `data`, `userId`, `tenantId` and `metadata`,
+  heartbeat comments, per-connection deduplication by event id, and the
+  `SseDistributor` seam for cross-instance fan-out.
+  The frame is the reference's byte for byte:
+  `id: <id>\n`, `event: <type>\n`, `data: <json>\n\n`. The payload object is the
+  event reshaped the way `write` reshapes it (`sse-manager.ts:252`) — the key
+  `data` is **absent** and the payload arrives under `rawData` — and it is
+  serialised with HTML escaping off, because `JSON.stringify` escapes nothing
+  and an event stream has no `<script>` to break out of. There is always exactly
+  one `data:` line: the payload is JSON, and JSON never contains a raw newline.
+  The keep-alive is `: heartbeat\n\n`, with the space the reference's code
+  writes although its own documentation spells the comment `:heartbeat`
+  (`sse-manager.ts:159` against `:47`).
+  Topics are matched by exact string equality. The hierarchical scheme the
+  reference documents (`global`, `tenant:{id}`, `user:{id}`, …) is a naming
+  convention and nothing else — no prefix, wildcard or ancestor matching exists
+  in either implementation, so a publisher that wants a parent and a child sends
+  to both, which is what the deduplication is for. The server decides a
+  connection's topics; no client ever names a channel.
+  Deduplication is on by default and compares an event's id against the
+  **previous** event sent to that connection and nothing older
+  (`sse-manager.ts:214`), so it absorbs one event fanned out across several
+  topics and is not a general guard against redelivery. Heartbeats default to
+  30 s and `WithSseHeartbeat(0)` disables them, exactly as the reference's `0`
+  does.
+  **There is no resume, in this port or in the reference.** Nothing reads the
+  `Last-Event-ID` header a browser sends when its `EventSource` reconnects,
+  nothing retains a delivered event, and the per-connection last event id is
+  only ever compared against the next event's. A reconnect resumes from *now*
+  and what was raised in between is gone. The `id:` line is an identity and a
+  deduplication key, not a cursor: anything building delivery across a
+  reconnect on top of this is adding a guarantee, not implementing one.
+  No route serves this yet — `GET <prefix>/tools/stream` arrives with the tools
+  router — and no `AuthTools` facade decides the fan-out order across telemetry,
+  the bus, SSE and webhooks.
+- **`SseDistributor`**, the reference's `ISseDistributor`
+  (`sse-distributor.interface.ts:10-25`): `Publish(ctx, topic, StreamEvent)` and
+  `Subscribe(ctx, fn)`. It is what makes the design work where every connection
+  lives in its own process — a Lambda Function URL, say — since in-process
+  fan-out there reaches nobody. Its contract is written on the interface because
+  the reference states none of it: no ordering is required; at-most-once and
+  at-least-once are both safe, the latter only because an *immediate*
+  redelivery is absorbed by the deduplication; and a `Publish` that errors makes
+  the manager fall back to delivering to its own connections and no others
+  (`sse-manager.ts:191-194`). The fact to design around is that with a
+  distributor configured, `Broadcast` does **not** deliver locally: local
+  connections are served only when the distributor calls the subscription back,
+  so one that does not echo a publisher's own events back to it reaches every
+  instance except the one that raised them.
+  `NewSseManager` takes a `context.Context` and returns an error where the
+  reference's constructor does neither, and both follow from this seam: the
+  reference calls `subscribe` from its constructor without awaiting or catching
+  the promise, so a distributor that cannot reach its bus leaves a manager that
+  looks healthy and silently receives nothing from the fleet.
+- **`StreamEvent`**, the reference's event type. Its JSON tags are the shape a
+  *distributor* carries — `publish` takes the whole object — and not the shape
+  of the SSE frame, so a TypeScript distributor and a Go one exchange the same
+  bytes.
 
 ### Changed
 - **BREAKING — `WebhookDispatcher` and its wire are removed.** `webhooks.go` is
@@ -124,6 +185,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Nothing else in the package referenced the removed type, no route changed on
   any adapter, and no entry was added to the deviation register — this release
   removes a deviation's worth of difference rather than adding one.
+- **BREAKING (API) — `SseHub`, `NewSseHub`, `SseMessage`, `ServeSSE` and the old
+  `SseDistributor` are removed.** They spoke a protocol the reference does not
+  have: channels instead of connections, a two-method `SseDistributor` shaped as
+  `Subscribe(ctx, channel) (<-chan SseMessage, error)`, and a `:ping` keep-alive.
+  Nothing in the family's clients speaks it, and keeping it beside the real
+  protocol would have meant two SSE surfaces with different frames.
+  A host that used them changes three things. `auth.NewSseHub()` becomes
+  `auth.NewSseManager(ctx)`, which returns an error. `hub.Publish(ctx, userID,
+  auth.SseMessage{Event: name, Data: data})` becomes
+  `sse.Broadcast(ctx, "user:"+userID, auth.StreamEvent{Type: name, Data: data})`
+  — note the channel becomes a topic, and the topic is a namespaced string
+  rather than a bare id. `auth.ServeSSE(hub, channel)` becomes
+  `sse.Serve(w, r, topics, auth.SseConnectionMeta{…})` called from inside the
+  handler: it blocks for the life of the stream instead of returning a
+  `http.HandlerFunc`, because that is what holds a connection open in Go.
+  Clients change too, and this is the half that is easy to miss: the frame's
+  payload is no longer the bare `Data` map. It is an object carrying the event's
+  identity with the payload nested under `rawData`, so a browser doing
+  `JSON.parse(e.data)` now reads `.rawData` where it used to read the object
+  itself. The `id:` and `event:` lines are unchanged in meaning.
+  An implementor of the old `SseDistributor` rewrites it against the new
+  interface; the two have no method in common.
+- **BREAKING (API) — `EventBus.Subscribe` returns a cancel function.** It is the
+  port of the reference's `offEvent` (`auth-event-bus.ts:79-81`), which this bus
+  had no counterpart for at all. Go functions are not comparable, so
+  `Unsubscribe(name, handler)` cannot be written; the Go shape is the cancel the
+  caller already holds. It arrived with the first consumer that needed it — SSE
+  subscriptions are the only ones in the plan that end before the process does.
+  **Existing call sites compile unchanged**, because Go permits discarding a
+  return value; what breaks is code that stored `Subscribe` as a
+  `func(string, func(Event))` or satisfied an interface with it.
+  The cancel is idempotent, and it does not reach a dispatch already in flight:
+  `Publish` copies the handler list before calling anything, exactly as
+  `EventEmitter` clones its listener array before emitting, so a handler
+  cancelled mid-dispatch may still be called for that event.
+- **BREAKING (behaviour) — a slow SSE consumer is disconnected.** Registered as
+  `sse-slow-consumer-is-disconnected`. Each connection has a bounded queue
+  (`WithSseSendBuffer`, 64 frames by default) and a ten second write deadline; a
+  publisher is never blocked by a reader, and a connection that overflows either
+  bound is closed. The reference ignores the backpressure signal `res.write`
+  returns and queues without limit, which is a Node stream behaviour rather than
+  a decision and is not portable — Go's choices are to block the publisher (one
+  stalled client would stall every login, since `EventBus.Publish` is
+  synchronous on the request goroutine), to drop silently, or to end the
+  stream. Ending it is the only one that makes the gap visible at the moment a
+  client can act on it, and since neither implementation replays, a silently
+  dropped frame is unrecoverable.
 
 ## [0.9.0] - 2026-09-12
 
