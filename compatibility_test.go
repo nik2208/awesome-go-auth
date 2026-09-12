@@ -55,6 +55,7 @@ var updateREADME = flag.Bool("update", false,
 var wantDeviationIDs = []string{
 	"admin-console-requires-an-explicit-policy",
 	"admin-cookie-secure-flag-is-configured-not-forwarded",
+	"admin-credential-listings-are-ordered",
 	"admin-guard-accepts-only-typed-session-tokens",
 	"admin-listings-are-ordered-by-id",
 	"admin-unauthenticated-get-serves-only-the-login-form",
@@ -232,6 +233,19 @@ var wantClaims = map[string][]string{
 		"ID ascending", "AdminUserStore", "SessionLister", "RoleLister",
 		"ORDER BY", "listUsers(1, 0)", "first registered user", "offset",
 		"AdminPolicyFirstUser", "insertion order",
+	},
+	// The sibling entry for the two listings the one above left out. The claims
+	// pin both orders — they are different, and an entry that collapsed them
+	// into one sentence would be describing neither table — the tiebreak that
+	// makes the first a total order, the reference mechanism (an optional
+	// listAll nothing implements, paged positionally against a best-effort
+	// total), and what the missing row costs on these two screens specifically:
+	// an entry reduced to "the rows come back in some order" would lose the only
+	// reason the fix is worth a register entry.
+	"admin-credential-listings-are-ordered": {
+		"CreatedAt", "ID ascending", "first-insertion", "APIKeyAdminStore",
+		"WebhookAdminStore", "listAll", "IApiKeyStore", "IWebhookStore",
+		"offset", "revoke", "admin-listings-are-ordered-by-id",
 	},
 	// M9's guard, and the one entry of this milestone that declines a reference
 	// default outright. The claims keep the refusal, the three things a mount

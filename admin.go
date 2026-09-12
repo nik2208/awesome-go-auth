@@ -825,6 +825,15 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		a.serveAdminWrite(w, r, route, params)
 	}))
 
+	// U14b's credential surface — the API-key and webhook routes — behind the
+	// same Protect and classified the same way. They are a third family rather
+	// than more cases in the two above because they are one class of risk:
+	// everything they hold, mint or mask is a secret. See admin_credentials.go.
+	credentials := guard.Protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		route, param := matchAdminCredential(r.Method, adminRelativePath(r.URL.EscapedPath(), cfg.AdminPath()))
+		a.serveAdminCredential(w, r, route, param)
+	}))
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rel := adminRouterPath(r, cfg)
 		// The read and write routes match on the escaped path, so a parameter is
@@ -832,6 +841,7 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		escaped := adminRelativePath(r.URL.EscapedPath(), cfg.AdminPath())
 		read, _ := matchAdminRead(escaped)
 		write, _ := matchAdminWrite(r.Method, escaped)
+		credential, _ := matchAdminCredential(r.Method, escaped)
 		switch {
 		case rel == AdminLoginPath && r.Method == http.MethodPost:
 			if !guard.LoginRoutesMounted() {
@@ -863,6 +873,11 @@ func (a *Auth) AdminHandler(cfg HTTPConfig) http.Handler {
 		// this case needs no isAdminRead counterpart.
 		case a.adminWriteRegistered(write):
 			writes.ServeHTTP(w, r)
+		// The eight credential routes of admin_credentials.go. All eight are
+		// registered unconditionally there, so matching one is the whole test —
+		// each answers its own 404 for the store it was not given.
+		case credential != adminCredentialNone:
+			credentials.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1098,14 +1113,18 @@ type adminFeatureSet struct {
 // question of the same store (:649-650), and this port asks it of the two
 // interfaces that stand for those methods.
 //
-// Three are still false and will stay false until the PR that owns the section
-// lands, and they are false rather than absent so the SPA hides the tab instead
-// of drawing one whose every request 404s:
+// apiKeys and webhooks are `!!options.apiKeyStore` and `!!options.webhookStore`
+// (:653-654) — the store being configured and nothing about what it can do. That
+// is deliberately not the same question the routes behind the tab ask: a store
+// that cannot enumerate turns the tab on and answers 501 to the listing it
+// draws, which is the reference's arrangement and the reason the 501 carries an
+// empty page. WithAPIKeyStore and WithWebhookStore are what set them.
 //
-//   - apiKeys and webhooks need the admin listing routes over the API-key and
-//     webhook stores, neither of which is wired to the Auth.
-//   - upload needs a writable asset directory. UIOptions.Uploads is an fs.FS,
-//     which is a read seam; the reference's uploadDir is a path it writes to.
+// One is still false and will stay false until the PR that owns the section
+// lands, and it is false rather than absent so the SPA hides the tab instead of
+// drawing one whose every request 404s: upload needs a writable asset directory,
+// and UIOptions.Uploads is an fs.FS, which is a read seam, where the reference's
+// uploadDir is a path it writes to.
 func (a *Auth) adminFeatures(cfg HTTPConfig) adminFeatureSet {
 	svc := a.service
 	_, sessions := svc.sessions.(SessionLister)
@@ -1119,8 +1138,8 @@ func (a *Auth) adminFeatures(cfg HTTPConfig) adminFeatureSet {
 		TwoFAPolicy:    userLister && twoFAWriter,
 		Control:        svc.cfg.Settings != nil,
 		LinkedAccounts: a.oauth != nil && a.oauth.LinkedAccounts != nil,
-		APIKeys:        false,
-		Webhooks:       false,
+		APIKeys:        a.apiKeys != nil,
+		Webhooks:       a.webhooks != nil,
 		Templates:      svc.cfg.Templates != nil,
 		Upload:         false,
 	}
