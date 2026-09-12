@@ -173,6 +173,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an authorization server a relying party may drive are different statements,
   and a deployment that serves the OIDC endpoints on a mux of its own
   documents them where it mounted them.
+- **`GET <prefix>/ui/config`** — the document the built-in UI fetches before it
+  renders anything (`ui.router.ts:95-170`), mounted on all four adapters when
+  `HTTPConfig.UI.Enabled` is set, as the reference mounts its whole UI router
+  under `config.ui.enabled` (`auth.router.ts:1639-1648`). Public: the login page
+  fetches it before a session exists, so it asks for no credential and no CSRF
+  pair, and like the reference it seeds the CSRF cookie on the way past
+  (`auth.router.ts:529-535`). The body carries the reference's six keys in its
+  order — `apiPrefix`, `features`, `ui`, `translations`, `lang`, `headless`.
+  `features` is derived from the wiring rather than configured: `magicLink`,
+  `sms`, `forgotPassword` and `verifyEmail` from the delivery senders (plus, for
+  `verifyEmail`, a `Config.EmailVerificationMode` other than `none`), `google`
+  and `github` from the providers `WithOAuth` wired, `twoFactor` from
+  `Config.TwoFactorAppName`, and `register` always true because this port always
+  mounts `POST <prefix>/register` where the reference mounts it only with an
+  `onRegister` hook. `ui` is the static branding with the `SettingsStore`'s `ui`
+  block applied on top member by member (`:125-134`), defaulting to `#4a90d9`,
+  `#6c757d` and `Awesome Node Auth`, with the five members nobody configured
+  absent rather than null; `customCss` is static-only, as there. `translations`
+  is the `TemplateStore` UI page `config` — the page the reference's own path
+  derivation selects on this route (`:107`) — for `lang`, falling back to `en`
+  and then to `{}`. `lang` is `?lang=`, then `UIOptions.DefaultLang`, then `en`.
+  A store that fails answers `200` with the reference's reduced document:
+  `features` collapsed to `register`, `google` and `github`, the default
+  branding, no translations and `en` whatever was asked for (`:143-161`) —
+  reproduced rather than fixed, because the family's clients are written against
+  it (reference-issues N32), and logged through `Config.Logger` since the client
+  is told nothing. Covered by the wiretest suite on all four adapters and
+  described by `GenerateOpenAPISpec` under the new `OpenAPIInfo.UI`.
+  See README_DETAILED.md, "Embedded UI".
+- **`HTTPConfig.UI UIOptions`** — the reference's `config.ui` block
+  (`auth-config.model.ts:321-381`): `Enabled`, `Headless`, `Branding`
+  (`UIBranding`, with the reference's `primaryColor`, `secondaryColor`,
+  `logoUrl`, `siteName`, `customLogo`, `bgColor`, `bgImage` and `cardBg`),
+  `CustomCSS`, `DefaultLang`, and `Assets`/`Uploads` for the pages and uploads a
+  later change serves. **`(*Auth).UIConfig(ctx, r, cfg)`** returns the document
+  as a value (`UIConfig`, `UIFeatures`, `UIConfigBranding`) for a host serving
+  its own UI route.
 
 ### Changed
 - **`POST /auth/register` refuses a missing email or password with
@@ -214,6 +251,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mount and the `RegisterHandlers` mux are two different routers, so nothing
   collides and the endpoints simply end up served at two URLs. Do one or the
   other.
+- **A deployment that already sets the deprecated `HTTPConfig.UIEnabled` starts
+  serving `GET <prefix>/ui/config` on upgrade**, with no code change on its side.
+  Until now the flag decided nothing but the shape of an emailed link
+  (`HTTPConfig.UILink`); it is now the alias of `HTTPConfig.UI.Enabled`, so
+  `ResolveHTTPConfig` switches the route on from it and all four adapters mount
+  it. The route is public and unauthenticated, and the document names the OAuth
+  providers that are wired, whether 2FA and each of the four delivery paths
+  (magic link, SMS, password reset, email verification) are available, and the
+  deployment's branding — colours, logo URL, site name and custom CSS. Setting
+  `UI.Enabled = false` does **not** suppress it: the two fields are OR-ed, so the
+  only way back to the previous behaviour is to stop setting `UIEnabled` and
+  point the emailed links elsewhere. The generated OpenAPI document is not
+  affected: it lists the route only under the separate `OpenAPIInfo.UI`.
+
+### Deprecated
+- **`HTTPConfig.UIEnabled`** — use `HTTPConfig.UI.Enabled`. It is an alias, not a
+  second switch: either field enables the UI, `ResolveHTTPConfig` sets both from
+  either, and a deployment that only ever set `UIEnabled` keeps the emailed links
+  it had and now serves the config route as well — see **Changed** above, which
+  is the behaviour change that follows from it. Kept through the 0.x line.
 
 ## [0.6.0] - 2026-09-12
 

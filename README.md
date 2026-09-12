@@ -637,6 +637,79 @@ revision the whole contract was extracted from.
   before the first login. Read "no knob" as the state of this release and not as
   a decision that it stays that way: the fix for #21 is expected to remove the
   issuance rather than add a switch.
+
+### `ui/config`: `features.verifyEmail` follows the effective verification mode
+
+`ui-config-verify-email-follows-the-effective-mode`
+
+- **Surface**: `GET <prefix>/ui/config`, the `features.verifyEmail` flag.
+- **This port**: Answers `true` when `Config.SendEmailVerification` is wired
+  *and* the effective `Config.EmailVerificationMode` is `lazy` or `strict`. An
+  unset mode is `none` here as it is everywhere else in this port, and
+  `DefaultConfig` writes `none` into the field outright, so a deployment that
+  wired the sender and left the mode alone is told `false` and its login page
+  offers no verify-email affordance.
+- **The reference**: Asks
+  `(sendVerificationEmail || mailer) && (emailVerificationMode !== 'none' || requireEmailVerification)`.
+  An *unset* mode passes the second term, since `undefined !== 'none'` is true
+  in JavaScript, so the same deployment is told `true` — even though the
+  reference's own fallback makes an unset mode behave as `'none'` in every
+  decision that acts on it. Its deprecated `requireEmailVerification` boolean is
+  a third route to `true`, reaching it even with the mode set to `'none'`; this
+  port has no field of that name (`ui.router.ts:121`,
+  `auth-config.model.ts:286-298`).
+- **Why**: The family's clients read `features` to decide which affordances to
+  render, so a flag that differs is a difference a consumer sees: a node-auth
+  deployment that wired a verification sender and never set the mode loses the
+  verify-email affordance when it moves here. Reproducing the term costs more
+  than it buys. It needs a distinction between an unset `EmailVerificationMode`
+  and one set to `none` that nothing else in this port makes — the service
+  normalises the empty string to `none` for registration, for login and for the
+  2FA path — and `DefaultConfig` erases that distinction anyway, so the flag
+  would answer differently for two configurations that behave identically on
+  every route, according to which of the two the host happened to build. It
+  would also advertise a step the deployment does not perform: with the
+  effective mode `none`, `Register` marks the address verified on the spot and
+  verification never comes up. Answering for what this deployment does is the
+  reading closest to what the flag means.
+- **Matching the reference exactly**: Set `Config.EmailVerificationMode` to
+  `lazy` or `strict` — which is what a deployment that wires a verification
+  sender generally means — and the flag answers `true`, as the reference does
+  for the same deployment. There is no way to reach `true` with the mode at
+  `none`, because the legacy boolean that reaches it there does not exist here.
+
+### `POST <prefix>/register` is unconditional, and `ui/config` reports it as such
+
+`register-route-is-always-mounted`
+
+- **Surface**: `POST <prefix>/register`, and the `features.register` flag of
+  `GET <prefix>/ui/config`.
+- **This port**: Registration is part of the library rather than a hook the host
+  supplies: every adapter mounts `POST <prefix>/register` on `Service.Register`
+  on every deployment, and `GET <prefix>/ui/config` answers
+  `features.register: true` to match. Resource-server mode is the one thing that
+  unmounts the route, with the rest of the credential set — see
+  `resource-server-gates-all-credential-routes` — and the flag does not follow
+  it there, which is what the reference does too for a resource server that
+  supplied the hook.
+- **The reference**: Mounts `/register` only when `routerOptions.onRegister` is
+  supplied, the host having written the account-creation function itself, and
+  reports `!!routerOptions?.onRegister` in `features.register`. A deployment
+  that supplies no hook answers `404` on the route and tells the UI to hide the
+  sign-up affordance (`auth.router.ts:712-715`, `ui.router.ts:115`).
+- **Why**: This port ships registration instead of asking for it:
+  `Service.Register` applies the password policy, hashes the password, applies
+  the email verification mode and writes through `UserStore`. There is no hook
+  that can be absent, so there is nothing for the route's presence to be
+  conditional on, and the flag — derived from the wiring rather than configured
+  — answers for the routes this port actually serves. The difference runs one
+  way only: a client is offered sign-up against a deployment whose node-auth
+  counterpart, having no `onRegister`, would have hidden it.
+- **Matching the reference exactly**: Not available from configuration. A host
+  that wants no public sign-up mounts the adapter on its own mux and refuses
+  `POST <prefix>/register` there, or runs in resource-server mode;
+  `features.register` still answers `true` in the first case, so such a host
+  hides the affordance in its own UI rather than reading the flag.
 <!-- END GENERATED: deviations -->
 
 ## Parity Snapshot vs `awesome-node-auth`
@@ -655,14 +728,14 @@ release that closes the gap.
 | CSRF protection | ✅ Implemented | `CSRFMiddleware`, double-submit cookie + header, exemption table pinned to the reference. | — |
 | Account management | ✅ Implemented | Register, `UpdateProfile`, `DeleteAccount`, password and email lifecycle. | — |
 | OAuth login + account linking | ✅ Implemented | Signed state, PKCE, single-use nonce; Google and GitHub presets, `AdditionalAuthParams` and declarative `ProfileMap`/`MapProfile` for generic providers; `OAuthProvisioning` replaces the reference's abstract `findOrCreateUser` (auto-create, domain allowlist, verified-address demand, `FieldMap`), and the account-conflict flow is complete — stash, the reference's `/account-conflict` redirect, then `/link-request` and `/link-verify`. | — |
-| Dynamic email templates + UI i18n fallback | ✅ Implemented | The reference's six template ids with its en/it built-ins, `TemplateStore` overrides rendered under its `{{T.key}}`/`{{key}}` rule, per-request site-URL links and the old-address notice on `/change-email/confirm`. The `welcome` template renders but `POST /register` does not mail it yet (the reference does, `auth.router.ts:719-724`); UI translations are stored and are read by `GET /ui/config` once the UI router lands (v0.7.0 for the route, v0.9.0 for the pages). | — |
+| Dynamic email templates + UI i18n fallback | ✅ Implemented | The reference's six template ids with its en/it built-ins, `TemplateStore` overrides rendered under its `{{T.key}}`/`{{key}}` rule, per-request site-URL links and the old-address notice on `/change-email/confirm`. The `welcome` template renders but `POST /register` does not mail it yet (the reference does, `auth.router.ts:719-724`); UI translations are stored and are read by `GET <prefix>/ui/config`, which serves the `config` page for the requested language with the reference's `en` fallback. | — |
 | Custom token claims | ✅ Implemented | `Config.BuildTokenClaims` hook, plus `StaticClaims`/`UserFieldClaims`/`ChainClaims` and the synchronous `ClaimsWebhook` (this port's extension); the hook runs at mint time and on `/me`, never in the middleware. | — |
 | Identity Provider (IdP) mode (RS256 + JWKS + resource-server validation) | ✅ Implemented | **Not yet an enforcing authorization server: PKCE parameters are recorded with the authorization code and never checked at the token endpoint, and which token pair `token` returns is an open design decision (upstream plan D-15).** The reference ships no OIDC authorization server, so those four endpoints are this port's own surface rather than a parity item; what the ✅ claims is the row's legend — mounted on all four adapters and covered by the wire conformance suite. Discovery, authorize, token and userinfo are mounted by all four adapters; the signing key, `kid` and published keys are injectable (`IDPConfig.Signer`, `KeyID`, `PublicKeys`, with `ParseRSAPrivateKeyPEM` for the reference's PEM form), authorization codes go through `AuthCodeStore`, and `IssueIdPTokenPair` mints the reference's RS256 pair. Both halves of the JWKS contract are in: `auth.WithIDP` makes all four adapters serve the document at `<prefix>/.well-known/jwks.json` (`IDPConfig.JWKSPath`) with the reference's `Cache-Control` and CORS headers, with `<base>/jwks` kept as a deprecated alias through the 0.x line and removed in v1.0.0; and on the consuming side `JWKSClient` caches a remote JWKS with stale-while-revalidate, `VerifyRS256` verifies a bearer token against it (RS256 pinned before the key lookup, `kid` rotation retried once and rate-limited, `iss` checked), `ResourceServerMiddleware` is wired on all four adapters — bearer against the JWKS, cookie against the local HS256 secret, neither path reading a store — and `HTTPConfig.ResourceServer` unmounts the credential routes. The four OIDC endpoints are mounted from that same `auth.WithIDP` switch at `<prefix>/.well-known/openid-configuration`, `<prefix>/authorize`, `<prefix>/token` and `<prefix>/userinfo`, every method reaching the handler as `(*IDP).RegisterHandlers` has always mounted them, and the wiretest suite covers all four on all four adapters; `HTTPConfig.ResourceServer` unmounts `<prefix>/authorize` and `<prefix>/token` along with the other credential routes and leaves discovery, userinfo and the JWKS document public. `RegisterHandlers` stays for a host that would rather serve them on a mux of its own; doing both at once puts the same endpoints at two URLs, and on a single `http.ServeMux` that is a mount-time panic rather than a split endpoint — on a chi, gin or echo host the adapter and the `RegisterHandlers` mux are different routers, so there is no panic and the endpoints simply end up served twice. | — |
 | RBAC | ⚠️ Service-level | `RolesPermissionsStore` and service helpers; no HTTP surface (the admin router is absent). | v0.10.0 |
 | Multi-tenancy | ⚠️ Service-level | `TenantStore` and membership helpers; no HTTP surface. | v0.10.0 |
 | API keys (M2M) | ⚠️ Service-level | `APIKeyService` + `APIKeyMiddleware`; no management routes. | v0.10.0 |
 | Admin panel | ❌ Absent | `ServeAdminUI()` serves a static page; none of the reference's admin routes exist, and no admin guard. | v0.10.0 |
-| Built-in UI + auth runtime (`auth.js`) | ⚠️ Partial | `ServeAuthUI()`/`ServeAuthJS()` serve hand-written assets, not the reference's; no `GET /ui/config`, no branding. | v0.9.0 |
+| Built-in UI + auth runtime (`auth.js`) | ⚠️ Partial | `ServeAuthUI()`/`ServeAuthJS()` serve hand-written assets, not the reference's. `GET <prefix>/ui/config` is mounted on all four adapters under `HTTPConfig.UI.Enabled` and serves the reference's document — feature flags derived from the wiring, branding from `UIOptions.Branding` with the `SettingsStore` on top, translations from the template store's `config` page, the echoed `headless` flag and the reduced store-failure fallback. What keeps this ⚠️: the HTML pages, the static assets and the uploaded logos are not served yet. | v0.8.0 |
 | OpenAPI / Swagger docs | ⚠️ Partial | `GenerateOpenAPISpec` returns the document; nothing serves it. | v0.7.0 |
 | Event-driven tooling (event bus, SSE, inbound/outbound webhooks, telemetry, notify) | ⚠️ Primitives only | `EventBus`, `SseHub`, `WebhookDispatcher` and `TelemetryStore` exist, but the service publishes no events, there is no tools router, and the outbound webhook headers differ from the reference. | v0.11.0 |
 | Client libraries compatibility (Angular + Flutter) | ✅ For the auth surface | Verified by [awesome-lambda-auth](https://github.com/nik2208/awesome-lambda-auth) with both official clients unmodified against a live stack. | — |

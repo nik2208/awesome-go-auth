@@ -2465,6 +2465,140 @@ build — and a route the configuration unmounts must vanish from both.
 
 ## Embedded UI
 
+### `GET <prefix>/ui/config`
+
+The document the built-in UI fetches before it renders anything: where the API
+is mounted, which features to offer, how to paint itself, which language to
+speak, and whether the pages exist at all. It is the reference's
+`ui.router.ts:95-170`, and it is mounted by all four adapters when the wire
+configuration enables the UI:
+
+```go
+cfg := auth.DefaultHTTPConfig()
+cfg.UI = auth.UIOptions{
+    Enabled:     true,
+    DefaultLang: "it",
+    CustomCSS:   ":root { --radius: 4px }",
+    Branding: auth.UIBranding{
+        PrimaryColor: "#4a90d9",
+        SiteName:     "Acme",
+        CustomLogo:   "https://cdn.acme.test/logo.svg",
+    },
+}
+nethttpadapter.MountWithConfig(mux, a, cfg)
+```
+
+Nothing else is mounted yet: the HTML pages, the static assets and the uploaded
+logos the reference's UI router also serves are a later change, and
+`UIOptions.Assets` and `UIOptions.Uploads` are where they will read from.
+
+The route is public — the login page fetches it before any session exists — and
+answers `200` with these six keys, in this order:
+
+```json
+{
+  "apiPrefix": "/auth",
+  "features": {
+    "register": true, "magicLink": true, "sms": false, "google": true,
+    "github": false, "forgotPassword": true, "verifyEmail": false, "twoFactor": true
+  },
+  "ui": {
+    "primaryColor": "#4a90d9", "secondaryColor": "#6c757d",
+    "logoUrl": "https://cdn.acme.test/logo.svg", "siteName": "Acme",
+    "customCss": ":root { --radius: 4px }"
+  },
+  "translations": { "signIn": "Accedi" },
+  "lang": "it",
+  "headless": false
+}
+```
+
+**`features`** says what this deployment can actually do, so it is derived from
+the wiring rather than configured:
+
+| Key | True when | Reference |
+| --- | --- | --- |
+| `register` | always — this port always mounts `POST <prefix>/register`, where the reference mounts it only with an `onRegister` hook and reports that same condition; the route and the flag together are registered as the deviation `register-route-is-always-mounted` in [README.md](README.md) | `ui.router.ts:115`, `auth.router.ts:712-715` |
+| `magicLink` | `Config.SendMagicLink` is set | `:116` |
+| `sms` | `Config.SendSMSCode` is set | `:117` |
+| `google` / `github` | `WithOAuth` wired a provider of that name | `:118-119` |
+| `forgotPassword` | `Config.SendPasswordReset` is set | `:120` |
+| `verifyEmail` | `Config.SendEmailVerification` is set **and** `Config.EmailVerificationMode` is not `none` | `:121` |
+| `twoFactor` | `Config.TwoFactorAppName` is set | `:122` |
+
+The reference reads `config.email.sendX` *or* a configured mailer for the email
+ones; this port has no mailer block on `Config`, so the sender is the whole
+condition. `verifyEmail` differs in one configuration: the reference asks
+`emailVerificationMode !== 'none' || requireEmailVerification`, and an unset mode
+passes that test while behaving as `none` everywhere else in its own code. This
+port has no `requireEmailVerification` and normalises an unset mode to `none`
+throughout, so it answers `false` where the reference answers `true` for a
+deployment that wired a verification sender and left the mode alone. That is a
+client-visible difference and is registered as the deviation
+`ui-config-verify-email-follows-the-effective-mode` in [README.md](README.md),
+which carries both answers and the reasoning. `Config.Require2FA` is not read at
+all: it makes the second factor mandatory, not available, and the reference has
+no equivalent of it.
+
+**`ui`** is `UIOptions.Branding` with the `SettingsStore`'s `ui` block applied on
+top, member by member (`:125-134`). `primaryColor`, `secondaryColor` and
+`siteName` always carry a value — `#4a90d9`, `#6c757d` and `Awesome Node Auth`
+when nothing configured them — and the other five are **absent** rather than
+`null` when nothing did, which is what `JSON.stringify` does with the `undefined`
+the reference leaves them as. `logoUrl` has three candidates in order: the stored
+`logoUrl`, then `UIBranding.CustomLogo`, then the legacy `UIBranding.LogoURL`.
+`customCss` is the one member no store can override — the reference reads it from
+the static config alone (`:130`) and `UISettings` has no member for it.
+
+**`translations`** is the flat key/value map for `lang`, read from the
+`TemplateStore` UI page **`config`** — the reference derives the page from the
+request path, which on this route is always `/config` (`:107`), so the login
+page's strings are not what this route serves. A language the page does not hold
+falls back to `en` and then to `{}`, and the map is never `null`.
+
+**`lang`** is `?lang=`, then `UIOptions.DefaultLang`, then `en` (`:102-103`). The
+reference takes its middle term from `config.email.mailer.defaultLang`; this port
+has no mailer block on `Config`, so the UI's own default lives in `UIOptions`.
+
+**`headless`** echoes `UIOptions.Headless`. It is the one member the route adds
+rather than the config builder (`:166-168`), which is why it is last and why the
+error fallback below carries it too.
+
+**When a store fails**, the answer is still `200` and still these six keys, but
+`features` is reduced to `register`, `google` and `github` (all `false`), the
+branding is the default, `translations` is empty and `lang` is `en` whatever was
+asked for (`:143-161`). A client cannot tell that document from a successful one
+— which is a bug in the reference, and is reproduced rather than fixed because
+the family's clients are written against the document as it is
+(reference-issues N32). The error is logged through `Config.Logger` on the way
+past, since the client is told nothing.
+
+### `(*Auth).UIConfig(ctx, r *http.Request, cfg HTTPConfig) UIConfig`
+
+The document as a value, for a host serving its own UI route. `r` supplies the
+`lang` query parameter and nothing else, and may be `nil`. There is no error
+return: a failing store produces the reduced document above, exactly as it does
+on the route.
+
+### `HTTPConfig.UI` and `HTTPConfig.UIEnabled`
+
+`UIEnabled` is the deprecated spelling of `UI.Enabled`, from when the flag
+decided nothing but the shape of an emailed link. It is an alias, not a second
+switch: either field enables the UI, `ResolveHTTPConfig` sets both from either,
+and a configuration that only ever set `UIEnabled` keeps the links it had and now
+serves the config route as well. It is kept through the 0.x line.
+
+> **Upgrading.** That last clause is a behaviour change, not only a rename: a
+> deployment that already sets `UIEnabled` begins serving the public,
+> unauthenticated `GET <prefix>/ui/config` after upgrading, with no code change
+> on its side, and the document names its wired OAuth providers, whether 2FA and
+> each delivery path are available, and its branding. Because the two fields are
+> OR-ed, setting `UI.Enabled = false` alongside it does not suppress the route —
+> the only way back to the previous behaviour is to stop setting `UIEnabled` and
+> point the emailed links elsewhere.
+
+### Embedded assets
+
 All files are embedded via `//go:embed` from the `ui/` directory.
 
 ### `ServeAdminUI() http.Handler`

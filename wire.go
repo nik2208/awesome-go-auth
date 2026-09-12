@@ -428,11 +428,23 @@ type HTTPConfig struct {
 	APIPrefix string
 	Cookies   CookieOptions
 	CSRF      CSRFConfig
-	// UIEnabled is the reference's config.ui.enabled as far as emailed links are
-	// concerned: when set, UILink points a link at <prefix>/ui/<path> — the
-	// static UI's page for it — instead of at the bare API route
-	// (buildUiLink, auth.router.ts:265-266). It mounts nothing by itself; the
-	// deployment that sets it serves the UI under that path.
+	// UI is the reference's config.ui block (auth-config.model.ts:321-381): the
+	// built-in UI's branding, language default and headless flag, and the switch
+	// that mounts it. UIOptions.Enabled is what makes the adapters register
+	// GET <prefix>/ui/config, and what points an emailed link at a UI page — see
+	// UILink.
+	UI UIOptions
+	// UIEnabled is the deprecated spelling of UI.Enabled, from when the flag
+	// decided nothing but the shape of an emailed link: when set, UILink points
+	// a link at <prefix>/ui/<path> — the static UI's page for it — instead of at
+	// the bare API route (buildUiLink, auth.router.ts:265-266).
+	//
+	// It is an alias, not a second switch. Either field being set enables the
+	// UI, resolve sets both from either, and a configuration that only ever set
+	// this one keeps the links it had and now serves the config route as well.
+	//
+	// Deprecated: set UI.Enabled instead. This field is kept through the 0.x
+	// line.
 	UIEnabled bool
 	// ResourceServer mounts this instance as a resource server: an API that
 	// verifies tokens another instance issued and owns no credentials of its
@@ -559,8 +571,20 @@ func (c HTTPConfig) resolve(accessTTL, refreshTTL time.Duration) HTTPConfig {
 	if strings.TrimSpace(c.CSRF.HeaderName) == "" {
 		c.CSRF.HeaderName = CSRFHeaderName
 	}
+	// The deprecated alias and the field that replaced it are one switch, so a
+	// resolved config answers the same whichever of the two was set. See
+	// HTTPConfig.UIEnabled.
+	if enabled := c.uiEnabled(); enabled {
+		c.UI.Enabled = true
+		c.UIEnabled = true
+	}
 	return c
 }
+
+// uiEnabled is the UI switch read through both of its spellings, for the
+// callers that see an unresolved config: UILink is exported and a host may hold
+// an HTTPConfig it never handed to an adapter.
+func (c HTTPConfig) uiEnabled() bool { return c.UI.Enabled || c.UIEnabled }
 
 // ResolveHTTPConfig fills cfg's derived defaults from this instance's token
 // lifetimes. Adapters call it once at mount time.
@@ -579,11 +603,14 @@ func (a *Auth) ResolveHTTPConfig(cfg HTTPConfig) HTTPConfig {
 // config.email.siteUrl and the CORS origins.
 
 // UILink is the reference's buildUiLink (auth.router.ts:261-271): the link to
-// path under siteURL, through the static UI when UIEnabled and straight at the
-// API route otherwise.
+// path under siteURL, through the static UI when the UI is enabled and straight
+// at the API route otherwise.
 //
-//	<siteURL><prefix>/ui/<path>   when UIEnabled
+//	<siteURL><prefix>/ui/<path>   when UI.Enabled
 //	<siteURL><prefix>/<path>      otherwise
+//
+// Either UI.Enabled or the deprecated UIEnabled switches it, so a config built
+// before UIOptions existed keeps the links it had.
 //
 // prefix is Prefix() — the reference strips one trailing slash from its
 // apiPrefix (:263), which Prefix() already does along with the rest of this
@@ -595,7 +622,7 @@ func (a *Auth) ResolveHTTPConfig(cfg HTTPConfig) HTTPConfig {
 func (c HTTPConfig) UILink(siteURL, path string) string {
 	prefix := strings.TrimSuffix(c.Prefix(), "/")
 	path = strings.TrimPrefix(path, "/")
-	if c.UIEnabled {
+	if c.uiEnabled() {
 		return siteURL + prefix + "/ui/" + path
 	}
 	return siteURL + prefix + "/" + path

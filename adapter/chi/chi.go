@@ -65,6 +65,14 @@ func MountWithConfig(r chi.Router, a *auth.Auth, cfg auth.HTTPConfig) {
 		}
 	}
 
+	// The built-in UI, mounted only when it is enabled — the reference gates its
+	// whole ui router on config.ui.enabled (auth.router.ts:1639-1648). The
+	// handler arrives already wrapped in the CSRF middleware, so it mounts with
+	// r.Method rather than r.With(csrf).MethodFunc.
+	if resolved.UI.Enabled {
+		r.Method(http.MethodGet, prefix+auth.UIConfigRoute, h.UIConfigHandler())
+	}
+
 	if !resolved.ResourceServer {
 		mountCredentialRoutes(r, h, guard, prefix)
 	}

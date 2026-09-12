@@ -248,6 +248,19 @@ func GitHubProvider(clientID, clientSecret, redirectURL string) OAuthProvider {
 	}
 }
 
+// hasProvider reports whether a provider is configured under this name. It is
+// what GET <prefix>/ui/config answers its google and github flags from, where
+// the reference asks whether config.oauth.google or config.oauth.github is set
+// (ui.router.ts:118-119). A nil service has none, so a deployment that wired no
+// OAuth at all answers false rather than panicking.
+func (s *OAuthService) hasProvider(name string) bool {
+	if s == nil {
+		return false
+	}
+	_, ok := s.providers[name]
+	return ok
+}
+
 // AuthorizeURL builds the redirect URL for the given provider and state token.
 func (s *OAuthService) AuthorizeURL(providerName, state string) (string, error) {
 	return s.AuthorizeURLPKCE(providerName, state, "")

@@ -65,11 +65,13 @@ var wantDeviationIDs = []string{
 	"one-time-tokens-are-base64url",
 	"password-policy-on-reset-and-change",
 	"register-issues-a-session",
+	"register-route-is-always-mounted",
 	"resource-server-gates-all-credential-routes",
 	"temp-token-is-typed-not-an-access-token",
 	"totp-accepts-one-step-of-skew",
 	"totp-issuer-defaults-to-config-issuer",
 	"totp-setup-omits-qrcode",
+	"ui-config-verify-email-follows-the-effective-mode",
 }
 
 // wantClaims are the facts each entry has to keep stating. They are wire facts
@@ -119,6 +121,15 @@ var wantClaims = map[string][]string{
 	},
 	"cookie-max-age-follows-configured-ttl": {
 		"Max-Age=2592000", "Max-Age=604800", "RefreshTokenTTL", "refreshTokenExpiresIn",
+	},
+	// Both halves of the derivation, so the entry cannot be reduced to "the flag
+	// differs" without saying which term this port does not have.
+	"ui-config-verify-email-follows-the-effective-mode": {
+		"features.verifyEmail", "SendEmailVerification", "EmailVerificationMode",
+		"emailVerificationMode !== 'none'", "requireEmailVerification",
+	},
+	"register-route-is-always-mounted": {
+		"features.register", "onRegister", "404", "Service.Register",
 	},
 }
 

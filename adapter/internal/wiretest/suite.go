@@ -77,6 +77,7 @@ func Run(t *testing.T, mount Mounter) {
 	t.Run("PasswordEmailDelivery", func(t *testing.T) { testPasswordEmailDelivery(t, mount) })
 	t.Run("JWKS", func(t *testing.T) { testJWKS(t, mount) })
 	t.Run("OIDC", func(t *testing.T) { testOIDC(t, mount) })
+	t.Run("UIConfig", func(t *testing.T) { testUIConfig(t, mount) })
 	t.Run("ResourceServerGating", func(t *testing.T) { testResourceServerGating(t, mount) })
 	t.Run("OpenAPI", func(t *testing.T) { testOpenAPI(t, mount) })
 	t.Run("RateLimit", func(t *testing.T) { testRateLimit(t, mount) })
@@ -209,13 +210,13 @@ type conditionalRouteSet struct {
 // Sets are registered in both directions. JWKS adds: it is switched on by
 // auth.WithIDP and documented by OpenAPIInfo.IDProvider; see jwks.go. OIDC adds
 // the IdP's other four endpoints from the same switch, documented by
-// OpenAPIInfo.OIDC; see oidc.go. Resource-server mode subtracts:
+// OpenAPIInfo.OIDC; see oidc.go. UI adds the config route
+// HTTPConfig.UI.Enabled mounts, documented by OpenAPIInfo.UI; see ui.go. Resource-server mode subtracts:
 // HTTPConfig.ResourceServer leaves the credential routes unregistered and
 // OpenAPIInfo.ResourceServer takes them out of the spec; see resource_server.go.
-// The docs, UI, admin and tools sets join the additive half as those routers
-// land. suite_test.go drives the mechanism itself with fake sets it passes in,
+// The docs, admin and tools sets join the additive half as those routers land. suite_test.go drives the mechanism itself with fake sets it passes in,
 // so it stays independent of what is registered here.
-var conditionalRoutes = []conditionalRouteSet{jwksRouteSet(), oidcRouteSet(), resourceServerRouteSet()}
+var conditionalRoutes = []conditionalRouteSet{jwksRouteSet(), oidcRouteSet(), uiRouteSet(), resourceServerRouteSet()}
 
 // failureReporter is the slice of testing.T the OpenAPI checks report through.
 // It is an interface so suite_test.go can record failures instead of raising

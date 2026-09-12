@@ -114,6 +114,13 @@ func (a *Adapter) Mount(mux *http.ServeMux) {
 		}
 	}
 
+	// The built-in UI, mounted only when it is enabled — the reference gates its
+	// whole ui router on config.ui.enabled (auth.router.ts:1639-1648). The config
+	// document is the only part of it this port serves; handler in ui.go.
+	if a.cfg.UI.Enabled {
+		mux.Handle("GET "+prefix+auth.UIConfigRoute, a.UIConfigHandler())
+	}
+
 	if !a.cfg.ResourceServer {
 		a.mountCredentialRoutes(mux, prefix)
 	}
