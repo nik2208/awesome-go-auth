@@ -75,6 +75,10 @@ type OpenAPIInfo struct {
 	// the adapters then leave unmounted are left out of the spec too. Set the
 	// two together, or the spec documents routes that answer 404.
 	ResourceServer bool
+	// UI mirrors HTTPConfig.UI.Enabled: it adds GET <prefix>/ui/config, the
+	// document the built-in UI reads its branding and feature flags from. The
+	// adapters mount that route only under that flag, so set the two together.
+	UI bool
 }
 
 // GenerateOpenAPISpec returns an OpenAPI 3.0 spec for the mounted auth endpoints.
@@ -235,11 +239,12 @@ func openAPIJWKSPath() map[string]any {
 }
 
 // openAPIPathsFor is openAPIPaths plus and minus what the configuration
-// changes. Three things do so far: resource-server mode drops the credential
+// changes. Four things do so far: resource-server mode drops the credential
 // routes, which is the same list the adapters skip registering
-// (ResourceServerGatedRoutes), an IdP adds the JWKS route, and it adds the four
-// OIDC endpoints — both of those mounted by the adapters from auth.WithIDP, so
-// the spec and the mount stay in step under any of them, or all of them.
+// (ResourceServerGatedRoutes), an IdP adds the JWKS route and the four OIDC
+// endpoints — both mounted by the adapters from auth.WithIDP — and an enabled
+// UI adds the config route they mount from HTTPConfig.UI.Enabled, so the spec
+// and the mount stay in step under any of them, or all of them.
 //
 // The subtraction runs first, in the order the adapters mount in: they
 // register the JWKS route whether or not resource-server mode is on, and skip
@@ -279,6 +284,11 @@ func openAPIPathsFor(info OpenAPIInfo) map[string]any {
 				paths[key] = item
 			}
 		}
+	}
+	// The UI config route sits below <prefix>/ui, which no unconditional route
+	// uses, so there is nothing for it to collide with.
+	if info.UI {
+		paths[prefix+UIConfigRoute] = openAPIUIConfigPath()
 	}
 	return paths
 }
@@ -1213,6 +1223,102 @@ func openAPIPaths(prefix string) map[string]any {
 				"responses": respond(http.StatusOK, "Second factor disabled", schema("Success"),
 					HTTPErrTwoFactorRequiredForUser, HTTPErrTwoFactorRequiredByPolicy,
 					HTTPErrUserNotFound, HTTPErrNoAccessToken, HTTPErrInvalidAccessToken, HTTPErrCSRFInvalid),
+			},
+		},
+	}
+}
+
+// openAPIUIConfigPath describes GET <prefix>/ui/config, the document the
+// built-in UI reads before it renders. It is a path item on its own because it
+// is added conditionally.
+func openAPIUIConfigPath() map[string]any {
+	// One string member with its description. It says nothing about whether the
+	// member is required — three of the eight below are, and are listed in
+	// required.
+	stringProp := func(description string) map[string]any {
+		return map[string]any{"type": "string", "description": description}
+	}
+	return map[string]any{
+		"get": map[string]any{
+			"summary": "The built-in UI's configuration document",
+			"description": "Public: no credential and no CSRF pair, since the login page fetches it " +
+				"before any session exists. Mounted only when the adapter was mounted with " +
+				"`HTTPConfig.UI.Enabled`. Values stored in the `SettingsStore` override the static " +
+				"`UIOptions.Branding`; `translations` are the `TemplateStore` UI page `config` for " +
+				"`lang`, falling back to `en` and then to an empty object. When a store fails, the " +
+				"answer is still 200 and still this shape, with `features` reduced to `register`, " +
+				"`google` and `github` — the reference does the same.",
+			"operationId": "uiConfig",
+			"tags":        []string{"UI"},
+			"parameters": []map[string]any{{
+				"name":        "lang",
+				"in":          "query",
+				"required":    false,
+				"description": "Translation language. Defaults to `UIOptions.DefaultLang`, then `en`.",
+				"schema":      map[string]any{"type": "string"},
+			}},
+			"responses": map[string]any{
+				"200": map[string]any{
+					"description": "The UI configuration",
+					"content": map[string]any{
+						"application/json": map[string]any{
+							"schema": map[string]any{
+								"type":     "object",
+								"required": []string{"apiPrefix", "features", "ui", "translations", "lang", "headless"},
+								"properties": map[string]any{
+									"apiPrefix": map[string]any{
+										"type":        "string",
+										"description": "Where the auth routes are mounted.",
+									},
+									"features": map[string]any{
+										"type": "object",
+										"description": "Which affordances the deployment can perform. Reduced to " +
+											"`register`, `google` and `github` on the store-failure path.",
+										"properties": map[string]any{
+											"register":       map[string]any{"type": "boolean"},
+											"magicLink":      map[string]any{"type": "boolean"},
+											"sms":            map[string]any{"type": "boolean"},
+											"google":         map[string]any{"type": "boolean"},
+											"github":         map[string]any{"type": "boolean"},
+											"forgotPassword": map[string]any{"type": "boolean"},
+											"verifyEmail":    map[string]any{"type": "boolean"},
+											"twoFactor":      map[string]any{"type": "boolean"},
+										},
+									},
+									"ui": map[string]any{
+										"type": "object",
+										"description": "The branding. The five optional members are absent rather " +
+											"than null when nothing configured them.",
+										"required": []string{"primaryColor", "secondaryColor", "siteName"},
+										"properties": map[string]any{
+											"primaryColor":   stringProp("Default `" + UIDefaultPrimaryColor + "`."),
+											"secondaryColor": stringProp("Default `" + UIDefaultSecondaryColor + "`."),
+											"logoUrl":        stringProp("Stored logo, then `UIBranding.CustomLogo`, then `UIBranding.LogoURL`."),
+											"siteName":       stringProp("Default `" + UIDefaultSiteName + "`."),
+											"customCss":      stringProp("`UIOptions.CustomCSS`; a settings store cannot override it."),
+											"bgColor":        stringProp("Page background colour."),
+											"bgImage":        stringProp("Page background image URL."),
+											"cardBg":         stringProp("Form card background colour."),
+										},
+									},
+									"translations": map[string]any{
+										"type":                 "object",
+										"description":          "Flat key to value map for `lang`; an empty object when none is stored.",
+										"additionalProperties": map[string]any{"type": "string"},
+									},
+									"lang": map[string]any{
+										"type":        "string",
+										"description": "The language the translations are in.",
+									},
+									"headless": map[string]any{
+										"type":        "boolean",
+										"description": "`UIOptions.Headless`, which tells `auth.js` not to redirect on session loss.",
+									},
+								},
+							},
+						},
+					},
+				},
 			},
 		},
 	}

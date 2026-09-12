@@ -118,6 +118,20 @@ func (ad *Adapter) Mount(group gin.IRoutes) {
 		}
 	}
 
+	// The shared net/http adapter behind the two groups gin does not implement
+	// itself: the UI config route below and the OAuth group at the bottom. One
+	// adapter for both, because building a second would re-run
+	// ResolveHTTPConfig on the same config and leave two of them to drift.
+	h := nethttpadapter.NewWithConfig(ad.auth, ad.cfg)
+
+	// The built-in UI, mounted only when it is enabled — the reference gates its
+	// whole ui router on config.ui.enabled (auth.router.ts:1639-1648). Gin serves
+	// the shared net/http handler, which arrives already wrapped in the CSRF
+	// middleware.
+	if ad.cfg.UI.Enabled {
+		group.GET(prefix+auth.UIConfigRoute, serveHTTP(h.UIConfigHandler()))
+	}
+
 	if !ad.cfg.ResourceServer {
 		ad.mountCredentialRoutes(group, prefix)
 	}
@@ -137,10 +151,9 @@ func (ad *Adapter) Mount(group gin.IRoutes) {
 	// syntax but serves the shared net/http handlers: the group's behaviour is
 	// entirely path- and body-driven, so re-implementing it here would only
 	// create somewhere for the adapters to drift.
-	oauth := nethttpadapter.NewWithConfig(ad.auth, ad.cfg)
-	group.GET(prefix+"/oauth/:provider", serveHTTP(oauth.OAuthAuthorizeHandler()))
-	group.GET(prefix+"/oauth/:provider/callback", serveHTTP(oauth.OAuthCallbackHandler()))
-	group.GET(prefix+"/linked-accounts", serveHTTP(oauth.LinkedAccountsHandler()))
+	group.GET(prefix+"/oauth/:provider", serveHTTP(h.OAuthAuthorizeHandler()))
+	group.GET(prefix+"/oauth/:provider/callback", serveHTTP(h.OAuthCallbackHandler()))
+	group.GET(prefix+"/linked-accounts", serveHTTP(h.LinkedAccountsHandler()))
 	// The unlink route is registered as a catch-all, not as two path parameters.
 	// Gin matches on the UNESCAPED path, so a providerAccountId containing %2F —
 	// which net/http, chi and echo all deliver to the handler intact, as Express
@@ -152,10 +165,10 @@ func (ad *Adapter) Mount(group gin.IRoutes) {
 	// handler without widening what the route answers. The bare :provider entry
 	// is there to keep gin from answering a one-segment path with a 307 to the
 	// catch-all's trailing slash.
-	group.DELETE(prefix+"/linked-accounts/:provider", serveHTTP(oauth.UnlinkAccountHandler()))
-	group.DELETE(prefix+"/linked-accounts/:provider/*providerAccountId", serveHTTP(oauth.UnlinkAccountHandler()))
-	group.POST(prefix+"/link-request", serveHTTP(oauth.LinkRequestHandler()))
-	group.POST(prefix+"/link-verify", serveHTTP(oauth.LinkVerifyHandler()))
+	group.DELETE(prefix+"/linked-accounts/:provider", serveHTTP(h.UnlinkAccountHandler()))
+	group.DELETE(prefix+"/linked-accounts/:provider/*providerAccountId", serveHTTP(h.UnlinkAccountHandler()))
+	group.POST(prefix+"/link-request", serveHTTP(h.LinkRequestHandler()))
+	group.POST(prefix+"/link-verify", serveHTTP(h.LinkVerifyHandler()))
 }
 
 // mountCredentialRoutes registers the nineteen routes that create, prove,

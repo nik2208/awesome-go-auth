@@ -673,6 +673,82 @@ func CompatibilityNotes() APICompatibilityNotes {
 						"rather than add a switch.",
 				}},
 			},
+			{
+				ID:      "ui-config-verify-email-follows-the-effective-mode",
+				Title:   "`ui/config`: `features.verifyEmail` follows the effective verification mode",
+				Surface: "`GET <prefix>/ui/config`, the `features.verifyEmail` flag",
+				Behaviour: "Answers `true` when `Config.SendEmailVerification` is wired *and* the " +
+					"effective `Config.EmailVerificationMode` is `lazy` or `strict`. An unset mode " +
+					"is `none` here as it is everywhere else in this port, and `DefaultConfig` " +
+					"writes `none` into the field outright, so a deployment that wired the sender " +
+					"and left the mode alone is told `false` and its login page offers no " +
+					"verify-email affordance.",
+				Reference: "Asks `(sendVerificationEmail || mailer) && (emailVerificationMode !== 'none' " +
+					"|| requireEmailVerification)`. An *unset* mode passes the second term, since " +
+					"`undefined !== 'none'` is true in JavaScript, so the same deployment is told " +
+					"`true` — even though the reference's own fallback makes an unset mode behave " +
+					"as `'none'` in every decision that acts on it. Its deprecated " +
+					"`requireEmailVerification` boolean is a third route to `true`, reaching it " +
+					"even with the mode set to `'none'`; this port has no field of that name.",
+				Citations: []string{"ui.router.ts:121", "auth-config.model.ts:286-298"},
+				Why: "The family's clients read `features` to decide which affordances to render, " +
+					"so a flag that differs is a difference a consumer sees: a node-auth " +
+					"deployment that wired a verification sender and never set the mode loses the " +
+					"verify-email affordance when it moves here. Reproducing the term costs more " +
+					"than it buys. It needs a distinction between an unset `EmailVerificationMode` " +
+					"and one set to `none` that nothing else in this port makes — the service " +
+					"normalises the empty string to `none` for registration, for login and for the " +
+					"2FA path — and `DefaultConfig` erases that distinction anyway, so the flag " +
+					"would answer differently for two configurations that behave identically on " +
+					"every route, according to which of the two the host happened to build. It " +
+					"would also advertise a step the deployment does not perform: with the " +
+					"effective mode `none`, `Register` marks the address verified on the spot and " +
+					"verification never comes up. Answering for what this deployment does is the " +
+					"reading closest to what the flag means.",
+				Notes: []DeviationNote{{
+					Label: "Matching the reference exactly",
+					Text: "Set `Config.EmailVerificationMode` to `lazy` or `strict` — which is what " +
+						"a deployment that wires a verification sender generally means — and the " +
+						"flag answers `true`, as the reference does for the same deployment. There " +
+						"is no way to reach `true` with the mode at `none`, because the legacy " +
+						"boolean that reaches it there does not exist here.",
+				}},
+			},
+			{
+				ID:      "register-route-is-always-mounted",
+				Title:   "`POST <prefix>/register` is unconditional, and `ui/config` reports it as such",
+				Surface: "`POST <prefix>/register`, and the `features.register` flag of `GET <prefix>/ui/config`",
+				Behaviour: "Registration is part of the library rather than a hook the host supplies: " +
+					"every adapter mounts `POST <prefix>/register` on `Service.Register` on every " +
+					"deployment, and `GET <prefix>/ui/config` answers `features.register: true` to " +
+					"match. Resource-server mode is the one thing that unmounts the route, with " +
+					"the rest of the credential set — see " +
+					"`resource-server-gates-all-credential-routes` — and the flag does not follow " +
+					"it there, which is what the reference does too for a resource server that " +
+					"supplied the hook.",
+				Reference: "Mounts `/register` only when `routerOptions.onRegister` is supplied, the " +
+					"host having written the account-creation function itself, and reports " +
+					"`!!routerOptions?.onRegister` in `features.register`. A deployment that " +
+					"supplies no hook answers `404` on the route and tells the UI to hide the " +
+					"sign-up affordance.",
+				Citations: []string{"auth.router.ts:712-715", "ui.router.ts:115"},
+				Why: "This port ships registration instead of asking for it: `Service.Register` " +
+					"applies the password policy, hashes the password, applies the email " +
+					"verification mode and writes through `UserStore`. There is no hook that can " +
+					"be absent, so there is nothing for the route's presence to be conditional on, " +
+					"and the flag — derived from the wiring rather than configured — answers for " +
+					"the routes this port actually serves. The difference runs one way only: a " +
+					"client is offered sign-up against a deployment whose node-auth counterpart, " +
+					"having no `onRegister`, would have hidden it.",
+				Notes: []DeviationNote{{
+					Label: "Matching the reference exactly",
+					Text: "Not available from configuration. A host that wants no public sign-up " +
+						"mounts the adapter on its own mux and refuses `POST <prefix>/register` " +
+						"there, or runs in resource-server mode; `features.register` still answers " +
+						"`true` in the first case, so such a host hides the affordance in its own " +
+						"UI rather than reading the flag.",
+				}},
+			},
 		},
 	}
 }
