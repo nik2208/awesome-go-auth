@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The reference's fourteen UI assets, vendored byte for byte**
+  (`ui/upstream/assets/`, `ui_upstream.go`). The nine HTML pages, `auth.js`,
+  `admin.js`, `admin.css`, `base.css` and `ui-i18n-keys.json` that
+  awesome-node-auth serves from `src/ui/assets` at `cc01e997` (v1.9.0) are now
+  copies rather than re-implementations — 192,107 bytes, embedded with
+  `embed.FS` and reachable as `UpstreamUIAssetFS()` (an `fs.FS` rooted at the
+  asset directory), `ReadUpstreamUIAsset(name)` and `UpstreamUIAssets()`, which
+  returns the provenance table: upstream path, commit, size and sha256 per file.
+  Until now this port served a hand-written UI written by reading the reference
+  instead of copying it, and that bet had already been lost once — the header of
+  `ui_test.go` is the post-mortem, listing three routes the hand-written SDK
+  called that no adapter has ever mounted. A copy cannot drift from a tree it is
+  byte-identical to.
+  The provenance is recorded *beside* the bytes, never inside them, and that is
+  a decision rather than an oversight: a "generated, do not edit" banner is
+  itself bytes, so a file carrying one is no longer what the reference ships and
+  every one of the fourteen would read as differing from upstream on the first
+  hash. (`ui-i18n-keys.json` settles it alone — JSON has no comments, so a
+  banner there would have to be a fake key every consumer would then see.) The
+  bytes win; the provenance lives in `upstreamUIAssetTable`, in
+  `ui/upstream/README.md`, and in the drift check's failure message, which is
+  where somebody about to edit an asset in place actually ends up.
+  Nothing serves these files yet and no route is mounted. `UIHandler`, the SSR
+  config injection the reference's pages expect, the catch-all and headless mode
+  are the next change in this milestone; no adapter was touched.
+- **A drift check, run by `go test ./...`** (`TestVendoredUIAssetsHaveNotDrifted`).
+  It re-hashes every embedded asset and compares it against the checked-in
+  sha256 table, and it fails in five distinct ways: an asset's contents differ
+  from the table; a file is embedded that the table does not list; the table
+  lists a file that is not embedded; the count is no longer the stated fourteen;
+  or the bytes were re-mangled to CRLF by a checkout, which gets its own message
+  because its fix is a `.gitattributes` entry and not a re-vendor. The second of
+  those is why the check walks the embedded filesystem instead of ranging over
+  the table — a loop over the table is blind in exactly the direction that
+  matters, and can never see a file that was added. Every message names the
+  `git cat-file blob` line that restores the file and says plainly that the
+  alternative is a deliberate re-vendor. CI already runs `go test -race ./...`,
+  so this needed no workflow change and got none.
+  `TestVendoredAssetsCallRoutesThatExist` extends `ui_test.go`'s
+  `asset paths ⊆ GenerateOpenAPISpec paths` contract to the vendored files: all
+  41 auth-route literals across the fourteen assets resolve to a documented
+  path. `TestVendoredAssetsSpeakTheCurrentWire` runs the field-shape bans over
+  them and they pass clean — the family's UI and this port's wire already agree
+  on camelCase, which is the evidence that the `ServeAuthJS` swap below is safe
+  rather than merely intended.
+- **`ui/upstream/assets/** text eol=lf` in `.gitattributes`.** awesome-node-auth
+  ships no `.gitattributes` and publishes these files with LF, so on a host with
+  `core.autocrlf=true` an unpinned checkout rewrites all fourteen: `login.html`
+  becomes 7,198 bytes hashing to `facd1ced…` where the blob the reference
+  actually serves is 7,064 bytes hashing to `f22f3a3d…`. Without the pin the
+  drift check fails on a tree nobody edited, and — had those bytes ever been
+  normalised into the table — the repository would have pinned a version of the
+  reference's UI that no upstream consumer has.
+
+### Changed
+- **`ServeAuthJS()` now serves the reference's `auth.js`**, not this port's
+  hand-written one. The 18 KB `ui/auth.js` is still in the tree and still
+  embedded, because `ui_test.go`'s contract tests are written against it, but
+  nothing serves it and it is no longer maintained.
+  Two things changed with the bytes, and a host that drives the SDK from a page
+  needs to know both. The global is different: the hand-written client exposed
+  `window.AuthSDK`, the reference's exposes `window.AuthService` and
+  `window.AwesomeNodeAuth` (`auth.js:219`, `auth.js:352`) and no `AuthSDK` at
+  all — and it is a page runtime with `init`, `guardPage`, `guardRole` and
+  `checkSession` rather than a method-per-route wrapper. And bearer delivery is
+  no longer requested on the page's behalf: the hand-written client sent
+  `X-Auth-Strategy: bearer` and exposed the tokens it got back, while the
+  reference's client is cookie-only and never sends that header. The server is unaffected — it still honours
+  `X-Auth-Strategy` from any caller (`auth.router.ts:391`), which is how the
+  shipped Angular and Flutter clients ask for bearer delivery — but the served
+  SDK no longer asks for it on a page's behalf. A page that relied on
+  `window.AuthSDK` returning tokens must be rewritten against `AuthService` and
+  send the header itself. That is the point of vendoring rather than a cost of
+  it: what this port serves is now what the rest of the family serves, so a page
+  written against the reference's documentation works here unchanged. The vendored
+  client is otherwise a working cookie client against this port, and
+  `TestVendoredAuthJSIsAWorkingCookieClient` pins the names both sides have to
+  spell identically: the CSRF header, both CSRF cookie prefixes, and
+  `SESSION_REVOKED`.
+  No entry was added to the deviation register. Vendoring removes a difference
+  from the reference rather than introducing one, and the change here is between
+  two generations of this port's own SDK — which `compatibility.go` explicitly
+  does not track.
+
+### Deprecated
+- **`ServeAuthJS()`**, which is now a thin wrapper over the vendored asset kept
+  so that existing importers keep compiling. Use `UpstreamUIAssetFS()` or
+  `ReadUpstreamUIAsset("auth.js")`, or the UI handler the next change
+  introduces, which serves the whole vendored set with the config injection the
+  reference's pages expect. **It will be removed in v1.0.0.**
+
 ## [0.8.0] - 2026-09-12
 
 The store seams the admin surface needs, and nothing that mounts a route: the

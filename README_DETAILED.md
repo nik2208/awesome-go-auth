@@ -2683,6 +2683,30 @@ serves the config route as well. It is kept through the 0.x line.
 
 All files are embedded via `//go:embed` from the `ui/` directory.
 
+`ui/upstream/assets/` is different from the rest of that tree: it holds the
+reference's own fourteen browser assets, copied byte for byte from
+awesome-node-auth's `src/ui/assets` at `cc01e997` (v1.9.0), and **nothing in it
+may be edited in this repository**. Each file's upstream path, size and sha256
+are recorded in `upstreamUIAssetTable` (`ui_upstream.go`) and re-hashed by
+`TestVendoredUIAssetsHaveNotDrifted` on every `go test ./...`, which also fails
+if a file is added to or removed from the set. See `ui/upstream/README.md` for
+the re-vendoring recipe and for why the provenance is recorded beside the bytes
+rather than as a header inside them.
+
+#### `UpstreamUIAssetFS() fs.FS`
+
+The vendored assets as a filesystem rooted at the asset directory, so a caller
+opens `"login.html"` rather than the full embedded path.
+
+#### `ReadUpstreamUIAsset(name string) ([]byte, error)`
+
+One vendored asset by base name, returned as a copy.
+
+#### `UpstreamUIAssets() []UpstreamUIAsset`
+
+The provenance table — name, upstream path, commit, size and sha256 per file —
+freshly built on every call.
+
 ### `ServeAdminUI() http.Handler`
 
 Serves `ui/admin.html` — a single-page admin dashboard with sections for Users, Sessions, Tenants, Roles, API Keys, Telemetry, and OpenAPI reference.
@@ -2693,10 +2717,42 @@ Serves `ui/auth.html` — a complete auth UI with Login, Register, Magic Link, F
 
 ### `ServeAuthJS() http.Handler`
 
-Serves `ui/auth.js` — a ~3KB vanilla JavaScript browser SDK with no dependencies. Exposes `window.AuthSDK` with methods mirroring the Go service API.
+**Deprecated — removed in v1.0.0.** Use `UpstreamUIAssetFS()` or
+`ReadUpstreamUIAsset("auth.js")` instead.
 
-**AuthSDK methods:**
-`configure`, `storeTokens`, `clearTokens`, `getAccessToken`, `isLoggedIn`, `register`, `login`, `logout`, `refresh`, `me`, `forgotPassword`, `resetPassword`, `changePassword`, `sendMagicLink`, `verifyMagicLink`, `sendSMSCode`, `verifySMSCode`, `setupTOTP`, `verifyTOTPSetup`, `verifyTOTP`, `disableTOTP`, `sendVerificationEmail`, `verifyEmail`, `requestEmailChange`, `confirmEmailChange`, `getMetadata`, `updateMetadata`, `listSessions`, `revokeSession`, `connectSSE`
+Serves the **vendored** `auth.js` (`ui/upstream/assets/auth.js`, 31,277 bytes) —
+the reference's own browser SDK, not this port's hand-written `ui/auth.js`,
+which is still embedded for the contract tests but is no longer served or
+maintained.
+
+Two differences follow from the swap, and a page that drives the SDK has to know
+both:
+
+- **The global changed.** The hand-written client exposed `window.AuthSDK`. The
+  reference's client exposes `window.AuthService` and `window.AwesomeNodeAuth`
+  (`auth.js:219`, `auth.js:352`) and no `AuthSDK` at all, and its surface is
+  different too — it is a page runtime with `init`, `guardPage`, `guardRole` and
+  `checkSession`, not a thin method-per-route wrapper.
+- **Bearer delivery is no longer requested for you.** The hand-written client
+  sent `X-Auth-Strategy: bearer` and exposed the tokens it received; the
+  reference's client is cookie-only and never sends that header. The server
+  still honours `X-Auth-Strategy` from any caller, so a page that wants bearer
+  delivery must send it itself.
+
+This is the point of vendoring: what this port serves is now what the rest of
+the family serves, so a page written against the reference's documentation
+works here unchanged. A page written against this port's old SDK does not.
+
+**`window.AuthService` methods** (the vendored client's surface; the reference's
+own documentation is authoritative, since these are its bytes):
+`init`, `login`, `logout`, `register`, `refresh`, `checkSession`, `getUser`,
+`isAuthenticated`, `guardPage`, `guardRole`, `forgotPassword`, `resetPassword`,
+`setPassword`, `changePassword`, `sendMagicLink`, `verifyMagicLink`,
+`sendSmsLogin`, `verifySmsLogin`, `setup2fa`, `verify2faSetup`, `validate2fa`,
+`validateSms`, `verifyEmail`, `resendVerificationEmail`, `requestEmailChange`,
+`confirmEmailChange`, `getActiveSessions`, `revokeSession`, `getLinkedAccounts`,
+`unlinkAccount`, `requestLinkingEmail`, `verifyLinkingToken`,
+`verifyConflictLinkingToken`, `deleteAccount`, `applyTranslations`
 
 ---
 
