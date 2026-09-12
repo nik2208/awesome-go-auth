@@ -613,6 +613,7 @@ All provided in the core package for development, testing, and embedded deployme
 | `MemoryTenantStore` | TenantStore |
 | `MemoryTelemetryStore` | TelemetryStore |
 | `MemoryLinkedAccounts` | LinkedAccountStore |
+| `MemoryAPIKeyStore` | APIKeyStore + APIKeyAdminStore + APIKeyServiceIndexStore + APIKeyDeleteStore + APIKeyAuditStore |
 
 ---
 
@@ -2722,14 +2723,48 @@ HTTP middleware that reads `X-Api-Key` or `Authorization: ApiKey <key>` headers.
 
 ### `APIKeyStore` interface
 
+The mandatory half, mirroring the reference's `IApiKeyStore`, which makes
+`findByPrefix` and `findById` required and everything else optional
+(`api-key-store.interface.ts:7-9`):
+
 ```go
 type APIKeyStore interface {
     Save(ctx, APIKeyRecord) error
-    FindByPrefix(ctx, prefix string) (APIKeyRecord, error)
+    FindByPrefix(ctx, prefix string) (APIKeyRecord, error) // active keys only
+    FindByID(ctx, id string) (APIKeyRecord, error)         // any state, incl. revoked
     Revoke(ctx, id string) error
     UpdateLastUsed(ctx, id string, when time.Time) error
 }
 ```
+
+The reference's four optional methods are narrow companion interfaces that a
+caller type-asserts the configured store to, one method each, so that the
+absence of any one of them is separately observable — which is what lets the
+admin surface answer `404 API key store not configured` for "no store" and
+`501 IApiKeyStore.listAll is not implemented` for "no listAll":
+
+```go
+type APIKeyAdminStore interface {        // listAll?
+    ListAll(ctx, limit, offset int) ([]APIKeyRecord, error)
+}
+type APIKeyServiceIndexStore interface { // listByServiceId?
+    ListByServiceID(ctx, serviceID string) ([]APIKeyRecord, error)
+}
+type APIKeyDeleteStore interface {       // delete?
+    Delete(ctx, id string) error
+}
+type APIKeyAuditStore interface {        // logUsage?
+    LogUsage(ctx, entry APIKeyAuditEntry) error
+}
+```
+
+Both listers return records newest first — `CreatedAt` descending, ties broken
+by `ID` ascending. That order is normative for this package; a store that cannot
+hold to it registers its own as a deviation. `Revoke`, `UpdateLastUsed` and
+`Delete` treat an unknown id as a no-op returning `nil`, not an error, because
+the reference's routes await them and answer `200` without a lookup of their
+own. `APIKeyAuditStore` is a seam: nothing in the core calls `LogUsage` yet, and
+the caller arrives with the admin API-key surface in v0.10.0.
 
 ---
 

@@ -70,6 +70,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PublicUser`: the reference serialises it nowhere, the admin users table picks
   its keys one by one and does not pick this one (`admin.router.ts:764-773`), and
   publishing which accounts are admin is not an addition this contract wants.
+- **The rest of the reference's `IApiKeyStore`, split into one mandatory
+  interface and four narrow companions.** `APIKeyStore` now carries `FindByID`
+  (see Changed) beside `Save`, `FindByPrefix`, `Revoke` and `UpdateLastUsed`,
+  and the four methods the reference marks optional become an interface each —
+  `APIKeyAdminStore` (`ListAll`), `APIKeyServiceIndexStore` (`ListByServiceID`),
+  `APIKeyDeleteStore` (`Delete`) and `APIKeyAuditStore` (`LogUsage`) — which a
+  caller reaches by type-asserting the configured store, the way
+  `SessionAdminStore` and `UserMetadataStore` are reached. One method per
+  interface is the load-bearing part, not tidiness: the reference's admin
+  surface tells "no store" and "no method" apart, answering
+  `404 {"error": "API key store not configured"}` for the first and
+  `501 {"error": "IApiKeyStore.listAll is not implemented", "keys": [], "total": 0}`
+  for the second (`admin.router.ts:1254`, `:1259-1262`), and
+  `DELETE /admin/api/api-keys/:id` falls back to a revoke and says so in the
+  body when `delete` alone is missing (`:1348-1354`). A single combined
+  interface could not tell those absences apart. No route consumes any of this
+  yet — the admin API-key screens are v0.10.0 — so nothing on the wire changes
+  in this release.
+- **`MemoryAPIKeyStore`**, an in-process store implementing all five of those
+  interfaces, built by `NewMemoryAPIKeyStore()`. It is the executable statement
+  of the listing order: `ListAll` and `ListByServiceID` return records newest
+  first, `CreatedAt` descending with ties broken by `ID` ascending, and that
+  order is normative for this package. The reference ships the interface and no
+  implementation of it, so there was nothing to reproduce and the choice had to
+  be made somewhere; making it here means a store that cannot hold to it — a
+  DynamoDB table with no suitable index, say — registers its own order as a
+  deviation rather than inventing one in silence. The `ID` tiebreak is what
+  makes it a *total* order, without which `limit`/`offset` paging over keys that
+  share a timestamp silently repeats some rows and drops others. Records are
+  copied in and out, so a caller cannot reach a stored key's scopes or expiry
+  through the slices and pointers it passed in or got back.
+- **`APIKeyRecord.CreatedAt`**, stamped by `APIKeyService.Create` from
+  `time.Now()`, which is where the reference stamps it
+  (`api-key.service.ts:64`). The admin listing projects it
+  (`admin.router.ts:1275`) and the create route echoes it back beside the
+  once-only raw key (`:1325`), and it is the only field that can order a
+  listing — `newID` mints random hex, so the IDs carry no time component and
+  sorting by one is sorting by noise. It is a value and not a pointer because
+  the reference declares it non-optional where `expiresAt` and `lastUsedAt` are
+  both nullable. A store that drops it leaves its records sorting last.
+- **`APIKeyAuditEntry` and `APIKeyAuditStore`, as a seam.** Nothing in this
+  package calls `LogUsage`, and this release wires no caller. In the reference
+  the caller is the API-key strategy's audit hook, which is off unless
+  `ApiKeyStrategyOptions.auditLog` is set and the store implements the method
+  (`api-key.strategy.ts:31`, `:213`); that switch arrives with the admin API-key
+  surface in v0.10.0. The type is defined now so that a host writing a store for
+  that release writes the table once. It is deliberately not wired early:
+  logging every authentication attempt, the failures above all, turns an
+  unauthenticated request into a write, and that belongs to the milestone that
+  also ships the way to turn it off.
+- **`ErrAPIKeyNotFound`**, the sentinel an API-key store answers when no record
+  matches. The reference's two finders return `ApiKey | null`
+  (`api-key-store.interface.ts:48`, `:54`), which a two-value Go return has no
+  room for, so absence is an error here rather than a zero record with a nil
+  one. `APIKeyService.Verify` collapses it, and every other store error, into
+  `ErrInvalidCredentials`, so the distinction never reaches the wire.
+
+### Changed
+- **BREAKING (store interface) — `APIKeyStore` requires `FindByID`.** An
+  existing implementation of the previous four-method interface stops compiling
+  until it adds
+  `FindByID(ctx context.Context, id string) (APIKeyRecord, error)`. The
+  reference makes the method mandatory — "All methods are optional except for
+  `findByPrefix` and `findById`" (`api-key-store.interface.ts:7-9`) — and
+  leaving it optional here would have put an entry in the deviation register
+  whose only argument was that this port shipped the interface incomplete
+  first. The cost to an implementor is small: `Revoke` and `UpdateLastUsed`
+  already take an id, so any store that satisfies them already has the index
+  the new method needs, and v0.8.0 is the release the roadmap names as the one
+  that completes `APIKeyStore`. `FindByID` is deliberately the opposite of
+  `FindByPrefix` — it returns the record whatever its state, where
+  `FindByPrefix` returns active keys only (`:46`) — because the admin screens
+  address a key by id *after* revoking it, and a management screen that could
+  not open a revoked key could not show an operator what they revoked. Nothing
+  on the authentication path calls it, so `APIKeyService.Verify` is unchanged.
 
 ### Fixed
 - **`MemorySessionStore.ListSessionsForUser` now returns a stable order.** It

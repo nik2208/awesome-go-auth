@@ -8,7 +8,16 @@ import (
 	"time"
 )
 
-// memAPIKeyStore is a simple in-memory APIKeyStore for tests.
+// memAPIKeyStore is a deliberately sloppy in-memory APIKeyStore, kept here
+// rather than replaced by MemoryAPIKeyStore now that one exists.
+//
+// Its FindByPrefix does *not* filter on IsActive, which the interface requires
+// and MemoryAPIKeyStore does. That is the point of it: the reference's strategy
+// re-checks isActive on whatever the store hands back
+// (api-key.strategy.ts:96) and so does Verify, and a store that honours the
+// filter can never exercise that second check. Against this one, a revoked key
+// reaches Verify and has to be refused there — see
+// TestAPIKeyService_Verify_Inactive.
 type memAPIKeyStore struct {
 	keys     map[string]APIKeyRecord
 	lastUsed map[string]time.Time
@@ -29,6 +38,15 @@ func (s *memAPIKeyStore) FindByPrefix(_ context.Context, prefix string) (APIKeyR
 		return APIKeyRecord{}, ErrInvalidCredentials
 	}
 	return k, nil
+}
+
+func (s *memAPIKeyStore) FindByID(_ context.Context, id string) (APIKeyRecord, error) {
+	for _, k := range s.keys {
+		if k.ID == id {
+			return k, nil
+		}
+	}
+	return APIKeyRecord{}, ErrAPIKeyNotFound
 }
 
 func (s *memAPIKeyStore) Revoke(_ context.Context, id string) error {
@@ -506,5 +524,89 @@ func TestAPIKeyMiddleware_RequiredScopes_Fail(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for missing required scope, got %d", rr.Code)
+	}
+}
+
+// CreatedAt is new in v0.8.0 and the admin listing projects it
+// (admin.router.ts:1275), so the value the service stamps is the value that
+// screen shows. The reference stamps it in the same place, in createKey's record
+// literal (api-key.service.ts:64).
+func TestAPIKeyService_Create_StampsCreatedAt(t *testing.T) {
+	svc := NewAPIKeyService(testBcryptCost)
+	store := newMemAPIKeyStore()
+	ctx := context.Background()
+	before := time.Now()
+	_, record, err := svc.Create(ctx, store, "k", "s", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	after := time.Now()
+	if record.CreatedAt.IsZero() {
+		t.Fatal("CreatedAt should be stamped at creation")
+	}
+	if record.CreatedAt.Before(before) || record.CreatedAt.After(after) {
+		t.Fatalf("CreatedAt %v is outside the call it was made in (%v..%v)", record.CreatedAt, before, after)
+	}
+}
+
+// The record Create returns and the record it stored have to carry the same
+// stamp: the reference's create route echoes the returned one straight back to
+// the caller (admin.router.ts:1314-1327) while the listing reads the stored one.
+func TestAPIKeyService_Create_StoresTheSameCreatedAtItReturns(t *testing.T) {
+	svc := NewAPIKeyService(testBcryptCost)
+	store := newMemAPIKeyStore()
+	ctx := context.Background()
+	_, record, err := svc.Create(ctx, store, "k", "s", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	stored, err := store.FindByID(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if !stored.CreatedAt.Equal(record.CreatedAt) {
+		t.Fatalf("stored %v, returned %v", stored.CreatedAt, record.CreatedAt)
+	}
+}
+
+// A key that has never been presented has no last use. Zero would read as
+// 1 January year 1 on any screen that formats it; the reference leaves the field
+// null (api-key.service.ts:65).
+func TestAPIKeyService_Create_LeavesLastUsedAtNil(t *testing.T) {
+	svc := NewAPIKeyService(testBcryptCost)
+	store := newMemAPIKeyStore()
+	_, record, err := svc.Create(context.Background(), store, "k", "s", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if record.LastUsedAt != nil {
+		t.Fatalf("LastUsedAt should be nil on a new key, got %v", record.LastUsedAt)
+	}
+}
+
+// FindByID is mandatory on APIKeyStore because the reference makes it mandatory
+// (api-key-store.interface.ts:7-9, :54), and it is the one finder that must
+// answer for a revoked key: the admin screens address keys by id after
+// revoking them.
+func TestAPIKeyStore_FindByID_IsTheOppositeOfFindByPrefix(t *testing.T) {
+	svc := NewAPIKeyService(testBcryptCost)
+	store := NewMemoryAPIKeyStore()
+	ctx := context.Background()
+	_, record, err := svc.Create(ctx, store, "k", "s", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Revoke(ctx, record.ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if _, err := store.FindByPrefix(ctx, record.Prefix); err == nil {
+		t.Fatal("FindByPrefix should not resolve a revoked key")
+	}
+	found, err := store.FindByID(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("FindByID should resolve a revoked key: %v", err)
+	}
+	if found.IsActive {
+		t.Fatal("the record should come back revoked, not absent")
 	}
 }
