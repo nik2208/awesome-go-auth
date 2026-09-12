@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-12
+
+The event plane, and the tools router on top of it. **This release carries the
+line's breaking removals**; they are listed under Removed, with what a host does
+instead.
+
+It starts from a finding: `EventBus.Publish` had existed, documented and
+working, with **zero call sites**. Everything downstream subscribed to a bus
+that never spoke. So this release lays the `identity.*` vocabulary and the
+request context an event carries, then gives the bus its first callers —
+sixteen publication points covering nineteen of the twenty-six the family's
+private development line raises, with a conformance test that makes
+reachability a function of the file a citation names, so a live site that stops
+publishing cannot be silenced by reclassifying it.
+
+`WebhookDispatcher` and its invented `X-Signature-SHA256` are replaced by the
+reference's format — `X-Webhook-Signature: sha256=<hex>` and its three
+companions — with the reference's retry schedule and a `WebhookDeliverer` seam
+below the format, so a host can put delivery on a queue without reimplementing
+signing or the envelope. `SseHub` is replaced by the reference's `SseManager`:
+connections rather than channels, server-chosen topics, per-connection
+deduplication, heartbeats, and a distributor seam for the deployments where
+in-process fan-out reaches nobody. Resume is reproduced faithfully, which means
+it guarantees nothing — the reference reads `Last-Event-ID` nowhere and a
+reconnection resumes from now.
+
+`AuthTools` composes the four sinks in the source's order, and the tools router
+mounts its five routes. Two postures are worth reading before deploying one: the
+router declines the reference's unguarded default and requires an explicit
+access decision, because `POST /track` attributes an event to any user it is
+told about and fans it out to that user's stream and to outgoing webhooks signed
+in the deployment's name; and `GET /stream` reproduces the reference's
+credential-in-a-query-string, which is what `EventSource` obliges, with the cost
+written where a reader will meet it.
+
+The inbound webhook runs no script in this process and never will. The core
+resolves the action allowlist — the intersection the reference computes, with a
+failing or absent settings store yielding an empty list rather than a full one —
+and hands script, body and that list across an `InboundScriptRunner` seam whose
+every field is JSON-encodable. A host's sandbox is its own process and its own
+privileges. No JavaScript engine is in this repository, and none will be.
+
 ### Added
 - **`POST <tools>/webhook/{provider}`, the inbound webhook, and the
   `InboundScriptRunner` seam** (`tools_webhook.go`). The port of
