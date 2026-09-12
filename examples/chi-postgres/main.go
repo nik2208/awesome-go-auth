@@ -107,16 +107,34 @@ func main() {
 		})
 	})
 
-	// ── 4. Optional webhooks ───────────────────────────────────────────────
-	dispatcher := auth.NewWebhookDispatcher(
-		auth.WebhookEndpoint{
-			ID:     "slack",
-			URL:    getEnv("WEBHOOK_SLACK_URL", ""),
+	// ── 4. Optional outgoing webhooks ──────────────────────────────────────
+	// Subscriptions live in a WebhookStore, not in a list hard-coded here, and
+	// the store is the only filter in the chain: FindByEvent decides who is
+	// delivered to and the sender POSTs whatever it is handed. An empty Events
+	// list subscribes to nothing — use auth.WebhookEventWildcard for all.
+	webhookStore := auth.NewMemoryWebhookStore()
+	if url := getEnv("WEBHOOK_SLACK_URL", ""); url != "" {
+		if _, err := webhookStore.AddWebhook(context.Background(), auth.WebhookConfig{
+			URL:    url,
 			Secret: getEnv("WEBHOOK_SECRET", ""),
-			Events: []string{"user.registered", "user.login"},
+			Events: []string{auth.EventUserCreated, auth.EventAuthLoginSuccess},
+		}); err != nil {
+			log.Fatalf("add webhook: %v", err)
+		}
+	}
+	// One POST per matching subscription, with the reference's X-Webhook-*
+	// headers and its retry policy. Replace Sender.Deliverer to move delivery
+	// off this process — onto a queue, say — without reimplementing the
+	// envelope, the signature or the back-off.
+	webhooks := &auth.WebhookEmitter{
+		Store: webhookStore,
+		OnError: func(c auth.WebhookConfig, err error) {
+			log.Printf("[auth] webhook %s: %v", c.ID, err)
 		},
-	)
-	bus.Subscribe("*", func(e auth.Event) { dispatcher.Dispatch(context.Background(), e) })
+	}
+	// Nothing subscribes a WebhookEmitter for you: which events reach a webhook
+	// is the host's call, and this is the whole of the wiring.
+	webhooks.Subscribe(bus)
 
 	// ── 5. Chi router ─────────────────────────────────────────────────────
 	r := chi.NewRouter()

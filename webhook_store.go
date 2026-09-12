@@ -11,23 +11,17 @@ import (
 // (awesome-node-auth src/interfaces/webhook-store.interface.ts:4-150), plus an
 // in-memory implementation.
 //
-// It adds the seam and nothing else. Nothing in this package reads a
-// WebhookStore yet, and the three things that will read one are each deferred
-// on purpose:
+// It landed in v0.8.0 as the seam alone, with nothing in the package reading a
+// WebhookStore. Two of the three readers it was waiting for have since arrived,
+// and one has not:
 //
-//   - The dispatcher is not touched. WebhookDispatcher in webhooks.go keeps its
-//     own WebhookEndpoint list, its own envelope and its own
-//     X-Signature-SHA256 header, and it is what a host configures in code
-//     today; WebhookConfig is what a store will hold tomorrow. The two are
-//     replaced by one in U19 (M9, v0.11.0), which carries the header removal as
-//     a deliberate BREAKING change — the reference signs with
-//     X-Webhook-Signature: sha256=<hex> (webhook-sender.ts:36) and sends three
-//     further X-Webhook-* headers this dispatcher does not. So the duplication
-//     visible here — an events list matched twice, a secret twice, an id
-//     prefixed whk_ twice — is the two shapes coexisting until U19, not an
-//     oversight. Nothing new is wired into Dispatch, because doing so would put
-//     store-held subscriptions on the old wire format for one milestone and
-//     then change it under them.
+//   - The sender is here. webhook_sender.go is the port of the reference's
+//     WebhookSender, and WebhookEmitter is what turns FindByEvent's result into
+//     deliveries. The duplication this file used to describe — an events list
+//     matched twice, a secret twice, an id prefixed whk_ twice — is gone with
+//     WebhookDispatcher, which carried its own envelope and its own
+//     X-Signature-SHA256 header and was removed in v0.11.0 as a deliberate
+//     BREAKING change. There is one wire now and it is the reference's.
 //
 //   - The routes are not here. The admin Webhooks screens, which are what call
 //     ListWebhooks, AddWebhook, UpdateWebhook and RemoveWebhook
@@ -56,9 +50,11 @@ const WebhookEventWildcard = "*"
 
 // The defaults the reference documents on WebhookConfig and resolves in the
 // sender rather than in the store (webhook-sender.ts:18-19,
-// webhook-store.interface.ts:27, :32). They are exported because U19 has to
-// apply exactly these numbers, and because a store round-tripping a config has
-// to be able to tell an unset field from a field set to the same value.
+// webhook-store.interface.ts:27, :32). They are exported because
+// WebhookSender applies exactly these numbers and a host reproducing its retry
+// policy on the far side of a WebhookDeliverer needs the same two, and because
+// a store round-tripping a config has to be able to tell an unset field from a
+// field set to the same value.
 const (
 	DefaultWebhookMaxRetries = 3
 	DefaultWebhookRetryDelay = time.Second
@@ -95,12 +91,11 @@ type WebhookConfig struct {
 	// Events are the event names this configuration subscribes to (:14), or the
 	// single entry WebhookEventWildcard for all of them.
 	//
-	// An empty or nil Events matches nothing. That is the opposite of
-	// WebhookEndpoint.Events in webhooks.go, where empty means every event
-	// (webhookMatches), and the difference is deliberate on both sides: the
-	// reference's matching is a positive containment test, so a row with no
-	// events is subscribed to none (:106), while the in-code endpoint list
-	// predates the store and keeps its own rule until U19 merges the two. The
+	// An empty or nil Events matches nothing, and that is the reference's rule
+	// rather than a convenience: its matching is a positive containment test,
+	// so a row with no events is subscribed to none (:106). The removed
+	// WebhookDispatcher read an empty list the other way round, as every event,
+	// which is one more reason it could not simply be pointed at a store. The
 	// reference's admin route defaults a create with no events to ["*"]
 	// (admin.router.ts:1403), which is where that convenience lives there.
 	Events []string `json:"events"`
@@ -116,10 +111,9 @@ type WebhookConfig struct {
 	// webhook, which fires for every tenant. See WebhookStore.FindByEvent.
 	TenantID string `json:"tenantId,omitempty"`
 	// MaxRetries and RetryDelayMs are the delivery retry policy (:28, :33),
-	// carried here and acted on by nobody: retry arrives with the dispatcher
-	// rewrite in U19 (M9). Recording them now means a store written today needs
-	// no schema change when U19 lands — the same bargain AuthCode.CodeChallenge
-	// strikes in store.go.
+	// resolved and acted on by WebhookSender.Send. Retries() and RetryDelay()
+	// below are how to read them: never dereference these pointers directly,
+	// because nil is the reference's default and a stored 0 is not.
 	MaxRetries   *int `json:"maxRetries,omitempty"`
 	RetryDelayMs *int `json:"retryDelayMs,omitempty"`
 
@@ -208,8 +202,9 @@ func (c WebhookConfig) Matches(event, tenantID string) bool {
 }
 
 // OutgoingWebhookEvent is the JSON body POSTed to a webhook endpoint
-// (webhook-store.interface.ts:75-89). It is the payload U19 will send; nothing
-// in this package builds one yet.
+// (webhook-store.interface.ts:75-89). Event.OutgoingWebhook builds it and
+// WebhookSender.Send serialises it; the bytes it produces are what the
+// X-Webhook-Signature header signs.
 //
 // Timestamp is a string, not a time.Time, because the reference's is a string
 // (:84) and the two do not encode alike: JavaScript's toISOString() emits
@@ -271,10 +266,10 @@ type WebhookStore interface {
 	// MemoryWebhookStore guarantees — the order the configurations were added —
 	// and a store that cannot reproduce it states its own, here and in the
 	// deviation register if it is a published one. The order is not observable
-	// on the wire today, since delivery fans out; it becomes observable in
-	// ListWebhooks' pagination (U14) and in the order U19 opens its retry
-	// budgets in, which is why it is pinned now rather than after something
-	// depends on it.
+	// on the wire, because WebhookEmitter starts a goroutine per configuration
+	// and nothing sequences them; it is observable in ListWebhooks' pagination
+	// (U14) and in the order the deliveries are started in, which a host's
+	// queueing WebhookDeliverer may well preserve.
 	//
 	// An error means the store failed, and the caller is expected to treat it
 	// as an empty result rather than as a failed emit — the reference's

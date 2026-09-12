@@ -41,9 +41,9 @@ package auth
 // analogue of the reference's `AuthEventName` union (auth-event-names.ts:42) —
 // would buy exhaustiveness nowhere, because Go has no exhaustive switch, and
 // would cost a conversion at every boundary that already speaks `string`:
-// Event.Name, EventBus.Subscribe's first parameter, WebhookEndpoint.Events,
-// WebhookConfig.Events, TelemetryEvent.EventName, TelemetryFilter.EventName and
-// SseMessage.Event are all `string` today, and every one of them is a place a
+// Event.Name, EventBus.Subscribe's first parameter, WebhookConfig.Events,
+// OutgoingWebhookEvent.Event, TelemetryEvent.EventName, TelemetryFilter.EventName
+// and SseMessage.Event are all `string` today, and every one of them is a place a
 // caller will want to write a constant from this list. Untyped constants are
 // assignable to all of them with no conversion and no API change, and they
 // still fail the compile on a misspelling at the call site, which is the whole
@@ -226,7 +226,7 @@ var eventNames = []string{
 // Three things need the full set rather than the fifteen names anything
 // actually raises, and each needs it for a different reason:
 //
-//   - The webhook admin UI (U19 and the admin routes behind it) offers a
+//   - The webhook admin UI (U14 and the admin routes behind it) offers a
 //     subscriber every name the library might ever raise, not the subset it
 //     raises today. A subscription created against a name nothing raises yet is
 //     valid and simply never fires; one that could not be created at all would

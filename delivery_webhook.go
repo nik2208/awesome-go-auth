@@ -3,10 +3,6 @@ package auth
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,19 +62,12 @@ type DeliveryWebhookRequest struct {
 	Delivery json.RawMessage `json:"delivery"`
 }
 
-// The envelope headers, named as the reference names them
-// (webhook-sender.ts:24-33).
-const (
-	webhookEventHeader     = "X-Webhook-Event"
-	webhookDeliveryHeader  = "X-Webhook-Delivery"
-	webhookTimestampHeader = "X-Webhook-Timestamp"
-	webhookSignatureHeader = "X-Webhook-Signature"
-)
-
-// webhookTimestampLayout is Date.prototype.toISOString's output — UTC, always
-// three fractional digits, a literal Z — which is what the reference puts in
-// X-Webhook-Timestamp.
-const webhookTimestampLayout = "2006-01-02T15:04:05.000Z07:00"
+// The envelope this file borrows — the four X-Webhook-* header names,
+// toISOString's timestamp layout, the "sha256=<hex>" signature and the
+// per-request UUID — lives in webhook_sender.go, which is the port of the
+// reference's WebhookSender and therefore the convention's own home:
+// webhookEventHeader and its three siblings, webhookTimestampLayout,
+// signWebhookBody and newUUIDv4.
 
 // defaultDeliveryWebhookTimeout bounds a request whose DeliveryWebhook.Timeout
 // is unset. A route is waiting on the answer, so it is short.
@@ -246,15 +235,6 @@ func (w *DeliveryWebhook) post(ctx context.Context, kind string, delivery any, r
 	return nil
 }
 
-// signWebhookBody is the reference's WebhookSender.sign
-// (webhook-sender.ts:54-56): "sha256=" + hex(HMAC-SHA256(secret, body)). It is
-// the form VerifyWebhookSignature checks.
-func signWebhookBody(secret string, body []byte) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
-}
-
 // emailDomain returns "@" plus the domain of an address, or "" when the address
 // has none — the one part of a recipient an error may name.
 func emailDomain(address string) string {
@@ -262,16 +242,4 @@ func emailDomain(address string) string {
 		return address[at:]
 	}
 	return ""
-}
-
-// newUUIDv4 is what the reference's randomUUID() gives X-Webhook-Delivery: a
-// random (version 4, variant 1) UUID in its canonical 8-4-4-4-12 spelling.
-func newUUIDv4() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("auth: random uuid: %w", err)
-	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
