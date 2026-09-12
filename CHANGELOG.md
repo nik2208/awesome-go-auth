@@ -127,6 +127,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   U19 drew this line first and said why. `Bridge` runs the same fan-out minus
   the bus step, so a bridged event gets the same id, frame and envelope a
   tracked one does.
+- **The mutating half of the admin API** (`admin_write.go`): the sixteen routes
+  of `admin.router.ts` that change state, behind the same `AdminGuard.Protect`
+  as the reads — `DELETE /api/users/{id}`, `POST /api/2fa-policy`,
+  `PUT /api/users/{id}/metadata`, `POST /api/users/{id}/roles` and
+  `DELETE /api/users/{id}/roles/{role}`, `PUT /api/settings` and
+  `PATCH /api/settings/ui`, `DELETE /api/sessions/{handle}`, `POST /api/roles`
+  and `DELETE /api/roles/{name}`, the four tenant writes, and the two template
+  upserts. Fifteen answer `{"success": true}` and nothing else;
+  `POST /api/tenants` answers the row it created and `POST /api/2fa-policy` a
+  count beside the flag. The eight credential routes (API keys and webhooks) are
+  a separate PR, whose invariant is secret redaction.
+  `POST /api/2fa-policy` walks the whole user table in pages of 100 — `listUsers`
+  until a page comes back short — and reports `updated` as the number of users
+  *listed*, not of rows changed (`admin.router.ts:836-848`). It needs a
+  capability this port had no seam for, so one is added:
+  **`UserTwoFactorPolicyStore`**, the reference's optional
+  `IUserStore.updateRequire2FA` in `store.go`'s style — a narrow interface the
+  core type-asserts — with `MemoryUserStore` implementing it. That pair is what
+  turns the console's **`twoFAPolicy` feature flag on**, since the reference
+  gates the flag on `updateRequire2FA && listUsers` (`:649-650`); the route's own
+  two `501`s are asked in that same order, so a store with neither is told about
+  the write first. The listing half of its refusal is the third of the three
+  distinct answers this codebase gives for one missing `listUsers` — bare, with
+  no `users` and no `total` (`:832`) — and it stays distinct from the other two.
+  `PUT /api/settings` and `PATCH /api/settings/ui` keep the reference's division
+  of labour exactly. `MergeSettings` is a shallow spread and `ui` is one field of
+  the patch, so a `PUT` carrying `ui` replaces the branding block whole and drops
+  the seven fields it does not name; the `PATCH` route therefore reads the
+  current settings, merges the UI sub-object **itself**, and sends the merged
+  block back down (`:979-981`). Moving that merge into the store would make one
+  field of the patch mean something different from every other and would be a
+  different product. That route is also the only one of the sixteen whose `500`
+  carries the error's own message rather than the flat `Internal server error`,
+  as there (`:984-985`).
+  Three reference behaviours are reproduced rather than tidied, and are called
+  out because each looks like a bug: `DELETE /api/users/{id}` calls
+  `deleteUser` and nothing else, so the deleted user's **sessions, roles, tenant
+  memberships, metadata and linked accounts all survive the account** — the same
+  codebase cascades on the user's own `DELETE /account`
+  (`auth.router.ts:1597-1636`), so the omission is the console's, not an
+  oversight to read past. `PUT /api/users/{id}/metadata` is a `PUT` that
+  **merges**, because `IUserMetadataStore.updateMetadata` is specified as a
+  shallow patch. And `POST /api/templates/mail` is an **upsert whose patch is not
+  partial**: the handler rebuilds `{baseHtml, baseText, translations}` out of the
+  body with all three keys present whatever it held, so a post naming only an id
+  blanks the stored bodies and translations (`:1462`,
+  `memory-template.store.ts:22`). All six deletes are unconditional — none looks
+  the row up, none answers `404`, none reports what it did.
+  The double `decodeURIComponent` U13 found on `GET /api/tenants/{id}/users` is
+  on the sibling writes too, and on four more routes: the session handle, the
+  role name of both role deletes, and both ids of
+  `DELETE /api/tenants/{id}/users/{userId}`. The user id of
+  `DELETE /api/users/{id}` and of `POST /api/users/{id}/roles` is not decoded
+  twice, which is the reference's own asymmetry.
+  No entry joins the deviation register with these routes.
 - **The read half of the admin API** (`admin_read.go`): the fourteen `GET`s of
   `admin.router.ts`'s read surface, every one of them behind
   `AdminGuard.Protect` and none behind `ProtectShell` —

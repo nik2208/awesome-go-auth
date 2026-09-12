@@ -57,6 +57,37 @@ type TOTPStore interface {
 	UpdateTOTPSecret(ctx context.Context, userID, tenantID, secret string, enabled bool) error
 }
 
+// UserTwoFactorPolicyStore sets the require-2FA flag on one user. It is the
+// reference's optional IUserStore.updateRequire2FA — a method its interface does
+// not declare and which the admin router reaches for with a `typeof … ===
+// 'function'` test (admin.router.ts:827, :649) — expressed here the way
+// SessionAdminStore and AdminUserStore are: a narrow interface the core
+// type-asserts the configured store to, with the assertion's failure answering
+// the reference's own 501.
+//
+// It has exactly one consumer, POST /admin/api/2fa-policy, which walks the whole
+// user table in pages of 100 and calls this once per row. Two consequences
+// follow for an implementor:
+//
+//   - It is called N times for a table of N users and it is not batched. That is
+//     the reference's shape (admin.router.ts:843) and there is no bulk form to
+//     offer instead, because the route has no transaction either: a failure
+//     part-way leaves the prefix already written and answers 500.
+//   - It must write the flag and nothing else. The route is a policy switch and
+//     the value it carries is the administrator's; a store that also cleared a
+//     TOTP secret or revoked a session on the way through would be making a
+//     decision the route did not ask for and the reference does not make.
+//
+// tenantID is the parameter the reference has not got, added for the reason
+// every other write in this file carries one: the walk lists users across every
+// tenant, so the row's own TenantID is the only thing that says which user an id
+// names. Together with AdminUserStore it is also what turns the console's
+// twoFAPolicy feature flag on — the reference requires both methods for the same
+// flag (:649-650).
+type UserTwoFactorPolicyStore interface {
+	UpdateRequire2FA(ctx context.Context, userID, tenantID string, required bool) error
+}
+
 // EmailVerificationStore persists verification flow.
 type EmailVerificationStore interface {
 	UpdateEmailVerificationToken(ctx context.Context, userID, tenantID, tokenHash string, expiry time.Time) error

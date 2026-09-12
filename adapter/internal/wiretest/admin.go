@@ -125,7 +125,10 @@ func newAdminEnv(t *testing.T, mount Mounter, opts adminEnvOptions) *adminEnv {
 	}
 
 	var store auth.UserStore = memory
-	if opts.noListUsers {
+	switch {
+	case opts.wrapUsers != nil:
+		store = opts.wrapUsers(memory)
+	case opts.noListUsers:
 		store = testAdminUserStore{inner: memory}
 	}
 
@@ -146,6 +149,11 @@ type adminEnvOptions struct {
 	admin       auth.AdminOptions
 	seeds       []adminSeed
 	noListUsers bool
+	// wrapUsers narrows the seeded MemoryUserStore to a view of it, which is how
+	// a case reaches a deployment holding one optional user-store capability and
+	// not another — the pair POST /api/2fa-policy asks for in order, and whose
+	// order decides which of its two 501s a caller is told about.
+	wrapUsers func(*auth.MemoryUserStore) auth.UserStore
 	// sessions overrides the default MemorySessionStore, which is the only way
 	// to reach a deployment whose sessions cannot be enumerated.
 	sessions auth.SessionStore
@@ -200,6 +208,15 @@ func testAdmin(t *testing.T, mount Mounter) {
 	t.Run("TokenTypes", func(t *testing.T) { testAdminTokenTypes(t, mount) })
 	t.Run("Assets", func(t *testing.T) { testAdminAssets(t, mount) })
 	t.Run("Reads", func(t *testing.T) { testAdminReads(t, mount) })
+	t.Run("Writes", func(t *testing.T) { testAdminWrites(t, mount) })
+}
+
+// adminRoute is one method-and-path pair. The reads could be a bare path list
+// because every one of them is a GET; the writes cannot, because eight of them
+// share a path with a read and are told apart only by the method.
+type adminRoute struct {
+	method string
+	path   string
 }
 
 // adminReadPaths is every route U13 mounts, with a concrete parameter where the
@@ -219,6 +236,43 @@ var adminReadPaths = []string{
 	auth.AdminTenantsPath + "/acme/users",
 	auth.AdminMailTemplatesPath,
 	auth.AdminUITemplatesPath,
+}
+
+// adminWritePaths is every route U14 mounts. Eight of them reuse a read path
+// with a different method, which is what makes the method part of the match
+// rather than a check beside it.
+var adminWritePaths = []adminRoute{
+	{http.MethodDelete, auth.AdminUsersPath + "/a-user"},
+	{http.MethodPost, auth.AdminTwoFAPolicyPath},
+	{http.MethodPut, auth.AdminUsersPath + "/a-user/metadata"},
+	{http.MethodPost, auth.AdminUsersPath + "/a-user/roles"},
+	{http.MethodDelete, auth.AdminUsersPath + "/a-user/roles/editor"},
+	{http.MethodPut, auth.AdminSettingsPath},
+	{http.MethodPatch, auth.AdminSettingsUIPath},
+	{http.MethodDelete, auth.AdminSessionsPath + "/a-session"},
+	{http.MethodPost, auth.AdminRolesPath},
+	{http.MethodDelete, auth.AdminRolesPath + "/editor"},
+	{http.MethodPost, auth.AdminTenantsPath},
+	{http.MethodDelete, auth.AdminTenantsPath + "/acme"},
+	{http.MethodPost, auth.AdminTenantsPath + "/acme/users"},
+	{http.MethodDelete, auth.AdminTenantsPath + "/acme/users/a-user"},
+	{http.MethodPost, auth.AdminMailTemplatesPath},
+	{http.MethodPost, auth.AdminUITemplatesPath},
+}
+
+// adminAllRoutes is every route the console mounts, whatever PR added it. The
+// not-mounted direction walks this: a surface that is not configured must answer
+// 404 on all of it, and a route added to a later PR's table joins that sweep
+// without anyone remembering to.
+func adminAllRoutes() []adminRoute {
+	routes := make([]adminRoute, 0, len(adminPaths)+len(adminReadPaths)+len(adminWritePaths))
+	for path, method := range adminPaths {
+		routes = append(routes, adminRoute{method, path})
+	}
+	for _, path := range adminReadPaths {
+		routes = append(routes, adminRoute{http.MethodGet, path})
+	}
+	return append(routes, adminWritePaths...)
 }
 
 // testAdminNotMounted is the negative direction of the conditional set, and it
@@ -242,20 +296,13 @@ func testAdminNotMounted(t *testing.T, mount Mounter) {
 				// anything but 404 here is a mount and not a missing store.
 				options: adminAllStores(),
 			})
-			paths := make(map[string]string, len(adminPaths)+len(adminReadPaths))
-			for route, method := range adminPaths {
-				paths[route] = method
-			}
-			for _, route := range adminReadPaths {
-				paths[route] = http.MethodGet
-			}
-			for route, method := range paths {
-				rec := env.Do(adminHTML(env.adminRequest(method, route, "{}")))
+			for _, route := range adminAllRoutes() {
+				rec := env.Do(adminHTML(env.adminRequest(route.method, route.path, "{}")))
 				switch rec.Code {
 				case http.StatusNotFound, http.StatusMethodNotAllowed:
 				default:
 					t.Errorf("%s %s = %d, want 404 or 405 — the admin surface must not be mounted by %s",
-						method, route, rec.Code, name)
+						route.method, route.path, rec.Code, name)
 				}
 			}
 		})
@@ -1418,6 +1465,938 @@ func testAdminTemplates(t *testing.T, mount Mounter) {
 		AssertKeys(t, entry, "page", "translations")
 		if entry["page"] != "login" {
 			t.Errorf("page = %v, want the seeded one", entry["page"])
+		}
+	})
+}
+
+// ── the mutating half ────────────────────────────────────────────────────────
+
+// testAdminWrites is U14: the sixteen routes of admin.router.ts that change
+// state. The invariant is does it write the right row — which store method each
+// route reaches, with which arguments, and what it answers afterwards — so every
+// case below asserts the effect through the read route that shows it, not only
+// the status the write returned.
+//
+// The eight credential routes (`/api/api-keys`, `/api/webhooks` and their
+// writes) are deliberately absent: they are one PR whose invariant is secret
+// redaction.
+func testAdminWrites(t *testing.T, mount Mounter) {
+	t.Run("Guarded", func(t *testing.T) { testAdminWritesGuarded(t, mount) })
+	t.Run("Methods", func(t *testing.T) { testAdminWriteMethods(t, mount) })
+	t.Run("DeleteUser", func(t *testing.T) { testAdminDeleteUser(t, mount) })
+	t.Run("TwoFAPolicy", func(t *testing.T) { testAdminTwoFAPolicy(t, mount) })
+	t.Run("Metadata", func(t *testing.T) { testAdminWriteMetadata(t, mount) })
+	t.Run("UserRoles", func(t *testing.T) { testAdminWriteUserRoles(t, mount) })
+	t.Run("Settings", func(t *testing.T) { testAdminWriteSettings(t, mount) })
+	t.Run("Sessions", func(t *testing.T) { testAdminWriteSessions(t, mount) })
+	t.Run("Roles", func(t *testing.T) { testAdminWriteRoles(t, mount) })
+	t.Run("Tenants", func(t *testing.T) { testAdminWriteTenants(t, mount) })
+	t.Run("Templates", func(t *testing.T) { testAdminWriteTemplates(t, mount) })
+}
+
+// adminSend issues one write and decodes the body.
+func adminSend(t *testing.T, env *adminEnv, method, route, body string, want int) map[string]any {
+	t.Helper()
+	rec := env.Do(env.adminRequest(method, route, body))
+	AssertStatus(t, rec, want)
+	return Body(t, rec)
+}
+
+// adminAssertSuccess is the answer fifteen of the sixteen give: {"success":
+// true} and nothing else. AssertKeys is what catches a route that grew a field
+// telling the caller what it did — an id, a count, a row — which the reference
+// answers on exactly one route and this is not it.
+func adminAssertSuccess(t *testing.T, env *adminEnv, method, route, body string) {
+	t.Helper()
+	got := adminSend(t, env, method, route, body, http.StatusOK)
+	AssertKeys(t, got, "success")
+	if got["success"] != true {
+		t.Errorf("%s %s = %v, want {\"success\": true}", method, route, got)
+	}
+}
+
+// testAdminWritesGuarded is the read suite's invariant applied to the writes,
+// and it matters more here: a write reached through the reference's
+// Accept: text/html marker branch would not leak the user table, it would empty
+// it. All sixteen are behind AdminGuard.Protect and none behind ProtectShell.
+func testAdminWritesGuarded(t *testing.T, mount Mounter) {
+	env := newAdminEnv(t, mount, adminEnvOptions{
+		admin:   auth.AdminOptions{Enabled: true, AccessPolicy: auth.AdminIsAdminFlag()},
+		options: adminAllStores(),
+	})
+	for _, route := range adminWritePaths {
+		rec := env.Do(env.adminRequest(route.method, route.path, "{}"))
+		AssertError(t, rec, http.StatusUnauthorized, "Unauthorized", "")
+
+		rec = env.Do(adminHTML(env.adminRequest(route.method, route.path, "{}")))
+		AssertError(t, rec, http.StatusUnauthorized, "Unauthorized", "")
+	}
+}
+
+// testAdminWriteMethods pins that the method is part of the route and not a
+// check inside it. Express registers a layer per method, so a path with no layer
+// for the method used falls through the router to its own 404 — never to the
+// handler of the sibling method, and never to a 405 the reference does not send.
+func testAdminWriteMethods(t *testing.T, mount Mounter) {
+	env := newAdminEnv(t, mount, adminEnvOptions{
+		admin:   adminOpenOptions(),
+		seeds:   []adminSeed{{email: "methods@wiretest.example"}},
+		options: adminAllStores(),
+	})
+	unrouted := []adminRoute{
+		// The bulk switch is a POST and has no listing.
+		{http.MethodGet, auth.AdminTwoFAPolicyPath},
+		// The UI patch is a PATCH; the block is read through GET /api/settings.
+		{http.MethodGet, auth.AdminSettingsUIPath},
+		{http.MethodPut, auth.AdminSettingsUIPath},
+		// The user detail is GET and DELETE, and nothing else.
+		{http.MethodPost, auth.AdminUsersPath + "/a-user"},
+		{http.MethodPatch, auth.AdminUsersPath + "/a-user"},
+		// A session handle is only ever deleted.
+		{http.MethodPost, auth.AdminSessionsPath + "/a-session"},
+		// The collection itself is not deletable on any of the three.
+		{http.MethodDelete, auth.AdminUsersPath},
+		{http.MethodDelete, auth.AdminRolesPath},
+		{http.MethodDelete, auth.AdminTenantsPath},
+		// Nothing is registered below the two-parameter patterns.
+		{http.MethodDelete, auth.AdminUsersPath + "/a-user/roles/editor/extra"},
+		{http.MethodDelete, auth.AdminTenantsPath + "/acme/users/a-user/extra"},
+	}
+	for _, route := range unrouted {
+		rec := env.Do(env.adminRequest(route.method, route.path, "{}"))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s = %d, want 404: the reference registers no layer for it",
+				route.method, route.path, rec.Code)
+		}
+	}
+}
+
+// testAdminDeleteUser is DELETE <admin>/api/users/:id (admin.router.ts:803-815),
+// the route with the largest gap between what an operator expects and what the
+// reference does.
+func testAdminDeleteUser(t *testing.T, mount Mounter) {
+	seeds := []adminSeed{{email: "doomed@wiretest.example"}, {email: "keeper@wiretest.example"}}
+
+	t.Run("a store that cannot delete is a bare 501", func(t *testing.T) {
+		env := newAdminEnv(t, mount, adminEnvOptions{
+			admin: adminOpenOptions(), seeds: seeds,
+			wrapUsers: func(m *auth.MemoryUserStore) auth.UserStore {
+				return testAdminUserStore{inner: m}
+			},
+		})
+		body := adminSend(t, env, http.MethodDelete, auth.AdminUsersPath+"/a-user", "",
+			http.StatusNotImplemented)
+		// error alone. Unlike GET /api/users' 501 this carries no page to be
+		// empty, and unlike the guard's it is not a 500 with a sentence.
+		AssertKeys(t, body, "error")
+		if body["error"] != "IUserStore.deleteUser is not implemented" {
+			t.Errorf("error = %v, want the message naming the optional method", body["error"])
+		}
+	})
+
+	t.Run("the row goes and everything attached to it stays", func(t *testing.T) {
+		// This is the reference's own arrangement, stated as a test rather than
+		// improved on. Its DELETE <prefix>/account revokes sessions, strips
+		// roles, leaves tenants and clears metadata before the record goes
+		// (auth.router.ts:1597-1636); this route calls deleteUser and nothing
+		// else, so each of those survives the account it belonged to.
+		rbac := auth.NewMemoryRolesPermissionsStore()
+		tenants := auth.NewMemoryTenantStore()
+		metadata := auth.NewMemoryMetadataStore()
+		sessions := auth.NewMemorySessionStore()
+		ctx := context.Background()
+		if err := rbac.CreateRole(ctx, "editor", []string{"posts:write"}); err != nil {
+			t.Fatalf("seed role: %v", err)
+		}
+		if err := rbac.AddRoleToUser(ctx, "a-user", "editor", ""); err != nil {
+			t.Fatalf("assign role: %v", err)
+		}
+		if _, err := tenants.CreateTenant(ctx, auth.Tenant{ID: "acme", Name: "Acme", IsActive: true}); err != nil {
+			t.Fatalf("seed tenant: %v", err)
+		}
+		if err := tenants.AssociateUserWithTenant(ctx, "a-user", "acme"); err != nil {
+			t.Fatalf("associate: %v", err)
+		}
+		if err := metadata.UpdateMetadata(ctx, "a-user", map[string]any{"plan": "pro"}); err != nil {
+			t.Fatalf("seed metadata: %v", err)
+		}
+		if _, err := sessions.CreateSession(ctx, auth.Session{
+			ID: "s-1", UserID: "a-user", RefreshTokenHash: "hash-1",
+			CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("seed session: %v", err)
+		}
+
+		env := newAdminEnv(t, mount, adminEnvOptions{
+			admin: adminOpenOptions(), seeds: seeds, sessions: sessions,
+			options: []auth.Option{
+				auth.WithRBACProvider(rbac), auth.WithTenantProvider(tenants),
+				auth.WithMetadataProvider(metadata),
+			},
+		})
+
+		adminAssertSuccess(t, env, http.MethodDelete, auth.AdminUsersPath+"/a-user", "")
+
+		// The identity is gone from both routes that resolve one.
+		AssertError(t, env.Do(env.adminRequest(http.MethodGet, auth.AdminUsersPath+"/a-user", "")),
+			http.StatusNotFound, "User not found", "")
+		listed := adminEntries(t, adminGet(t, env, auth.AdminUsersPath, http.StatusOK), "users")
+		if len(listed) != 1 || adminObject(t, listed, 0)["id"] != "b-user" {
+			t.Fatalf("users = %v, want only the user that was not deleted", listed)
+		}
+
+		// And every one of these still answers for an id nothing resolves.
+		if roles := adminEntries(t, adminGet(t, env,
+			auth.AdminUsersPath+"/a-user/roles", http.StatusOK), "roles"); len(roles) != 1 {
+			t.Errorf("roles = %v after the delete, want the orphaned assignment the reference leaves", roles)
+		}
+		if ids := adminEntries(t, adminGet(t, env,
+			auth.AdminUsersPath+"/a-user/tenants", http.StatusOK), "tenantIds"); len(ids) != 1 {
+			t.Errorf("tenantIds = %v after the delete, want the orphaned membership", ids)
+		}
+		if meta := adminGet(t, env,
+			auth.AdminUsersPath+"/a-user/metadata", http.StatusOK); meta["plan"] != "pro" {
+			t.Errorf("metadata = %v after the delete, want the orphaned row", meta)
+		}
+		if all := adminEntries(t, adminGet(t, env,
+			auth.AdminSessionsPath, http.StatusOK), "sessions"); len(all) != 1 {
+			t.Errorf("sessions = %v after the delete, want the session still live", all)
+		}
+	})
+
+	t.Run("a second delete is the store's answer and not the route's", func(t *testing.T) {
+		env := newAdminEnv(t, mount, adminEnvOptions{admin: adminOpenOptions(), seeds: seeds})
+		adminAssertSuccess(t, env, http.MethodDelete, auth.AdminUsersPath+"/a-user", "")
+		// The route is unconditional — it looks nothing up, answers no 404 and
+		// reports nothing about what it did. What a repeat delete gets therefore
+		// depends entirely on the store: the reference's `DELETE … WHERE id = ?`
+		// is a silent no-op and answers 200, and this package's MemoryUserStore
+		// reports not-found, which lands in the route's own 500. Reading a
+		// not-found sentinel here to synthesise success would invent a
+		// distinction the reference's handler does not draw.
+		rec := env.Do(env.adminRequest(http.MethodDelete, auth.AdminUsersPath+"/a-user", ""))
+		AssertError(t, rec, http.StatusInternalServerError, "Internal server error", "")
+	})
+}
+
+// testAdminTwoFAOnlyStore holds the require-2FA writer and not the lister, which
+// is the one deployment that tells the order of the route's two 501s apart.
+type testAdminTwoFAOnlyStore struct{ testAdminUserStore }
+
+func (s testAdminTwoFAOnlyStore) UpdateRequire2FA(ctx context.Context, userID, tenantID string, required bool) error {
+	return s.inner.UpdateRequire2FA(ctx, userID, tenantID, required)
+}
+
+// testAdminTwoFAPolicy is POST <admin>/api/2fa-policy (admin.router.ts:820-852):
+// the walk over the whole user table, its two 501s, and the feature flag it
+// earns.
+func testAdminTwoFAPolicy(t *testing.T, mount Mounter) {
+	seeds := []adminSeed{
+		{email: "one@wiretest.example"},
+		{email: "two@wiretest.example", require2FA: true},
+		{email: "three@wiretest.example"},
+	}
+
+	t.Run("required must be a boolean", func(t *testing.T) {
+		env := newAdminEnv(t, mount, adminEnvOptions{admin: adminOpenOptions(), seeds: seeds})
+		for _, body := range []string{"{}", `{"required":null}`, `{"required":"yes"}`, `{"required":1}`, ""} {
+			rec := env.Do(env.adminRequest(http.MethodPost, auth.AdminTwoFAPolicyPath, body))
+			AssertError(t, rec, http.StatusBadRequest, `"required" must be a boolean`, "")
+		}
+	})
+
+	t.Run("the write capability is asked for before the lister", func(t *testing.T) {
+		// Neither: the message is the *write* one, because the reference tests
+		// updateRequire2FA at :827 and listUsers at :831. A deployment reading
+		// these to decide what to implement is told about the write first.
+		neither := newAdminEnv(t, mount, adminEnvOptions{
+			admin: adminOpenOptions(), seeds: seeds,
+			wrapUsers: func(m *auth.MemoryUserStore) auth.UserStore {
+				return testAdminUserStore{inner: m}
+			},
+		})
+		body := adminSend(t, neither, http.MethodPost, auth.AdminTwoFAPolicyPath,
+			`{"required":true}`, http.StatusNotImplemented)
+		AssertKeys(t, body, "error")
+		if body["error"] != "IUserStore.updateRequire2FA is not implemented" {
+			t.Errorf("error = %v, want the updateRequire2FA message", body["error"])
+		}
+
+		// The writer without the lister is the other 501, and it is the third of
+		// the three distinct answers this codebase gives for a missing listUsers:
+		// bare, with no users and no total, where GET /api/users carries an empty
+		// page (:754) and the guard's 'first-user' arm answers 500 with a
+		// sentence (:377).
+		lister := newAdminEnv(t, mount, adminEnvOptions{
+			admin: adminOpenOptions(), seeds: seeds,
+			wrapUsers: func(m *auth.MemoryUserStore) auth.UserStore {
+				return testAdminTwoFAOnlyStore{testAdminUserStore{inner: m}}
+			},
+		})
+		body = adminSend(t, lister, http.MethodPost, auth.AdminTwoFAPolicyPath,
+			`{"required":true}`, http.StatusNotImplemented)
+		AssertKeys(t, body, "error")
+		if body["error"] != "IUserStore.listUsers is not implemented" {
+			t.Errorf("error = %v, want the listUsers message", body["error"])
+		}
+	})
+
+	t.Run("it walks the whole table and answers a count", func(t *testing.T) {
+		env := newAdminEnv(t, mount, adminEnvOptions{admin: adminOpenOptions(), seeds: seeds})
+
+		body := adminSend(t, env, http.MethodPost, auth.AdminTwoFAPolicyPath,
+			`{"required":true}`, http.StatusOK)
+		AssertKeys(t, body, "success", "updated")
+		if body["success"] != true || body["updated"] != float64(3) {
+			t.Fatalf("body = %v, want every seeded user counted", body)
+		}
+		for _, row := range adminEntries(t, adminGet(t, env, auth.AdminUsersPath, http.StatusOK), "users") {
+			if row.(map[string]any)["require2FA"] != true {
+				t.Errorf("row = %v, want require2FA set on every user", row)
+			}
+		}
+
+		// And back down again, including the user that was already true: the
+		// count is of users listed, not of rows changed (:844).
+		body = adminSend(t, env, http.MethodPost, auth.AdminTwoFAPolicyPath,
+			`{"required":false}`, http.StatusOK)
+		if body["updated"] != float64(3) {
+			t.Errorf("updated = %v, want the listed count and not the changed count", body["updated"])
+		}
+		for _, row := range adminEntries(t, adminGet(t, env, auth.AdminUsersPath, http.StatusOK), "users") {
+			if row.(map[string]any)["require2FA"] != false {
+				t.Errorf("row = %v, want require2FA cleared on every user", row)
+			}
+		}
+	})
+
+	t.Run("it pages past the batch size", func(t *testing.T) {
+		// 101 users over a batch of 100: the first page is full so the walk
+		// advances the offset, the second is short so it stops. A walk that read
+		// the first page only would report 100, and one that never advanced would
+		// not terminate.
+		many := make([]adminSeed, 0, 101)
+		for i := 0; i < 101; i++ {
+			many = append(many, adminSeed{email: "bulk" + strconv.Itoa(i) + "@wiretest.example"})
+		}
+		env := newAdminEnv(t, mount, adminEnvOptions{admin: adminOpenOptions(), seeds: many})
+		body := adminSend(t, env, http.MethodPost, auth.AdminTwoFAPolicyPath,
+			`{"required":true}`, http.StatusOK)
+		if body["updated"] != float64(101) {
+			t.Errorf("updated = %v, want 101 — a full page of 100 then a short page of 1", body["updated"])
+		}
+	})
+
+	t.Run("an empty table is success and nothing updated", func(t *testing.T) {
+		env := newAdminEnv(t, mount, adminEnvOptions{admin: adminOpenOptions()})
+		body := adminSend(t, env, http.MethodPost, auth.AdminTwoFAPolicyPath,
+			`{"required":true}`, http.StatusOK)
+		AssertKeys(t, body, "success", "updated")
+		if body["success"] != true || body["updated"] != float64(0) {
+			t.Errorf("body = %v, want the empty-page break before anything is counted", body)
+		}
+	})
+
+	t.Run("the feature flag is the two capabilities together", func(t *testing.T) {
+		// `featTwoFAPolicy = updateRequire2FA && listUsers` (:649-650). It is the
+		// one flag in the set that is not `!!store`, and it is the flag U12 left
+		// hard-coded false for this PR to earn.
+		full := newAdminEnv(t, mount, adminEnvOptions{admin: adminOpenOptions(), seeds: seeds})
+		features := Body(t, full.Do(full.adminRequest(http.MethodGet, auth.AdminPingPath, "")))["features"]
+		if features.(map[string]any)["twoFAPolicy"] != true {
+			t.Errorf("twoFAPolicy = %v for a store with both methods, want true", features)
+		}
+
+		narrow := newAdminEnv(t, mount, adminEnvOptions{
+			admin: adminOpenOptions(), seeds: seeds,
+			wrapUsers: func(m *auth.MemoryUserStore) auth.UserStore {
+				return testAdminTwoFAOnlyStore{testAdminUserStore{inner: m}}
+			},
+		})
+		features = Body(t, narrow.Do(narrow.adminRequest(http.MethodGet, auth.AdminPingPath, "")))["features"]
+		if features.(map[string]any)["twoFAPolicy"] != false {
+			t.Errorf("twoFAPolicy = %v for a store that cannot list, want false", features)
+		}
+	})
+}
+
+// testAdminWriteMetadata is PUT <admin>/api/users/:id/metadata
+// (admin.router.ts:866-878): a PUT that merges, because the method it delegates
+// to is specified as a shallow patch.
+func testAdminWriteMetadata(t *testing.T, mount Mounter) {
+	seeds := []adminSeed{{email: "meta@wiretest.example"}}
+
+	t.Run("no store is 404", func(t *testing.T) {
+		env := newAdminEnv(t, mount, adminEnvOptions{admin: adminOpenOptions(), seeds: seeds})
+		AssertError(t, env.Do(env.adminRequest(http.MethodPut,
+			auth.AdminUsersPath+"/a-user/metadata", `{"plan":"pro"}`)),
+			http.StatusNotFound, "User metadata store not configured", "")
+	})
+
+	store := auth.NewMemoryMetadataStore()
+	if err := store.UpdateMetadata(context.Background(), "a-user",
+		map[string]any{"plan": "pro", "seats": float64(3)}); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+	env := newAdminEnv(t, mount, adminEnvOptions{
+		admin: adminOpenOptions(), seeds: seeds,
+		options: []auth.Option{auth.WithMetadataProvider(store)},
+	})
+
+	t.Run("it merges and never replaces", func(t *testing.T) {
+		// IUserMetadataStore.updateMetadata is specified as "Merge
+		// (shallow-patch) … Fields not present in `metadata` are left untouched"
+		// (user-metadata-store.interface.ts:40-44), and the route hands the whole
+		// body to it. So the seats key survives a body that does not name it, and
+		// there is no way through this route to remove a key.
+		adminAssertSuccess(t, env, http.MethodPut,
+			auth.AdminUsersPath+"/a-user/metadata", `{"plan":"team"}`)
+		body := adminGet(t, env, auth.AdminUsersPath+"/a-user/metadata", http.StatusOK)
+		AssertKeys(t, body, "plan", "seats")
+		if body["plan"] != "team" || body["seats"] != float64(3) {
+			t.Errorf("metadata = %v, want the patched key and the untouched one", body)
+		}
+
+		// An empty body is an empty patch, which is a no-op that still succeeds.
+		adminAssertSuccess(t, env, http.MethodPut, auth.AdminUsersPath+"/a-user/metadata", "{}")
+		AssertKeys(t, adminGet(t, env, auth.AdminUsersPath+"/a-user/metadata", http.StatusOK),
+			"plan", "seats")
+	})
+
+	t.Run("an unknown id is written and not refused", func(t *testing.T) {
+		// The route neither loads the user nor 404s for one: metadata is keyed by
+		// id alone, as the read beside it is.
+		adminAssertSuccess(t, env, http.MethodPut,
+			auth.AdminUsersPath+"/nobody/metadata", `{"orphan":true}`)
+		if body := adminGet(t, env, auth.AdminUsersPath+"/nobody/metadata",
+			http.StatusOK); body["orphan"] != true {
+			t.Errorf("metadata = %v, want the row the write created", body)
+		}
+	})
+}
+
+// testAdminWriteUserRoles is the assignment pair: POST
+// <admin>/api/users/:id/roles (admin.router.ts:904-914) and its delete
+// (:917-928).
+func testAdminWriteUserRoles(t *testing.T, mount Mounter) {
+	seeds := []adminSeed{{email: "roles@wiretest.example"}}
+	roleRoute := auth.AdminUsersPath + "/a-user/roles"
+
+	t.Run("no store is 404 on both", func(t *testing.T) {
+		env := newAdminEnv(t, mount, adminEnvOptions{admin: adminOpenOptions(), seeds: seeds})
+		AssertError(t, env.Do(env.adminRequest(http.MethodPost, roleRoute, `{"role":"editor"}`)),
+			http.StatusNotFound, "RBAC store not configured", "")
+		AssertError(t, env.Do(env.adminRequest(http.MethodDelete, roleRoute+"/editor", "")),
+			http.StatusNotFound, "RBAC store not configured", "")
+	})
+
+	newEnv := func(t *testing.T) *adminEnv {
+		t.Helper()
+		store := auth.NewMemoryRolesPermissionsStore()
+		ctx := context.Background()
+		for _, role := range []string{"editor", "billing/admin", " "} {
+			if err := store.CreateRole(ctx, role, nil); err != nil {
+				t.Fatalf("seed role %q: %v", role, err)
+			}
+		}
+		return newAdminEnv(t, mount, adminEnvOptions{
+			admin: adminOpenOptions(), seeds: seeds,
+			options: []auth.Option{auth.WithRBACProvider(store)},
+		})
+	}
+
+	t.Run("role is required and is not trimmed", func(t *testing.T) {
+		env := newEnv(t)
+		for _, body := range []string{"{}", `{"role":""}`, `{"tenantId":"acme"}`, ""} {
+			AssertError(t, env.Do(env.adminRequest(http.MethodPost, roleRoute, body)),
+				http.StatusBadRequest, "role is required", "")
+		}
+		// `if (!role)` refuses "" and accepts " ": a role named by a single space
+		// is assigned on both sides, and nothing here trims it into the refusal.
+		adminAssertSuccess(t, env, http.MethodPost, roleRoute, `{"role":" "}`)
+	})
+
+	t.Run("the assignment round-trips", func(t *testing.T) {
+		env := newEnv(t)
+		adminAssertSuccess(t, env, http.MethodPost, roleRoute, `{"role":"editor"}`)
+		roles := adminEntries(t, adminGet(t, env, roleRoute, http.StatusOK), "roles")
+		if len(roles) != 1 || roles[0] != "editor" {
+			t.Fatalf("roles = %v, want the assignment the post made", roles)
+		}
+		adminAssertSuccess(t, env, http.MethodDelete, roleRoute+"/editor", "")
+		if roles := adminEntries(t, adminGet(t, env, roleRoute, http.StatusOK), "roles"); len(roles) != 0 {
+			t.Errorf("roles = %v after the delete, want []", roles)
+		}
+		// The delete looks nothing up: removing it again is success.
+		adminAssertSuccess(t, env, http.MethodDelete, roleRoute+"/editor", "")
+	})
+
+	t.Run("tenantId comes off the body and the read carries none", func(t *testing.T) {
+		// The post takes tenantId from the body (:907) and the read beside it
+		// calls getRolesForUser(id) with no tenant at all (:896), so a tenanted
+		// assignment is invisible to the route that lists it. That is the
+		// reference's own arrangement, and reproducing it keeps each route
+		// agreeing with its counterpart rather than with its neighbour.
+		env := newEnv(t)
+		adminAssertSuccess(t, env, http.MethodPost, roleRoute, `{"role":"editor","tenantId":"acme"}`)
+		if roles := adminEntries(t, adminGet(t, env, roleRoute, http.StatusOK), "roles"); len(roles) != 0 {
+			t.Errorf("roles = %v, want [] — the read carries no tenant", roles)
+		}
+	})
+
+	t.Run("the role name is decoded twice", func(t *testing.T) {
+		// Express decoded the captured parameter already and the handler calls
+		// decodeURIComponent on it again (:922), so a role whose name holds a
+		// slash is addressed by double-encoding it. A single decode here would
+		// split the path and make the role unremovable.
+		env := newEnv(t)
+		adminAssertSuccess(t, env, http.MethodPost, roleRoute, `{"role":"billing/admin"}`)
+		adminAssertSuccess(t, env, http.MethodDelete, roleRoute+"/billing%252Fadmin", "")
+		if roles := adminEntries(t, adminGet(t, env, roleRoute, http.StatusOK), "roles"); len(roles) != 0 {
+			t.Errorf("roles = %v, want the double-encoded name to have addressed it", roles)
+		}
+	})
+}
+
+// testAdminWriteSettings is the pair whose division of labour is the point: PUT
+// <admin>/api/settings (admin.router.ts:962-971) writes the patch as it stands,
+// and PATCH <admin>/api/settings/ui (:974-987) merges the UI sub-object itself
+// because the store's merge is shallow and would replace it whole.
+func testAdminWriteSettings(t *testing.T, mount Mounter) {
+	t.Run("no store is 404 on both", func(t *testing.T) {
+		env := newAdminEnv(t, mount, adminEnvOptions{admin: adminOpenOptions()})
+		AssertError(t, env.Do(env.adminRequest(http.MethodPut, auth.AdminSettingsPath, "{}")),
+			http.StatusNotFound, "Settings store not configured", "")
+		AssertError(t, env.Do(env.adminRequest(http.MethodPatch, auth.AdminSettingsUIPath, "{}")),
+			http.StatusNotFound, "Settings store not configured", "")
+	})
+
+	newEnv := func(t *testing.T) *adminEnv {
+		t.Helper()
+		return newAdminEnv(t, mount, adminEnvOptions{
+			admin:   adminOpenOptions(),
+			options: []auth.Option{auth.WithSettingsStore(auth.NewMemorySettingsStore())},
+		})
+	}
+
+	t.Run("the put is a shallow merge over what is stored", func(t *testing.T) {
+		env := newEnv(t)
+		adminAssertSuccess(t, env, http.MethodPut, auth.AdminSettingsPath,
+			`{"require2FA":true,"emailVerificationMode":"strict"}`)
+		// A field the second patch does not carry is left as stored.
+		adminAssertSuccess(t, env, http.MethodPut, auth.AdminSettingsPath,
+			`{"enabledWebhookActions":["a"]}`)
+		body := adminGet(t, env, auth.AdminSettingsPath, http.StatusOK)
+		AssertKeys(t, body, "require2FA", "emailVerificationMode", "enabledWebhookActions")
+		if body["require2FA"] != true || body["emailVerificationMode"] != "strict" {
+			t.Errorf("settings = %v, want the first patch preserved", body)
+		}
+	})
+
+	t.Run("the put replaces the ui block whole", func(t *testing.T) {
+		// `ui` is one field of the patch and MergeSettings is a shallow spread,
+		// so a put carrying it drops the seven fields it does not name. That is
+		// what the patch route below exists for, and a store that merged here
+		// would make that route pointless.
+		env := newEnv(t)
+		adminAssertSuccess(t, env, http.MethodPut, auth.AdminSettingsPath,
+			`{"ui":{"primaryColor":"#111","siteName":"Acme"}}`)
+		adminAssertSuccess(t, env, http.MethodPut, auth.AdminSettingsPath,
+			`{"ui":{"primaryColor":"#222"}}`)
+		ui, ok := adminGet(t, env, auth.AdminSettingsPath, http.StatusOK)["ui"].(map[string]any)
+		if !ok {
+			t.Fatal("ui is missing from the stored settings")
+		}
+		AssertKeys(t, ui, "primaryColor")
+		if ui["primaryColor"] != "#222" {
+			t.Errorf("ui = %v, want the second block and nothing of the first", ui)
+		}
+	})
+
+	t.Run("the patch merges the ui block itself", func(t *testing.T) {
+		// Read current, spread the patch over the stored ui, send the merged
+		// block back down (:979-981). The merge is the route's and not the
+		// store's, which is why one colour can be changed without naming the
+		// other seven.
+		env := newEnv(t)
+		adminAssertSuccess(t, env, http.MethodPut, auth.AdminSettingsPath,
+			`{"require2FA":true,"ui":{"primaryColor":"#111","siteName":"Acme","bgColor":"#fff"}}`)
+		adminAssertSuccess(t, env, http.MethodPatch, auth.AdminSettingsUIPath,
+			`{"primaryColor":"#222","logoUrl":"/logo.png"}`)
+
+		body := adminGet(t, env, auth.AdminSettingsPath, http.StatusOK)
+		// The rest of the settings are untouched: the patch writes only ui.
+		AssertKeys(t, body, "require2FA", "ui")
+		ui := body["ui"].(map[string]any)
+		AssertKeys(t, ui, "primaryColor", "siteName", "bgColor", "logoUrl")
+		if ui["primaryColor"] != "#222" || ui["siteName"] != "Acme" ||
+			ui["bgColor"] != "#fff" || ui["logoUrl"] != "/logo.png" {
+			t.Errorf("ui = %v, want the patched fields over the stored ones", ui)
+		}
+	})
+
+	t.Run("the patch always writes a block", func(t *testing.T) {
+		// `{...(current.ui || {}), ...uiPatch}` is an object in every case, so a
+		// patch with an empty body over a deployment that stored no branding
+		// stores an empty one.
+		env := newEnv(t)
+		adminAssertSuccess(t, env, http.MethodPatch, auth.AdminSettingsUIPath, "{}")
+		body := adminGet(t, env, auth.AdminSettingsPath, http.StatusOK)
+		AssertKeys(t, body, "ui")
+		AssertKeys(t, body["ui"].(map[string]any))
+	})
+}
+
+// testAdminWriteSessions is DELETE <admin>/api/sessions/:handle
+// (admin.router.ts:1116-1124).
+func testAdminWriteSessions(t *testing.T, mount Mounter) {
+	sessions := auth.NewMemorySessionStore()
+	if _, err := sessions.CreateSession(context.Background(), auth.Session{
+		ID: "s-1", UserID: "a-user", RefreshTokenHash: "hash-1",
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	env := newAdminEnv(t, mount, adminEnvOptions{
+		admin:    adminOpenOptions(),
+		seeds:    []adminSeed{{email: "sessions@wiretest.example"}},
+		sessions: sessions,
+	})
+
+	// The handle is the sessionHandle the listing hands the console.
+	handle := adminObject(t, adminEntries(t,
+		adminGet(t, env, auth.AdminSessionsPath, http.StatusOK), "sessions"), 0)["sessionHandle"]
+	if handle != "s-1" {
+		t.Fatalf("sessionHandle = %v, want the seeded id", handle)
+	}
+	adminAssertSuccess(t, env, http.MethodDelete, auth.AdminSessionsPath+"/s-1", "")
+
+	// The reference's `!options.sessionStore` 404 has no counterpart here —
+	// NewService requires a session store — and there is no 501 either, because
+	// revokeSession is a required method of its ISessionStore. An unknown handle
+	// is therefore whatever the store makes of it, which for this package's
+	// tombstoning store is the route's own 500; see the note in
+	// testAdminDeleteUser on why no sentinel is read to smooth that over.
+	AssertError(t, env.Do(env.adminRequest(http.MethodDelete, auth.AdminSessionsPath+"/nobody", "")),
+		http.StatusInternalServerError, "Internal server error", "")
+}
+
+// testAdminWriteRoles is POST <admin>/api/roles (admin.router.ts:1150-1160) and
+// DELETE <admin>/api/roles/:name (:1163-1171).
+func testAdminWriteRoles(t *testing.T, mount Mounter) {
+	t.Run("no store is 404 on both", func(t *testing.T) {
+		env := newAdminEnv(t, mount, adminEnvOptions{admin: adminOpenOptions()})
+		AssertError(t, env.Do(env.adminRequest(http.MethodPost, auth.AdminRolesPath, `{"name":"editor"}`)),
+			http.StatusNotFound, "RBAC store not configured", "")
+		AssertError(t, env.Do(env.adminRequest(http.MethodDelete, auth.AdminRolesPath+"/editor", "")),
+			http.StatusNotFound, "RBAC store not configured", "")
+	})
+
+	newEnv := func(t *testing.T) *adminEnv {
+		t.Helper()
+		return newAdminEnv(t, mount, adminEnvOptions{
+			admin:   adminOpenOptions(),
+			options: []auth.Option{auth.WithRBACProvider(auth.NewMemoryRolesPermissionsStore())},
+		})
+	}
+
+	t.Run("name is required", func(t *testing.T) {
+		env := newEnv(t)
+		for _, body := range []string{"{}", `{"name":""}`, `{"permissions":["a"]}`, ""} {
+			AssertError(t, env.Do(env.adminRequest(http.MethodPost, auth.AdminRolesPath, body)),
+				http.StatusBadRequest, "name is required", "")
+		}
+	})
+
+	t.Run("create, overwrite and delete", func(t *testing.T) {
+		env := newEnv(t)
+		adminAssertSuccess(t, env, http.MethodPost, auth.AdminRolesPath,
+			`{"name":"editor","permissions":["posts:write","posts:read"]}`)
+		// permissions is optional, and a role with none is still a role.
+		adminAssertSuccess(t, env, http.MethodPost, auth.AdminRolesPath, `{"name":"auditor"}`)
+
+		entries := adminEntries(t, adminGet(t, env, auth.AdminRolesPath, http.StatusOK), "roles")
+		if len(entries) != 2 {
+			t.Fatalf("roles = %v, want both", entries)
+		}
+		auditor := adminObject(t, entries, 0)
+		if auditor["name"] != "auditor" || len(adminEntries(t, auditor, "permissions")) != 0 {
+			t.Errorf("role = %v, want auditor with []", auditor)
+		}
+		if got := len(adminEntries(t, adminObject(t, entries, 1), "permissions")); got != 2 {
+			t.Errorf("editor has %d permissions, want 2", got)
+		}
+
+		// There is no existence check and no second route: a repeat post is how
+		// the console edits a role, and the permission set is replaced.
+		adminAssertSuccess(t, env, http.MethodPost, auth.AdminRolesPath,
+			`{"name":"editor","permissions":["posts:read"]}`)
+		entries = adminEntries(t, adminGet(t, env, auth.AdminRolesPath, http.StatusOK), "roles")
+		if got := len(adminEntries(t, adminObject(t, entries, 1), "permissions")); got != 1 {
+			t.Errorf("editor has %d permissions after the overwrite, want 1", got)
+		}
+
+		adminAssertSuccess(t, env, http.MethodDelete, auth.AdminRolesPath+"/editor", "")
+		entries = adminEntries(t, adminGet(t, env, auth.AdminRolesPath, http.StatusOK), "roles")
+		if len(entries) != 1 || adminObject(t, entries, 0)["name"] != "auditor" {
+			t.Errorf("roles = %v after the delete, want only auditor", entries)
+		}
+		// Deleting a role that is not there is success, as every delete here is.
+		adminAssertSuccess(t, env, http.MethodDelete, auth.AdminRolesPath+"/editor", "")
+	})
+
+	t.Run("the name is decoded twice", func(t *testing.T) {
+		env := newEnv(t)
+		adminAssertSuccess(t, env, http.MethodPost, auth.AdminRolesPath, `{"name":"billing/admin"}`)
+		adminAssertSuccess(t, env, http.MethodDelete, auth.AdminRolesPath+"/billing%252Fadmin", "")
+		if entries := adminEntries(t, adminGet(t, env, auth.AdminRolesPath, http.StatusOK),
+			"roles"); len(entries) != 0 {
+			t.Errorf("roles = %v, want the double-encoded name to have addressed it", entries)
+		}
+	})
+}
+
+// testAdminWriteTenants is the four tenant writes: POST <admin>/api/tenants
+// (admin.router.ts:1187-1197), its delete (:1200-1208), and the membership pair
+// (:1224-1248).
+func testAdminWriteTenants(t *testing.T, mount Mounter) {
+	t.Run("no store is 404 on all four", func(t *testing.T) {
+		env := newAdminEnv(t, mount, adminEnvOptions{admin: adminOpenOptions()})
+		for _, route := range []adminRoute{
+			{http.MethodPost, auth.AdminTenantsPath},
+			{http.MethodDelete, auth.AdminTenantsPath + "/acme"},
+			{http.MethodPost, auth.AdminTenantsPath + "/acme/users"},
+			{http.MethodDelete, auth.AdminTenantsPath + "/acme/users/a-user"},
+		} {
+			AssertError(t, env.Do(env.adminRequest(route.method, route.path, `{"name":"Acme","userId":"a-user"}`)),
+				http.StatusNotFound, "Tenant store not configured", "")
+		}
+	})
+
+	newEnv := func(t *testing.T, store *auth.MemoryTenantStore) *adminEnv {
+		t.Helper()
+		return newAdminEnv(t, mount, adminEnvOptions{
+			admin:   adminOpenOptions(),
+			seeds:   []adminSeed{{email: "tenants@wiretest.example"}},
+			options: []auth.Option{auth.WithTenantProvider(store)},
+		})
+	}
+
+	t.Run("name is required", func(t *testing.T) {
+		env := newEnv(t, auth.NewMemoryTenantStore())
+		for _, body := range []string{"{}", `{"name":""}`, `{"isActive":true}`, ""} {
+			AssertError(t, env.Do(env.adminRequest(http.MethodPost, auth.AdminTenantsPath, body)),
+				http.StatusBadRequest, "name is required", "")
+		}
+	})
+
+	t.Run("the create answers the row and not a success flag", func(t *testing.T) {
+		// `res.json({ tenant })` (:1193). It is the one write in this file whose
+		// body says what happened, and the SPA needs it: the id it reports is the
+		// only way a caller learns what the tenant it just made is called.
+		env := newEnv(t, auth.NewMemoryTenantStore())
+		body := adminSend(t, env, http.MethodPost, auth.AdminTenantsPath, `{"name":"Acme"}`, http.StatusOK)
+		AssertKeys(t, body, "tenant")
+		tenant := body["tenant"].(map[string]any)
+		AssertKeys(t, tenant, "id", "name", "isActive", "createdAt")
+		if tenant["name"] != "Acme" {
+			t.Errorf("tenant = %v, want the posted name", tenant)
+		}
+		// `isActive ?? true` (:1192): absent and null are both true.
+		if tenant["isActive"] != true {
+			t.Errorf("isActive = %v with none given, want the ?? true default", tenant["isActive"])
+		}
+		id, _ := tenant["id"].(string)
+		if id == "" {
+			t.Fatal("the created tenant carries no id")
+		}
+		// And it is in the listing under that id.
+		listed := adminEntries(t, adminGet(t, env, auth.AdminTenantsPath, http.StatusOK), "tenants")
+		if len(listed) != 1 || adminObject(t, listed, 0)["id"] != id {
+			t.Errorf("tenants = %v, want the created row", listed)
+		}
+
+		// Only an explicit false is false.
+		off := adminSend(t, env, http.MethodPost, auth.AdminTenantsPath,
+			`{"name":"Globex","isActive":false}`, http.StatusOK)
+		if off["tenant"].(map[string]any)["isActive"] != false {
+			t.Errorf("tenant = %v, want the explicit false honoured", off["tenant"])
+		}
+		null := adminSend(t, env, http.MethodPost, auth.AdminTenantsPath,
+			`{"name":"Initech","isActive":null}`, http.StatusOK)
+		if null["tenant"].(map[string]any)["isActive"] != true {
+			t.Errorf("tenant = %v, want null to take the ?? true default", null["tenant"])
+		}
+	})
+
+	t.Run("membership round-trips and both deletes are unconditional", func(t *testing.T) {
+		store := auth.NewMemoryTenantStore()
+		if _, err := store.CreateTenant(context.Background(),
+			auth.Tenant{ID: "acme", Name: "Acme", IsActive: true}); err != nil {
+			t.Fatalf("seed tenant: %v", err)
+		}
+		env := newEnv(t, store)
+		members := auth.AdminTenantsPath + "/acme/users"
+
+		for _, body := range []string{"{}", `{"userId":""}`, ""} {
+			AssertError(t, env.Do(env.adminRequest(http.MethodPost, members, body)),
+				http.StatusBadRequest, "userId is required", "")
+		}
+
+		adminAssertSuccess(t, env, http.MethodPost, members, `{"userId":"a-user"}`)
+		if ids := adminEntries(t, adminGet(t, env, members, http.StatusOK), "userIds"); len(ids) != 1 {
+			t.Fatalf("userIds = %v, want the membership the post made", ids)
+		}
+		adminAssertSuccess(t, env, http.MethodDelete, members+"/a-user", "")
+		if ids := adminEntries(t, adminGet(t, env, members, http.StatusOK), "userIds"); len(ids) != 0 {
+			t.Errorf("userIds = %v after the delete, want []", ids)
+		}
+		// Neither delete looks anything up.
+		adminAssertSuccess(t, env, http.MethodDelete, members+"/a-user", "")
+		adminAssertSuccess(t, env, http.MethodDelete, auth.AdminTenantsPath+"/acme", "")
+		adminAssertSuccess(t, env, http.MethodDelete, auth.AdminTenantsPath+"/acme", "")
+		if listed := adminEntries(t, adminGet(t, env, auth.AdminTenantsPath, http.StatusOK),
+			"tenants"); len(listed) != 0 {
+			t.Errorf("tenants = %v after the delete, want []", listed)
+		}
+	})
+
+	t.Run("the tenant id is decoded twice on every route of the family", func(t *testing.T) {
+		// U13 found the second decodeURIComponent on GET /api/tenants/:id/users
+		// (:1216); the two membership writes and the tenant delete do the same
+		// (:1229, :1242, :1203), so a tenant whose id holds a slash is addressed
+		// by double-encoding it everywhere it is addressed at all.
+		store := auth.NewMemoryTenantStore()
+		if _, err := store.CreateTenant(context.Background(),
+			auth.Tenant{ID: "eu/acme", Name: "Acme EU", IsActive: true}); err != nil {
+			t.Fatalf("seed tenant: %v", err)
+		}
+		env := newEnv(t, store)
+		encoded := auth.AdminTenantsPath + "/eu%252Facme"
+
+		adminAssertSuccess(t, env, http.MethodPost, encoded+"/users", `{"userId":"a-user"}`)
+		if ids := adminEntries(t, adminGet(t, env, encoded+"/users", http.StatusOK), "userIds"); len(ids) != 1 {
+			t.Fatalf("userIds = %v, want the double-encoded id to have addressed the tenant", ids)
+		}
+		adminAssertSuccess(t, env, http.MethodDelete, encoded+"/users/a-user", "")
+		if ids := adminEntries(t, adminGet(t, env, encoded+"/users", http.StatusOK), "userIds"); len(ids) != 0 {
+			t.Errorf("userIds = %v after the delete, want []", ids)
+		}
+		adminAssertSuccess(t, env, http.MethodDelete, encoded, "")
+		if listed := adminEntries(t, adminGet(t, env, auth.AdminTenantsPath, http.StatusOK),
+			"tenants"); len(listed) != 0 {
+			t.Errorf("tenants = %v, want the double-encoded id to have deleted it", listed)
+		}
+	})
+}
+
+// testAdminWriteTemplates is POST <admin>/api/templates/mail
+// (admin.router.ts:1458-1467) and POST <admin>/api/templates/ui (:1480-1489).
+func testAdminWriteTemplates(t *testing.T, mount Mounter) {
+	t.Run("without a store the routes do not exist", func(t *testing.T) {
+		// Both writes are inside the same `if (featTemplates &&
+		// options.templateStore)` block as the two listings (:1444), so a
+		// deployment with no template store has no route rather than a guarded
+		// one. The policy is session-based so that Express's 404 and the guard's
+		// 401 are distinguishable.
+		env := newAdminEnv(t, mount, adminEnvOptions{
+			admin: auth.AdminOptions{Enabled: true, AccessPolicy: auth.AdminIsAdminFlag()},
+		})
+		for _, route := range []string{auth.AdminMailTemplatesPath, auth.AdminUITemplatesPath} {
+			rec := env.Do(env.adminRequest(http.MethodPost, route, `{"id":"x","page":"x","translations":{}}`))
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("POST %s = %d without a template store, want 404: the route is not registered",
+					route, rec.Code)
+			}
+		}
+	})
+
+	newEnv := func(t *testing.T) *adminEnv {
+		t.Helper()
+		return newAdminEnv(t, mount, adminEnvOptions{
+			admin:   adminOpenOptions(),
+			options: []auth.Option{auth.WithTemplateStore(auth.NewMemoryTemplateStore())},
+		})
+	}
+
+	t.Run("mail: id is required", func(t *testing.T) {
+		env := newEnv(t)
+		for _, body := range []string{"{}", `{"id":""}`, `{"baseHtml":"<p/>"}`, ""} {
+			AssertError(t, env.Do(env.adminRequest(http.MethodPost, auth.AdminMailTemplatesPath, body)),
+				http.StatusBadRequest, "id is required", "")
+		}
+	})
+
+	t.Run("mail: the patch is not partial", func(t *testing.T) {
+		// The handler rebuilds `{ baseHtml, baseText, translations }` out of the
+		// body (:1462), and that literal carries all three keys whatever the body
+		// held — with the value undefined where it held nothing. The store
+		// spreads it over the existing record (memory-template.store.ts:22), and
+		// a spread copies a key holding undefined like any other. So a post
+		// naming only an id blanks the stored bodies and translations.
+		env := newEnv(t)
+		adminAssertSuccess(t, env, http.MethodPost, auth.AdminMailTemplatesPath,
+			`{"id":"password-reset","baseHtml":"<p>{{T.body}}</p>","baseText":"body",`+
+				`"translations":{"en":{"subject":"Reset"}}}`)
+		entry := adminObject(t, adminEntries(t,
+			adminGet(t, env, auth.AdminMailTemplatesPath, http.StatusOK), "templates"), 0)
+		if entry["baseHtml"] != "<p>{{T.body}}</p>" || entry["baseText"] != "body" {
+			t.Fatalf("template = %v, want the posted bodies", entry)
+		}
+
+		adminAssertSuccess(t, env, http.MethodPost, auth.AdminMailTemplatesPath,
+			`{"id":"password-reset"}`)
+		entry = adminObject(t, adminEntries(t,
+			adminGet(t, env, auth.AdminMailTemplatesPath, http.StatusOK), "templates"), 0)
+		AssertKeys(t, entry, "id", "baseHtml", "baseText", "translations")
+		if entry["baseHtml"] != "" || entry["baseText"] != "" {
+			t.Errorf("template = %v, want the bodies blanked — this route replaces, it does not patch", entry)
+		}
+		if len(entry["translations"].(map[string]any)) != 0 {
+			t.Errorf("translations = %v, want them blanked too", entry["translations"])
+		}
+	})
+
+	t.Run("ui: page and translations are both required", func(t *testing.T) {
+		env := newEnv(t)
+		for _, body := range []string{
+			"{}", `{"page":"login"}`, `{"translations":{"en":{"title":"Sign in"}}}`,
+			`{"page":"","translations":{}}`, `{"page":"login","translations":null}`, "",
+		} {
+			AssertError(t, env.Do(env.adminRequest(http.MethodPost, auth.AdminUITemplatesPath, body)),
+				http.StatusBadRequest, "page and translations are required", "")
+		}
+	})
+
+	t.Run("ui: it replaces the page whole", func(t *testing.T) {
+		env := newEnv(t)
+		adminAssertSuccess(t, env, http.MethodPost, auth.AdminUITemplatesPath,
+			`{"page":"login","translations":{"en":{"title":"Sign in"},"it":{"title":"Accedi"}}}`)
+		entry := adminObject(t, adminEntries(t,
+			adminGet(t, env, auth.AdminUITemplatesPath, http.StatusOK), "translations"), 0)
+		if len(entry["translations"].(map[string]any)) != 2 {
+			t.Fatalf("translations = %v, want both languages", entry["translations"])
+		}
+
+		// updateUiTranslations sets {page, translations} (memory-template.store.ts:34),
+		// so a language the body does not name is dropped.
+		adminAssertSuccess(t, env, http.MethodPost, auth.AdminUITemplatesPath,
+			`{"page":"login","translations":{"en":{"title":"Log in"}}}`)
+		entry = adminObject(t, adminEntries(t,
+			adminGet(t, env, auth.AdminUITemplatesPath, http.StatusOK), "translations"), 0)
+		languages := entry["translations"].(map[string]any)
+		if len(languages) != 1 || languages["en"].(map[string]any)["title"] != "Log in" {
+			t.Errorf("translations = %v, want the page replaced and not merged", languages)
+		}
+
+		// `{}` is truthy in JavaScript, so an empty map is accepted and clears
+		// the page rather than being refused by the required check above.
+		adminAssertSuccess(t, env, http.MethodPost, auth.AdminUITemplatesPath,
+			`{"page":"login","translations":{}}`)
+		entry = adminObject(t, adminEntries(t,
+			adminGet(t, env, auth.AdminUITemplatesPath, http.StatusOK), "translations"), 0)
+		if len(entry["translations"].(map[string]any)) != 0 {
+			t.Errorf("translations = %v, want the page cleared", entry["translations"])
 		}
 	})
 }
